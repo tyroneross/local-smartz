@@ -10,12 +10,18 @@ PROFILES = {
         "execution_model": "qwen2.5-coder:32b-instruct-q5_K_M",
         "agents": ["planner", "researcher", "analyzer", "writer", "reviewer"],
         "max_concurrent_agents": 2,
+        "max_turns": 20,
+        "quality_review": True,
+        "subagent_delegation": True,
     },
     "lite": {
         "planning_model": "qwen3:8b-q4_K_M",
         "execution_model": "qwen3:8b-q4_K_M",
         "agents": ["planner", "researcher", "analyzer", "writer"],
         "max_concurrent_agents": 1,
+        "max_turns": 10,
+        "quality_review": False,
+        "subagent_delegation": False,
     },
 }
 

@@ -37,8 +37,20 @@ ALL_TOOLS = [
     create_spreadsheet,
 ]
 
+# Lite profile: curated subset — fewer tools = fewer hallucinated tool names.
+# Excludes parse_pdf, read_spreadsheet, create_spreadsheet (complex schemas).
+# DeepAgents still adds write_todos, write_file, read_file automatically.
+# task (subagent) tool is NOT added for lite — 8B models can't delegate effectively.
+LITE_TOOLS = [
+    web_search,
+    scrape_url,
+    read_text_file,
+    python_exec,
+    create_report,
+]
 
-SYSTEM_PROMPT = """\
+
+SYSTEM_PROMPT_FULL = """\
 You are Local Smartz, a local-first research assistant running entirely on local hardware via Ollama. You have access to web search, document processing, computation, and report generation tools — plus built-in planning, filesystem, and subagent capabilities.
 
 ## How to Approach Research
@@ -110,6 +122,65 @@ When producing a final report:
 """
 
 
+SYSTEM_PROMPT_LITE = """\
+You are Local Smartz, a local-first research assistant. You answer questions using tools.
+
+## RULES — Follow exactly
+
+1. Call ONE tool per turn. Wait for the result before calling another tool.
+2. Follow these steps IN ORDER for every question:
+   - Step 1: Plan — use write_todos to list 2-4 specific actions
+   - Step 2: Search — use web_search with a simple, specific query
+   - Step 3: Read — use scrape_url on the best result URL
+   - Step 4: Calculate — use python_exec if any math is needed
+   - Step 5: Answer — write your final answer directly, or use create_report for long answers
+3. Never guess numbers. Use python_exec for ALL math.
+4. If a tool fails, try once more with simpler input. If it fails again, skip it and use what you have.
+
+## Available Tools
+
+| Tool | What it does | Example input |
+|------|-------------|---------------|
+| web_search | Search the web | query="renewable energy trends 2026" |
+| scrape_url | Get content from a URL | url="https://example.com/article" |
+| read_text_file | Read a local file | file_path="/path/to/file.txt" |
+| python_exec | Run Python code | code="print(15 / 100 * 2400)" |
+| create_report | Save a report | title="My Report", sections=[{"heading": "Summary", "content": "..."}], output_path=".localsmartz/reports/report.md" |
+| write_todos | Plan your steps | (built-in, no special args) |
+| write_file | Save text to a file | (built-in) |
+| read_file | Read a saved file | (built-in) |
+
+## Examples
+
+**User asks:** "What is 15% of $2,400?"
+**You do:** Call python_exec with code="result = 15 / 100 * 2400\\nprint(f'15% of $2,400 = ${result:,.2f}')"
+**Then:** Report the answer from the output.
+
+**User asks:** "What are the latest AI trends?"
+**You do:**
+1. Call write_todos to plan: ["Search for AI trends 2026", "Read top result", "Summarize findings"]
+2. Call web_search with query="AI trends 2026"
+3. Call scrape_url on the best URL from search results
+4. Write your answer using the scraped content.
+
+**User asks:** "Compare Python and Rust for web servers"
+**You do:**
+1. Call write_todos to plan: ["Search Python web server benchmarks", "Search Rust web server benchmarks", "Compare results"]
+2. Call web_search with query="Python web server performance benchmarks 2026"
+3. Call scrape_url on the best result
+4. Call web_search with query="Rust web server performance benchmarks 2026"
+5. Call scrape_url on the best result
+6. Write a comparison using both sources.
+
+## Answering
+
+- Start with a direct answer to the question
+- Use bullet points for key findings
+- Cite sources: [Source Name] for claims
+- Keep answers focused and concise
+"""
+
+
 def _create_model(profile: dict, role: str) -> ChatOllama:
     """Create a ChatOllama instance for the given profile and role."""
     model_name = get_model(profile, role)
@@ -144,16 +215,20 @@ def create_agent(
     """
     cwd = cwd or Path.cwd()
     profile = get_profile(profile_name)
+    is_lite = profile["name"] == "lite"
 
     # Use planning model for the main agent
     model = _create_model(profile, "planning")
 
-    # Build system prompt — inject thread context if resuming
-    system_prompt = SYSTEM_PROMPT
+    # Profile-specific system prompt
+    system_prompt = SYSTEM_PROMPT_LITE if is_lite else SYSTEM_PROMPT_FULL
     if thread_id:
         context = load_context(thread_id, str(cwd))
         if context:
             system_prompt += f"\n\n## Previous Research Context\n\n{context}"
+
+    # Profile-specific tool set
+    tools = LITE_TOOLS if is_lite else ALL_TOOLS
 
     checkpointer = MemorySaver()
 
@@ -163,7 +238,7 @@ def create_agent(
 
     agent = create_deep_agent(
         model=model,
-        tools=ALL_TOOLS,
+        tools=tools,
         system_prompt=system_prompt,
         backend=FilesystemBackend(root_dir=str(storage_dir), virtual_mode=True),
         checkpointer=checkpointer,
@@ -212,6 +287,15 @@ def run_research(
         # Silent mode — invoke directly
         return agent.invoke(input_msg, config=config)
 
+    # Import validation for lite profile monitoring
+    from localsmartz.validation import LoopDetector
+
+    max_turns = profile.get("max_turns", 20)
+    is_lite = profile["name"] == "lite"
+    loop_detector = LoopDetector(max_repeats=3)
+    turn_count = 0
+    loop_broken = False
+
     # Streaming mode — show tool calls and progress as they happen
     final_state = None
     tools_used = set()
@@ -232,8 +316,14 @@ def run_research(
                     for tc in msg.tool_calls:
                         name = tc.get("name", "unknown")
                         tools_used.add(name)
+                        turn_count += 1
                         args_preview = _preview_args(tc.get("args", {}))
                         print(f"  ▸ {name}({args_preview})", file=sys.stderr)
+
+                        # Loop detection (lite only)
+                        if is_lite and loop_detector.record(name):
+                            print(f"  ⚠ Loop detected: {name} called {loop_detector.max_repeats}x — breaking", file=sys.stderr)
+                            loop_broken = True
 
                 # Tool results
                 if hasattr(msg, "type") and msg.type == "tool":
@@ -242,6 +332,13 @@ def run_research(
                         print(f"  ✗ {content[:120]}", file=sys.stderr)
 
         final_state = state_update
+
+        # Enforce turn limit and loop break
+        if turn_count >= max_turns:
+            print(f"  ⚠ Turn limit ({max_turns}) reached — stopping", file=sys.stderr)
+            break
+        if loop_broken:
+            break
 
     if tools_used:
         print(f"---\nTools used: {', '.join(sorted(tools_used))}", file=sys.stderr)

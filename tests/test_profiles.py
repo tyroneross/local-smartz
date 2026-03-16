@@ -55,3 +55,19 @@ def test_invalid_role():
         assert False, "Should have raised ValueError"
     except ValueError:
         pass
+
+
+# ── Phase 4: Feature gates ──
+
+def test_full_profile_feature_gates():
+    profile = get_profile("full")
+    assert profile["max_turns"] == 20
+    assert profile["quality_review"] is True
+    assert profile["subagent_delegation"] is True
+
+
+def test_lite_profile_feature_gates():
+    profile = get_profile("lite")
+    assert profile["max_turns"] == 10
+    assert profile["quality_review"] is False
+    assert profile["subagent_delegation"] is False

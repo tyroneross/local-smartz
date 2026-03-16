@@ -202,6 +202,14 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         start_time = time.time()
         tools_used = set()
 
+        # Lite profile: loop detection and turn limits
+        from localsmartz.validation import LoopDetector
+        is_lite = profile["name"] == "lite"
+        max_turns = profile.get("max_turns", 20)
+        loop_detector = LoopDetector(max_repeats=3)
+        turn_count = 0
+        loop_broken = False
+
         # Stream agent execution
         for chunk in agent.stream(input_msg, config=config, stream_mode="updates"):
             for node_name, state_update in chunk.items():
@@ -219,7 +227,17 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                         for tc in msg.tool_calls:
                             name = tc.get("name", "unknown")
                             tools_used.add(name)
+                            turn_count += 1
                             self._send_event({"type": "tool", "name": name})
+
+                            # Loop detection
+                            if is_lite and loop_detector.record(name):
+                                self._send_event({
+                                    "type": "tool_error",
+                                    "name": name,
+                                    "message": f"Loop detected: {name} called {loop_detector.max_repeats}x consecutively. Stopping.",
+                                })
+                                loop_broken = True
 
                     # Tool error results
                     if hasattr(msg, "type") and msg.type == "tool":
@@ -235,6 +253,16 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                     if hasattr(msg, "type") and msg.type == "ai":
                         if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content.strip():
                             self._send_event({"type": "text", "content": msg.content})
+
+            # Enforce turn limit and loop break
+            if turn_count >= max_turns or loop_broken:
+                if turn_count >= max_turns:
+                    self._send_event({
+                        "type": "tool_error",
+                        "name": "system",
+                        "message": f"Turn limit ({max_turns}) reached. Returning partial results.",
+                    })
+                break
 
         # Get final result
         full_result = agent.invoke(None, config=config)
