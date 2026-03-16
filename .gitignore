@@ -6,3 +6,6 @@ __pycache__/
 dist/
 build/
 .claude/
+.bookmark/
+*.xcodeproj/
+.dmg-staging/
