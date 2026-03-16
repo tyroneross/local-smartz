@@ -261,6 +261,45 @@ def _preview_args(args: dict, max_len: int = 60) -> str:
     return result
 
 
+def review_output(
+    original_query: str,
+    output: str,
+    profile: dict,
+    cwd: Path | None = None,
+) -> str | None:
+    """Run quality gate on agent output (full profile only).
+
+    Creates a separate reviewer agent that evaluates the research output.
+    Returns the review text, or None if review not applicable.
+    """
+    if profile["name"] != "full":
+        return None
+
+    from localsmartz.agents.definitions import load_prompt
+
+    cwd = cwd or Path.cwd()
+    reviewer_prompt = load_prompt("reviewer")
+    model = _create_model(profile, "planning")
+
+    reviewer = create_deep_agent(
+        model=model,
+        tools=[],  # Reviewer is pure evaluation
+        system_prompt=reviewer_prompt,
+    )
+
+    review_input = (
+        f"## Original Question\n{original_query}\n\n"
+        f"## Research Output\n{output}"
+    )
+
+    result = reviewer.invoke(
+        {"messages": [{"role": "user", "content": review_input}]},
+        config={"configurable": {"thread_id": "reviewer"}},
+    )
+
+    return extract_final_response(result)
+
+
 def extract_final_response(result: dict) -> str:
     """Extract the final text response from an agent result."""
     messages = result.get("messages", [])

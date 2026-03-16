@@ -167,6 +167,7 @@ def _preflight(profile: dict) -> bool:
 def _interactive(args, cwd: Path):
     """Interactive REPL — type queries, Ctrl+C or 'exit' to quit."""
     from localsmartz.profiles import get_profile
+    from localsmartz.threads import get_thread, load_context
 
     profile = get_profile(args.profile)
 
@@ -179,6 +180,20 @@ def _interactive(args, cwd: Path):
     print(f"Local Smartz v0.1.0 — local-first research [{profile['name']}]")
     print(f"Model: {profile['planning_model']}")
     print(f"Thread: {thread_id}")
+
+    # Show thread history if resuming
+    existing = get_thread(thread_id, str(cwd))
+    if existing and existing.get("entry_count", 0) > 0:
+        print(f"Resuming thread ({existing['entry_count']} previous entries)")
+        context = load_context(thread_id, str(cwd))
+        if context:
+            # Show a brief preview of previous context
+            preview_lines = context.strip().split("\n")[:5]
+            for line in preview_lines:
+                print(f"  {line}")
+            if len(context.strip().split("\n")) > 5:
+                print("  ...")
+
     print("Type your research question. Ctrl+C or 'exit' to quit.\n")
 
     while True:
@@ -206,7 +221,7 @@ def _interactive(args, cwd: Path):
 
 def _run(prompt: str, args, cwd: Path):
     """Execute a single research query."""
-    from localsmartz.agent import run_research, extract_final_response
+    from localsmartz.agent import run_research, extract_final_response, review_output
     from localsmartz.threads import create_thread, append_entry
     from localsmartz.profiles import get_profile
 
@@ -239,6 +254,16 @@ def _run(prompt: str, args, cwd: Path):
     # Extract and print final response
     response = extract_final_response(result)
     print(response)
+
+    # Quality gate (full profile only)
+    if verbose and profile["name"] == "full":
+        print("\n--- Quality Review ---", file=sys.stderr)
+        try:
+            review = review_output(prompt, response, profile, cwd)
+            if review:
+                print(review, file=sys.stderr)
+        except Exception as e:
+            print(f"Review skipped: {e}", file=sys.stderr)
 
     # Log to thread if active
     if thread_id:
