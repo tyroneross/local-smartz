@@ -51,6 +51,16 @@ def main():
         help="List all research threads and exit",
     )
     parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check Ollama status and model availability, then exit",
+    )
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="Install/configure Ollama and download required models",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version="%(prog)s 0.1.0",
@@ -70,6 +80,16 @@ def main():
             print("-" * 79)
             for t in threads:
                 print(f"{t['id']:<30} {t.get('title', '')[:40]:<40} {t.get('entry_count', 0):>7}")
+        sys.exit(0)
+
+    # Health check mode
+    if args.check:
+        _check(args)
+        sys.exit(0)
+
+    # Setup mode
+    if args.setup:
+        _setup(args)
         sys.exit(0)
 
     # Join positional args as prompt
@@ -95,11 +115,64 @@ def main():
         sys.exit(1)
 
 
+def _check(args):
+    """Run Ollama health check and report status."""
+    from localsmartz.profiles import get_profile
+    from localsmartz.ollama import validate_for_profile
+
+    profile = get_profile(args.profile)
+    print(f"Profile: {profile['name']}")
+    print(f"Planning model: {profile['planning_model']}")
+    print(f"Execution model: {profile['execution_model']}")
+    print()
+
+    ok, messages = validate_for_profile(profile)
+    for msg in messages:
+        print(msg)
+
+    if ok:
+        print("\nReady to go.")
+    else:
+        print("\nNot ready — run: localsmartz --setup")
+        sys.exit(1)
+
+
+def _setup(args):
+    """Interactive setup — install Ollama and pull models."""
+    from localsmartz.profiles import get_profile
+    from localsmartz.ollama import setup
+
+    profile = get_profile(args.profile)
+    ok = setup(profile)
+    sys.exit(0 if ok else 1)
+
+
+def _preflight(profile: dict) -> bool:
+    """Quick Ollama check before running. Returns True if ready."""
+    from localsmartz.ollama import check_server, model_available, suggest_pull
+
+    if not check_server():
+        print("Error: Ollama is not running. Start it with: ollama serve", file=sys.stderr)
+        return False
+
+    model = profile["planning_model"]
+    if not model_available(model):
+        print(f"Error: Model '{model}' not found in Ollama.", file=sys.stderr)
+        print(f"  → {suggest_pull(model)}", file=sys.stderr)
+        return False
+
+    return True
+
+
 def _interactive(args, cwd: Path):
     """Interactive REPL — type queries, Ctrl+C or 'exit' to quit."""
     from localsmartz.profiles import get_profile
 
     profile = get_profile(args.profile)
+
+    if not _preflight(profile):
+        sys.exit(1)
+
     thread_id = args.thread or f"cli_{datetime.now():%Y%m%d_%H%M%S}"
     args.thread = thread_id
 
@@ -135,20 +208,26 @@ def _run(prompt: str, args, cwd: Path):
     """Execute a single research query."""
     from localsmartz.agent import run_research, extract_final_response
     from localsmartz.threads import create_thread, append_entry
+    from localsmartz.profiles import get_profile
 
     verbose = not args.quiet
     thread_id = args.thread
+
+    # Preflight check
+    profile = get_profile(args.profile)
+    if not _preflight(profile):
+        sys.exit(1)
 
     # Ensure storage directories exist
     storage = cwd / ".localsmartz"
     for subdir in ["threads", "artifacts", "memory", "scripts", "reports"]:
         (storage / subdir).mkdir(parents=True, exist_ok=True)
 
-    # Create thread if specified
+    # Create/resume thread
     if thread_id:
         create_thread(thread_id, str(cwd), title=prompt[:60])
 
-    # Run the agent
+    # Run the agent with streaming
     result = run_research(
         prompt=prompt,
         profile_name=args.profile,

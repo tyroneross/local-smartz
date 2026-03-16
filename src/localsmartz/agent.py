@@ -180,7 +180,7 @@ def run_research(
     cwd: Path | None = None,
     verbose: bool = True,
 ) -> dict:
-    """Run a research query through the Local Smartz agent.
+    """Run a research query through the Local Smartz agent with streaming.
 
     Args:
         prompt: The research question
@@ -190,7 +190,7 @@ def run_research(
         verbose: Print progress to stderr
 
     Returns:
-        Agent result dict with messages
+        Final agent state dict with messages
     """
     cwd = cwd or Path.cwd()
     agent, profile, checkpointer = create_agent(
@@ -206,22 +206,58 @@ def run_research(
         print("---", file=sys.stderr)
 
     config = {"configurable": {"thread_id": thread_id or "default"}}
+    input_msg = {"messages": [{"role": "user", "content": prompt}]}
 
-    result = agent.invoke(
-        {"messages": [{"role": "user", "content": prompt}]},
-        config=config,
-    )
+    if not verbose:
+        # Silent mode — invoke directly
+        return agent.invoke(input_msg, config=config)
 
-    # Log tool usage for verbose mode
-    if verbose and result.get("messages"):
-        tools_used = set()
-        for msg in result["messages"]:
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                for tc in msg.tool_calls:
-                    tools_used.add(tc["name"])
-        if tools_used:
-            print(f"Tools used: {', '.join(sorted(tools_used))}", file=sys.stderr)
+    # Streaming mode — show tool calls and progress as they happen
+    final_state = None
+    tools_used = set()
 
+    for chunk in agent.stream(input_msg, config=config, stream_mode="updates"):
+        for node_name, state_update in chunk.items():
+            messages = state_update.get("messages", [])
+            for msg in messages:
+                # Tool calls from the AI
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        name = tc.get("name", "unknown")
+                        tools_used.add(name)
+                        args_preview = _preview_args(tc.get("args", {}))
+                        print(f"  ▸ {name}({args_preview})", file=sys.stderr)
+
+                # Tool results
+                if hasattr(msg, "type") and msg.type == "tool":
+                    content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    if content.startswith("Error"):
+                        print(f"  ✗ {content[:120]}", file=sys.stderr)
+
+        final_state = state_update
+
+    if tools_used:
+        print(f"---\nTools used: {', '.join(sorted(tools_used))}", file=sys.stderr)
+
+    # Reconstruct result from final state
+    # stream() returns incremental updates; get full state from checkpointer
+    full_result = agent.invoke(None, config=config)
+    return full_result if full_result else (final_state or {})
+
+
+def _preview_args(args: dict, max_len: int = 60) -> str:
+    """Create a short preview of tool call arguments."""
+    if not args:
+        return ""
+    parts = []
+    for k, v in args.items():
+        val = str(v)
+        if len(val) > 30:
+            val = val[:27] + "..."
+        parts.append(f"{k}={val}")
+    result = ", ".join(parts)
+    if len(result) > max_len:
+        result = result[:max_len - 3] + "..."
     return result
 
 
