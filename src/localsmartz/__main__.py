@@ -61,6 +61,17 @@ def main():
         help="Install/configure Ollama and download required models",
     )
     parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Start HTTP server for the macOS app",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=11435,
+        help="Server port (default: 11435, used with --serve)",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version="%(prog)s 0.1.0",
@@ -90,6 +101,12 @@ def main():
     # Setup mode
     if args.setup:
         _setup(args)
+        sys.exit(0)
+
+    # Server mode
+    if args.serve:
+        from localsmartz.serve import start_server
+        start_server(port=args.port)
         sys.exit(0)
 
     # Join positional args as prompt

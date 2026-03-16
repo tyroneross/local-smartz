@@ -218,7 +218,14 @@ def run_research(
 
     for chunk in agent.stream(input_msg, config=config, stream_mode="updates"):
         for node_name, state_update in chunk.items():
+            if state_update is None:
+                continue
             messages = state_update.get("messages", [])
+            # LangGraph wraps state in Overwrite objects
+            if hasattr(messages, "value"):
+                messages = messages.value
+            if not isinstance(messages, list):
+                continue
             for msg in messages:
                 # Tool calls from the AI
                 if hasattr(msg, "tool_calls") and msg.tool_calls:

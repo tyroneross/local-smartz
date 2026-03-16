@@ -1,0 +1,30 @@
+import SwiftUI
+
+@main
+struct LocalSmartzApp: App {
+    @StateObject private var appState = AppState()
+
+    var body: some Scene {
+        WindowGroup {
+            Group {
+                if appState.isConfigured {
+                    ResearchView()
+                } else {
+                    SetupView()
+                }
+            }
+            .environmentObject(appState)
+            .frame(minWidth: 640, minHeight: 480)
+        }
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 800, height: 600)
+        .commands {
+            CommandGroup(replacing: .newItem) {}
+        }
+
+        MenuBarExtra("Local Smartz", systemImage: "magnifyingglass.circle.fill") {
+            StatusBarView()
+                .environmentObject(appState)
+        }
+    }
+}
