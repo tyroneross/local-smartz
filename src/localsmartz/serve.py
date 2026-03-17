@@ -207,9 +207,11 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
 
         # Lite profile: loop detection and turn limits
         from localsmartz.validation import LoopDetector
+        from localsmartz.drift import create_drift_detector
         is_lite = profile["name"] == "lite"
         max_turns = profile.get("max_turns", 20)
         loop_detector = LoopDetector(max_repeats=3)
+        drift_detector = create_drift_detector(profile)
         turn_count = 0
         loop_broken = False
 
@@ -242,14 +244,29 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                                 })
                                 loop_broken = True
 
+                            # Drift detection
+                            for de in drift_detector.record_tool_call(name, tc.get("args"), turn_count):
+                                self._send_event({
+                                    "type": "tool_error",
+                                    "name": "drift",
+                                    "message": f"{de.signal.value} [{de.severity.value}] {de.message}",
+                                })
+
                     # Tool error results
                     if hasattr(msg, "type") and msg.type == "tool":
                         content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                        if content.startswith("Error"):
+                        is_error = content.startswith("Error")
+                        if is_error:
                             self._send_event({
                                 "type": "tool_error",
                                 "name": getattr(msg, "name", "unknown"),
                                 "message": content[:200],
+                            })
+                        for de in drift_detector.record_tool_result(getattr(msg, "name", "unknown"), content, is_error, turn_count):
+                            self._send_event({
+                                "type": "tool_error",
+                                "name": "drift",
+                                "message": f"{de.signal.value} [{de.severity.value}] {de.message}",
                             })
 
                     # AI text output

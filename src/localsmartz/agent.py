@@ -289,10 +289,12 @@ def run_research(
 
     # Import validation for lite profile monitoring
     from localsmartz.validation import LoopDetector
+    from localsmartz.drift import create_drift_detector
 
     max_turns = profile.get("max_turns", 20)
     is_lite = profile["name"] == "lite"
     loop_detector = LoopDetector(max_repeats=3)
+    drift_detector = create_drift_detector(profile)
     turn_count = 0
     loop_broken = False
 
@@ -325,11 +327,18 @@ def run_research(
                             print(f"  ⚠ Loop detected: {name} called {loop_detector.max_repeats}x with same args — breaking", file=sys.stderr)
                             loop_broken = True
 
+                        # Drift detection
+                        for de in drift_detector.record_tool_call(name, tc.get("args"), turn_count):
+                            print(f"  ⚡ drift:{de.signal.value} [{de.severity.value}] {de.message}", file=sys.stderr)
+
                 # Tool results
                 if hasattr(msg, "type") and msg.type == "tool":
                     content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                    if content.startswith("Error"):
+                    is_error = content.startswith("Error")
+                    if is_error:
                         print(f"  ✗ {content[:120]}", file=sys.stderr)
+                    for de in drift_detector.record_tool_result(getattr(msg, "name", "unknown"), content, is_error, turn_count):
+                        print(f"  ⚡ drift:{de.signal.value} [{de.severity.value}] {de.message}", file=sys.stderr)
 
         final_state = state_update
 
@@ -342,6 +351,11 @@ def run_research(
 
     if tools_used:
         print(f"---\nTools used: {', '.join(sorted(tools_used))}", file=sys.stderr)
+    drift_events = drift_detector.get_events()
+    if drift_events:
+        print(f"Drift events: {len(drift_events)}", file=sys.stderr)
+        for de in drift_events:
+            print(f"  ⚡ {de.signal.value} [{de.severity.value}] {de.tool}: {de.message}", file=sys.stderr)
 
     # Reconstruct result from final state
     # stream() returns incremental updates; get full state from checkpointer
