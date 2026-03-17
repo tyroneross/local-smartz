@@ -171,6 +171,28 @@ class TestLoopDetector:
         ld.record("web_search")
         assert ld.last_tool == "web_search"
 
+    def test_same_tool_different_args_no_loop(self):
+        ld = LoopDetector(max_repeats=3)
+        assert ld.record("web_search", {"query": "tokyo population"}) is False
+        assert ld.record("web_search", {"query": "tokyo area"}) is False
+        assert ld.record("web_search", {"query": "tokyo economy"}) is False
+        # Different args each time — not a loop
+
+    def test_same_tool_same_args_loop(self):
+        ld = LoopDetector(max_repeats=3)
+        args = {"query": "same query"}
+        assert ld.record("web_search", args) is False
+        assert ld.record("web_search", args) is False
+        assert ld.record("web_search", args) is True  # True loop
+
+    def test_name_only_loop_after_max_name_repeats(self):
+        ld = LoopDetector(max_repeats=3, max_name_repeats=5)
+        assert ld.record("web_search", {"query": "q1"}) is False
+        assert ld.record("web_search", {"query": "q2"}) is False
+        assert ld.record("web_search", {"query": "q3"}) is False
+        assert ld.record("web_search", {"query": "q4"}) is False
+        assert ld.record("web_search", {"query": "q5"}) is True  # 5th name-only
+
 
 # ── check_output_quality ──
 

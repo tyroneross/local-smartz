@@ -321,8 +321,8 @@ def run_research(
                         print(f"  ▸ {name}({args_preview})", file=sys.stderr)
 
                         # Loop detection (lite only)
-                        if is_lite and loop_detector.record(name):
-                            print(f"  ⚠ Loop detected: {name} called {loop_detector.max_repeats}x — breaking", file=sys.stderr)
+                        if is_lite and loop_detector.record(name, tc.get("args")):
+                            print(f"  ⚠ Loop detected: {name} called {loop_detector.max_repeats}x with same args — breaking", file=sys.stderr)
                             loop_broken = True
 
                 # Tool results

@@ -188,23 +188,57 @@ def _suggest_tool(name: str, available: list[str]) -> str | None:
 
 
 class LoopDetector:
-    """Detect when the agent is stuck calling the same tool repeatedly."""
+    """Detect when the agent is stuck calling the same tool repeatedly.
 
-    def __init__(self, max_repeats: int = 3):
+    Dual threshold:
+    - Strict: max_repeats consecutive calls with same tool+args (exact loop)
+    - Lenient: max_name_repeats consecutive calls to same tool name (stuck pattern)
+
+    The lenient threshold catches models that keep refining queries to the
+    same tool instead of progressing to a different tool.
+    """
+
+    def __init__(self, max_repeats: int = 3, max_name_repeats: int = 5):
         self.max_repeats = max_repeats
+        self.max_name_repeats = max_name_repeats
         self._history: list[str] = []
+        self._history_with_args: list[tuple[str, str]] = []
 
-    def record(self, tool_name: str) -> bool:
-        """Record a tool call. Returns True if stuck in a loop."""
+    def record(self, tool_name: str, args: dict | None = None) -> bool:
+        """Record a tool call. Returns True if stuck in a loop.
+
+        Detects both exact loops (same tool+args) and stuck patterns
+        (same tool name with varied args).
+        """
         self._history.append(tool_name)
-        if len(self._history) >= self.max_repeats:
-            recent = self._history[-self.max_repeats:]
+
+        # Create a stable key from args for comparison
+        args_key = ""
+        if args:
+            try:
+                args_key = json.dumps(args, sort_keys=True, default=str)[:200]
+            except (TypeError, ValueError):
+                args_key = str(args)[:200]
+
+        self._history_with_args.append((tool_name, args_key))
+
+        # Strict check: same tool + same args
+        if len(self._history_with_args) >= self.max_repeats:
+            recent = self._history_with_args[-self.max_repeats:]
             if len(set(recent)) == 1:
                 return True
+
+        # Lenient check: same tool name regardless of args
+        if len(self._history) >= self.max_name_repeats:
+            recent_names = self._history[-self.max_name_repeats:]
+            if len(set(recent_names)) == 1:
+                return True
+
         return False
 
     def reset(self):
         self._history.clear()
+        self._history_with_args.clear()
 
     @property
     def last_tool(self) -> str | None:

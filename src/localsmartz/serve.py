@@ -28,6 +28,9 @@ def _json_bytes(data: dict, status: int = 200) -> tuple[bytes, int]:
 class LocalSmartzHandler(BaseHTTPRequestHandler):
     """HTTP request handler with SSE support."""
 
+    # Set by start_server() — profile override from CLI (None = auto-detect)
+    _default_profile: str | None = None
+
     # Suppress default logging to stderr
     def log_message(self, format, *args):
         pass
@@ -97,14 +100,14 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
     def _handle_health(self):
         from localsmartz.profiles import get_profile
 
-        profile = get_profile()
+        profile = get_profile(self._default_profile)
         self._json_response({"ok": True, "profile": profile["name"]})
 
     def _handle_status(self):
         from localsmartz.profiles import get_profile
         from localsmartz.ollama import check_server, get_version, list_models
 
-        profile = get_profile()
+        profile = get_profile(self._default_profile)
         ollama_ok = check_server()
         version = get_version() if ollama_ok else None
         models = list_models() if ollama_ok else []
@@ -137,7 +140,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             return
 
         thread_id = params.get("thread_id", [None])[0]
-        profile_name = params.get("profile", [None])[0]
+        profile_name = params.get("profile", [None])[0] or self._default_profile
 
         self._start_sse()
 
@@ -231,11 +234,11 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                             self._send_event({"type": "tool", "name": name})
 
                             # Loop detection
-                            if is_lite and loop_detector.record(name):
+                            if is_lite and loop_detector.record(name, tc.get("args")):
                                 self._send_event({
                                     "type": "tool_error",
                                     "name": name,
-                                    "message": f"Loop detected: {name} called {loop_detector.max_repeats}x consecutively. Stopping.",
+                                    "message": f"Loop detected: {name} called {loop_detector.max_repeats}x with same args. Stopping.",
                                 })
                                 loop_broken = True
 
@@ -295,7 +298,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         self._start_sse()
 
         try:
-            profile = get_profile()
+            profile = get_profile(self._default_profile)
 
             # Check Ollama
             if not is_installed():
@@ -362,8 +365,15 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                 pass
 
 
-def start_server(port: int = 11435):
-    """Start the Local Smartz HTTP server."""
+def start_server(port: int = 11435, profile_name: str | None = None):
+    """Start the Local Smartz HTTP server.
+
+    Args:
+        port: Port to listen on
+        profile_name: Profile override ("full" or "lite"). Auto-detect if None.
+    """
+    # Store profile_name on handler class so all requests use consistent profile
+    LocalSmartzHandler._default_profile = profile_name
     server = HTTPServer(("127.0.0.1", port), LocalSmartzHandler)
     print(f"Local Smartz server running at http://localhost:{port}", file=sys.stderr)
     print(f"Press Ctrl+C to stop.", file=sys.stderr)

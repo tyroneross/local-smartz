@@ -106,7 +106,7 @@ def main():
     # Server mode
     if args.serve:
         from localsmartz.serve import start_server
-        start_server(port=args.port)
+        start_server(port=args.port, profile_name=args.profile)
         sys.exit(0)
 
     # Join positional args as prompt

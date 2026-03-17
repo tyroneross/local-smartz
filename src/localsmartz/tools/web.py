@@ -229,13 +229,19 @@ def web_search(query: str, max_results: int = 5) -> str:
         max_results: Maximum number of results to return (default 5)
     """
     try:
-        from duckduckgo_search import DDGS
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            from duckduckgo_search import DDGS
     except ImportError:
-        return "Error: duckduckgo-search not installed. Run: pip install duckduckgo-search"
+        return "Error: duckduckgo-search not installed. Run: pip install ddgs"
 
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", RuntimeWarning)
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=max_results))
 
         if not results:
             return f"No results found for: {query}"

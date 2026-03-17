@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from localsmartz.tools.compute import python_exec
+from localsmartz.tools.compute import python_exec, _auto_print_last_expr
 from localsmartz.tools.documents import read_text_file, parse_pdf, read_spreadsheet
 from localsmartz.tools.reports import create_report, create_spreadsheet
 from localsmartz.tools.web import web_search, scrape_url
@@ -28,6 +28,35 @@ def test_python_exec_error():
 def test_python_exec_timeout():
     result = python_exec.invoke({"code": "import time; time.sleep(60)", "timeout": 2})
     assert "timed out" in result.lower()
+
+
+def test_python_exec_auto_print():
+    """Bare expression on last line gets auto-printed (REPL-style model output)."""
+    result = python_exec.invoke({"code": "x = 42\nx"})
+    assert "42" in result
+    assert "Exit code: 0" in result
+
+
+# ── _auto_print_last_expr ──
+
+def test_auto_print_bare_variable():
+    assert _auto_print_last_expr("x = 42\nx") == "x = 42\nprint(x)"
+
+def test_auto_print_already_has_print():
+    code = "x = 42\nprint(x)"
+    assert _auto_print_last_expr(code) == code
+
+def test_auto_print_assignment_no_change():
+    code = "x = 42\ny = x + 1"
+    assert _auto_print_last_expr(code) == code
+
+def test_auto_print_semicolons_skipped():
+    code = "import time; time.sleep(0)"
+    assert _auto_print_last_expr(code) == code
+
+def test_auto_print_syntax_error_passthrough():
+    code = "x = "
+    assert _auto_print_last_expr(code) == code
 
 
 # ── read_text_file ──
