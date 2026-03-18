@@ -54,3 +54,75 @@ def test_load_empty_planning_model(tmp_path):
         json.dumps({"planning_model": "", "profile": "lite"})
     )
     assert load_config(tmp_path) is None
+
+
+from unittest.mock import patch, MagicMock
+from localsmartz.config import resolve_model, save_config
+
+
+def test_resolve_model_cli_flag(tmp_path):
+    """CLI --model flag takes priority, does not save."""
+    result = resolve_model(tmp_path, cli_model="my-model:7b", profile_name="lite")
+    assert result == "my-model:7b"
+    # Should NOT have saved to config
+    assert not (tmp_path / ".localsmartz" / "config.json").exists()
+
+
+def test_resolve_model_from_config(tmp_path):
+    """Loads from saved config when no CLI flag."""
+    save_config(tmp_path, {"planning_model": "saved:model", "profile": "lite"})
+
+    with patch("localsmartz.config.check_server", return_value=True), \
+         patch("localsmartz.config.model_available", return_value=True):
+        result = resolve_model(tmp_path, cli_model=None, profile_name="lite")
+        assert result == "saved:model"
+
+
+def test_resolve_model_stale_config_retriggers(tmp_path, capsys):
+    """If saved model no longer available, warns and triggers picker."""
+    save_config(tmp_path, {"planning_model": "deleted:model", "profile": "lite"})
+
+    with patch("localsmartz.config.check_server", return_value=True), \
+         patch("localsmartz.config.model_available", return_value=False), \
+         patch("localsmartz.config.list_models_with_size", return_value=[("other:8b", 5.0)]), \
+         patch("localsmartz.config.get_version", return_value="0.15.2"), \
+         patch("localsmartz.config.detect_profile", return_value="lite"), \
+         patch("sys.stdin") as mock_stdin:
+        mock_stdin.isatty.return_value = False  # non-interactive → auto-select
+        result = resolve_model(tmp_path, cli_model=None, profile_name="lite")
+        assert result == "other:8b"
+        captured = capsys.readouterr()
+        assert "no longer available" in captured.err
+
+
+def test_first_run_picker_ctrl_c_no_partial_config(tmp_path, monkeypatch):
+    """Ctrl+C during picker exits cleanly without saving partial config."""
+    import pytest
+    from localsmartz.config import first_run_picker
+
+    with patch("localsmartz.config.check_server", return_value=True), \
+         patch("localsmartz.config.list_models_with_size", return_value=[("test:8b", 5.0)]), \
+         patch("localsmartz.config.get_version", return_value="0.15.2"), \
+         patch("localsmartz.config.detect_profile", return_value="lite"), \
+         patch("sys.stdin") as mock_stdin:
+        mock_stdin.isatty.return_value = True  # interactive mode
+        monkeypatch.setattr("builtins.input", lambda _: (_ for _ in ()).throw(KeyboardInterrupt))
+        with pytest.raises(SystemExit) as exc_info:
+            first_run_picker(tmp_path, "lite")
+        assert exc_info.value.code == 130
+        assert not (tmp_path / ".localsmartz" / "config.json").exists()
+
+
+def test_first_run_picker_empty_input_selects_recommended(tmp_path, monkeypatch):
+    """Empty input (Enter key) selects the recommended (largest) model."""
+    from localsmartz.config import first_run_picker
+
+    with patch("localsmartz.config.check_server", return_value=True), \
+         patch("localsmartz.config.list_models_with_size",
+               return_value=[("small:8b", 5.0), ("large:70b", 40.0)]), \
+         patch("localsmartz.config.get_version", return_value="0.15.2"), \
+         patch("localsmartz.config.detect_profile", return_value="full"):
+        monkeypatch.setattr("builtins.input", lambda _: "")  # Enter key
+        monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True})())
+        result = first_run_picker(tmp_path, "full")
+        assert result == "large:70b"
