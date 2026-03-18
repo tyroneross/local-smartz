@@ -71,3 +71,27 @@ def test_lite_profile_feature_gates():
     assert profile["max_turns"] == 10
     assert profile["quality_review"] is False
     assert profile["subagent_delegation"] is False
+
+
+# ── Phase 5: Model override ──
+
+def test_model_override_replaces_planning():
+    profile = get_profile("lite", model_override="gemma2:9b")
+    assert profile["planning_model"] == "gemma2:9b"
+    assert profile["name"] == "lite"
+
+
+def test_model_override_none_keeps_default():
+    profile = get_profile("lite", model_override=None)
+    assert profile["planning_model"] == PROFILES["lite"]["planning_model"]
+
+
+def test_model_override_does_not_affect_execution():
+    profile = get_profile("full", model_override="gemma2:9b")
+    assert profile["planning_model"] == "gemma2:9b"
+    assert profile["execution_model"] == PROFILES["full"]["execution_model"]
+
+
+def test_model_override_empty_string_keeps_default():
+    profile = get_profile("lite", model_override="")
+    assert profile["planning_model"] == PROFILES["lite"]["planning_model"]

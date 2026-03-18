@@ -195,6 +195,7 @@ def create_agent(
     profile_name: str | None = None,
     thread_id: str | None = None,
     cwd: Path | None = None,
+    model_override: str | None = None,
 ):
     """Create the Local Smartz research agent.
 
@@ -209,12 +210,13 @@ def create_agent(
         profile_name: "full" or "lite", or None for auto-detect
         thread_id: Optional thread ID for context continuity
         cwd: Working directory (default: cwd)
+        model_override: If set, replaces planning_model (user-selected model)
 
     Returns:
         Tuple of (agent, profile, checkpointer)
     """
     cwd = cwd or Path.cwd()
-    profile = get_profile(profile_name)
+    profile = get_profile(profile_name, model_override=model_override)
     is_lite = profile["name"] == "lite"
 
     # Use planning model for the main agent
@@ -254,6 +256,7 @@ def run_research(
     thread_id: str | None = None,
     cwd: Path | None = None,
     verbose: bool = True,
+    model_override: str | None = None,
 ) -> dict:
     """Run a research query through the Local Smartz agent with streaming.
 
@@ -272,6 +275,7 @@ def run_research(
         profile_name=profile_name,
         thread_id=thread_id,
         cwd=cwd,
+        model_override=model_override,
     )
 
     if verbose:

@@ -5,6 +5,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+try:
+    import readline  # noqa: F401 — enables arrow keys + history in input()
+except ImportError:
+    pass  # Windows fallback — input() still works, just no history
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -21,6 +26,12 @@ def main():
         choices=["full", "lite"],
         default=None,
         help="Hardware profile (auto-detected if omitted)",
+    )
+    parser.add_argument(
+        "--model", "-m",
+        type=str,
+        default=None,
+        help="Ollama model to use (overrides profile default)",
     )
     parser.add_argument(
         "--thread",
@@ -137,7 +148,7 @@ def _check(args):
     from localsmartz.profiles import get_profile
     from localsmartz.ollama import validate_for_profile
 
-    profile = get_profile(args.profile)
+    profile = get_profile(args.profile, model_override=args.model)
     print(f"Profile: {profile['name']}")
     print(f"Planning model: {profile['planning_model']}")
     print(f"Execution model: {profile['execution_model']}")
@@ -159,7 +170,7 @@ def _setup(args):
     from localsmartz.profiles import get_profile
     from localsmartz.ollama import setup
 
-    profile = get_profile(args.profile)
+    profile = get_profile(args.profile, model_override=args.model)
     ok = setup(profile)
     sys.exit(0 if ok else 1)
 
@@ -181,53 +192,184 @@ def _preflight(profile: dict) -> bool:
     return True
 
 
+def _select_model(profile: dict) -> str | None:
+    """Show available Ollama models and let user pick one.
+
+    Returns selected model name, or None to use profile default.
+    """
+    from localsmartz.ollama import list_models
+
+    models = list_models()
+    if not models:
+        return None
+
+    default = profile["planning_model"]
+
+    print("\n  Available models:")
+    default_idx = None
+    for i, m in enumerate(models, 1):
+        marker = " *" if m == default else ""
+        if m == default:
+            default_idx = i
+        print(f"    {i}. {m}{marker}")
+
+    hint = f" [{default_idx}]" if default_idx else ""
+    print()
+
+    try:
+        choice = input(f"  Select model{hint}: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return None
+
+    if not choice:
+        return None  # Use profile default
+
+    try:
+        idx = int(choice)
+        if 1 <= idx <= len(models):
+            selected = models[idx - 1]
+            return selected if selected != default else None
+    except ValueError:
+        # Treat as model name typed directly
+        if choice in models:
+            return choice if choice != default else None
+
+    print(f"  Invalid selection, using default: {default}")
+    return None
+
+
+def _handle_command(cmd: str, args, cwd: Path, model_override: str | None, profile: dict) -> str | None:
+    """Handle slash commands. Returns 'exit' to quit, 'continue' to skip, None for unknown."""
+    parts = cmd.split(maxsplit=1)
+    command = parts[0].lower()
+
+    if command in ("/exit", "/quit", "/q"):
+        return "exit"
+
+    if command == "/help":
+        print()
+        print("  Commands:")
+        print("    /help             Show this help")
+        print("    /model            Change model")
+        print("    /thread [name]    Switch or show thread")
+        print("    /exit             Quit")
+        print()
+        print("  Shortcuts:")
+        print("    Ctrl+C            Cancel current query")
+        print("    Ctrl+D            Quit")
+        print()
+        return "continue"
+
+    if command == "/model":
+        new_model = _select_model(profile)
+        if new_model:
+            args._model_override = new_model
+            print(f"  Model → {new_model}")
+        else:
+            current = args._model_override if hasattr(args, '_model_override') and args._model_override else profile["planning_model"]
+            print(f"  Model: {current} (unchanged)")
+        return "continue"
+
+    if command == "/thread":
+        if len(parts) > 1:
+            new_thread = parts[1].strip()
+            args.thread = new_thread
+            print(f"  Thread → {new_thread}")
+        else:
+            print(f"  Thread: {args.thread}")
+            # Show brief thread info
+            from localsmartz.threads import get_thread
+            existing = get_thread(args.thread, str(cwd))
+            if existing and existing.get("entry_count", 0) > 0:
+                print(f"  Entries: {existing['entry_count']}")
+            else:
+                print("  (new thread)")
+        return "continue"
+
+    return None  # Unknown command
+
+
 def _interactive(args, cwd: Path):
-    """Interactive REPL — type queries, Ctrl+C or 'exit' to quit."""
+    """Interactive REPL — Claude Code-style UX."""
     from localsmartz.profiles import get_profile
     from localsmartz.threads import get_thread, load_context
 
-    profile = get_profile(args.profile)
+    profile = get_profile(args.profile, model_override=args.model)
 
     if not _preflight(profile):
         sys.exit(1)
 
+    # Model selection — show picker if no --model flag
+    model_override = args.model
+    if not model_override:
+        model_override = _select_model(profile)
+
+    if model_override:
+        profile = get_profile(args.profile, model_override=model_override)
+
+    # Store on args for /model command to update
+    args._model_override = model_override
+
     thread_id = args.thread or f"cli_{datetime.now():%Y%m%d_%H%M%S}"
     args.thread = thread_id
 
-    print(f"Local Smartz v0.1.0 — local-first research [{profile['name']}]")
-    print(f"Model: {profile['planning_model']}")
-    print(f"Thread: {thread_id}")
+    active_model = profile["planning_model"]
+
+    # Banner
+    print()
+    print(f"  \033[1mLocal Smartz\033[0m v0.1.0")
+    print(f"  {profile['name']} · {active_model}")
+    print(f"  Thread: {thread_id}")
 
     # Show thread history if resuming
     existing = get_thread(thread_id, str(cwd))
     if existing and existing.get("entry_count", 0) > 0:
-        print(f"Resuming thread ({existing['entry_count']} previous entries)")
+        print(f"  Resuming ({existing['entry_count']} previous entries)")
         context = load_context(thread_id, str(cwd))
         if context:
-            # Show a brief preview of previous context
-            preview_lines = context.strip().split("\n")[:5]
+            preview_lines = context.strip().split("\n")[:3]
             for line in preview_lines:
-                print(f"  {line}")
-            if len(context.strip().split("\n")) > 5:
-                print("  ...")
+                print(f"    {line}")
+            if len(context.strip().split("\n")) > 3:
+                print("    ...")
 
-    print("Type your research question. Ctrl+C or 'exit' to quit.\n")
+    print()
+    print("  Type /help for commands")
+    print()
 
     while True:
         try:
-            prompt = input("\033[1mlocalsmartz>\033[0m ").strip()
+            prompt = input("\033[1m> \033[0m").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nBye.")
             break
 
         if not prompt:
             continue
-        if prompt.lower() in ("exit", "quit", "q"):
+
+        if prompt.lower() in ("exit", "quit"):
             print("Bye.")
             break
 
+        # Slash commands
+        if prompt.startswith("/"):
+            result = _handle_command(prompt, args, cwd, args._model_override, profile)
+            if result == "exit":
+                print("Bye.")
+                break
+            if result == "continue":
+                continue
+            # Unknown command — treat as query
+            print(f"  Unknown command: {prompt.split()[0]}")
+            print("  Type /help for available commands")
+            continue
+
+        # Update model_override in case /model changed it
+        current_override = args._model_override if hasattr(args, '_model_override') else model_override
+
         try:
-            _run(prompt, args, cwd)
+            _run(prompt, args, cwd, model_override=current_override)
         except KeyboardInterrupt:
             print("\n\nInterrupted. Ready for next query.\n")
         except Exception as e:
@@ -236,7 +378,7 @@ def _interactive(args, cwd: Path):
         print()
 
 
-def _run(prompt: str, args, cwd: Path):
+def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
     """Execute a single research query."""
     from localsmartz.agent import run_research, extract_final_response, review_output
     from localsmartz.threads import create_thread, append_entry
@@ -245,8 +387,11 @@ def _run(prompt: str, args, cwd: Path):
     verbose = not args.quiet
     thread_id = args.thread
 
+    # Use explicit model_override, or fall back to --model flag
+    effective_override = model_override if model_override is not None else args.model
+
     # Preflight check
-    profile = get_profile(args.profile)
+    profile = get_profile(args.profile, model_override=effective_override)
     if not _preflight(profile):
         sys.exit(1)
 
@@ -266,6 +411,7 @@ def _run(prompt: str, args, cwd: Path):
         thread_id=thread_id,
         cwd=cwd,
         verbose=verbose,
+        model_override=effective_override,
     )
 
     # Extract and print final response

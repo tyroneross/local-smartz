@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Local Smartz installer — one command to set up everything
-# Usage: curl -fsSL https://raw.githubusercontent.com/tyroneross/local-smartz/main/install.sh | bash
+# Local Smartz installer — works both from cloned repo and remote curl
+# Local:  cd local-smartz && bash install.sh
+# Remote: curl -fsSL https://raw.githubusercontent.com/tyroneross/local-smartz/main/install.sh | bash
 set -euo pipefail
 
 echo "Local Smartz Installer"
@@ -40,25 +41,55 @@ if ! command -v ollama &>/dev/null; then
 fi
 echo "Ollama: installed"
 
-# ── Install Local Smartz ──
+# ── Detect local repo vs remote install ──
 echo ""
-echo "Installing Local Smartz..."
+INSTALL_MODE="remote"
+if [ -f "pyproject.toml" ] && grep -q "localsmartz" pyproject.toml 2>/dev/null; then
+    INSTALL_MODE="local"
+fi
 
-if command -v pipx &>/dev/null; then
-    pipx install "git+https://github.com/tyroneross/local-smartz.git" --force
-elif command -v uv &>/dev/null; then
-    uv tool install "git+https://github.com/tyroneross/local-smartz.git" --force
+REPO_URL="git+https://github.com/tyroneross/local-smartz.git"
+
+if [ "$INSTALL_MODE" = "local" ]; then
+    echo "Detected: running inside cloned repo"
+    echo "Installing in editable mode..."
+    echo ""
+
+    if command -v pipx &>/dev/null; then
+        pipx install -e . --force
+    elif command -v uv &>/dev/null; then
+        uv tool install -e . --force
+    else
+        python3 -m pip install --user -e . --quiet
+    fi
 else
-    # Fallback: pip install into user site
-    python3 -m pip install --user "git+https://github.com/tyroneross/local-smartz.git" --quiet
+    echo "Installing from GitHub..."
+    echo ""
+
+    if command -v pipx &>/dev/null; then
+        pipx install "$REPO_URL" --force
+    elif command -v uv &>/dev/null; then
+        uv tool install "$REPO_URL" --force
+    else
+        python3 -m pip install --user "$REPO_URL" --quiet
+    fi
 fi
 
 # ── Verify install ──
 if ! command -v localsmartz &>/dev/null; then
     echo ""
     echo "Warning: 'localsmartz' not found on PATH."
-    echo "You may need to add ~/.local/bin to your PATH:"
-    echo '  export PATH="$HOME/.local/bin:$PATH"'
+    echo ""
+    echo "Add one of these to your shell profile (~/.zshrc or ~/.bashrc):"
+    echo ""
+    if command -v pipx &>/dev/null; then
+        echo '  # pipx should handle this, but if not:'
+        echo '  eval "$(pipx ensurepath)"'
+    else
+        echo '  export PATH="$HOME/.local/bin:$PATH"'
+    fi
+    echo ""
+    echo "Then restart your terminal or run: source ~/.zshrc"
     echo ""
 fi
 
@@ -68,4 +99,4 @@ echo "Setting up Ollama and downloading models..."
 localsmartz --setup || true
 
 echo ""
-echo "Done! Run: localsmartz \"your research question\""
+echo "Done! Run: localsmartz"

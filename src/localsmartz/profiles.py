@@ -59,11 +59,12 @@ def detect_profile() -> str:
         return "lite"
 
 
-def get_profile(name: str | None = None) -> dict:
+def get_profile(name: str | None = None, model_override: str | None = None) -> dict:
     """Get profile configuration by name or auto-detect.
 
     Args:
         name: Profile name ("full" or "lite"), or None to auto-detect
+        model_override: If set, replaces planning_model (user-selected model)
 
     Returns:
         Profile configuration dict with "name" key added
@@ -76,6 +77,10 @@ def get_profile(name: str | None = None) -> dict:
 
     profile = PROFILES[name].copy()
     profile["name"] = name
+
+    if model_override:
+        profile["planning_model"] = model_override
+
     return profile
 
 
