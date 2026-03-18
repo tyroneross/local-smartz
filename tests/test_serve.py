@@ -33,6 +33,36 @@ def _get(port: int, path: str) -> tuple[int, dict]:
     return status, body
 
 
+def _get_raw(port: int, path: str) -> tuple[int, str, str]:
+    """Helper — make a GET request, return (status, content_type, body_text)."""
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", path)
+    resp = conn.getresponse()
+    status = resp.status
+    ctype = resp.getheader("Content-Type", "")
+    body = resp.read().decode("utf-8")
+    conn.close()
+    return status, ctype, body
+
+
+# ── Web UI ──
+
+def test_ui_serves_html(server):
+    """GET / returns the web UI HTML page."""
+    status, ctype, body = _get_raw(server, "/")
+    assert status == 200
+    assert "text/html" in ctype
+    assert "<title>Local Smartz</title>" in body
+    assert "id=\"output\"" in body
+
+
+def test_ui_trailing_slash(server):
+    """GET / with trailing slash also serves UI."""
+    status, ctype, body = _get_raw(server, "/")
+    assert status == 200
+    assert "<title>Local Smartz</title>" in body
+
+
 # ── Health endpoint ──
 
 def test_health_returns_ok(server):

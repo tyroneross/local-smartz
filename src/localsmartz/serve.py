@@ -25,6 +25,227 @@ def _json_bytes(data: dict, status: int = 200) -> tuple[bytes, int]:
     return json.dumps(data).encode("utf-8"), status
 
 
+_UI_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Smartz</title>
+<style>
+:root {
+  --bg: #f5f5f5; --surface: #fff; --border: #e0e0e0;
+  --fg: #1a1a1a; --fg-muted: #666; --accent: #0066cc;
+  --error: #cc2200; --success: #228833;
+  --tool-bg: #eef2ff; --tool-fg: #4455aa; --radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1a1a; --surface: #242424; --border: #333;
+    --fg: #e0e0e0; --fg-muted: #888; --accent: #4a9eff;
+    --error: #ff4444; --success: #44cc44;
+    --tool-bg: #2a2a3a; --tool-fg: #8899dd;
+  }
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg); color: var(--fg); height: 100vh; overflow: hidden;
+}
+#app { display: grid; grid-template-columns: 200px 1fr; height: 100vh; }
+aside {
+  background: var(--surface); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow-y: auto;
+}
+.sidebar-hd {
+  padding: 16px 16px 8px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .05em; color: var(--fg-muted);
+}
+.thread {
+  padding: 8px 16px; font-size: 13px; cursor: pointer;
+  border-left: 2px solid transparent; color: var(--fg-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.thread:hover { color: var(--fg); background: var(--bg); }
+.thread.active { color: var(--fg); font-weight: 500; border-left-color: var(--accent); }
+.thread-empty { padding: 8px 16px; font-size: 12px; color: var(--fg-muted); font-style: italic; }
+.sidebar-ft { margin-top: auto; padding: 16px; border-top: 1px solid var(--border); }
+#setup-btn {
+  width: 100%; padding: 8px; background: var(--surface); color: var(--fg-muted);
+  border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; font-size: 13px;
+}
+#setup-btn:hover { color: var(--fg); border-color: var(--fg-muted); }
+main { display: flex; flex-direction: column; padding: 24px; overflow: hidden; }
+header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+header h1 { font-size: 16px; font-weight: 600; }
+#status { font-size: 12px; color: var(--fg-muted); display: flex; align-items: center; gap: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-muted); flex-shrink: 0; }
+.dot.ok { background: var(--success); }
+.dot.off { background: var(--error); }
+textarea {
+  width: 100%; padding: 12px; font-size: 14px; font-family: inherit;
+  background: var(--surface); color: var(--fg); border: 1px solid var(--border);
+  border-radius: var(--radius); resize: vertical; min-height: 64px; line-height: 1.5;
+}
+textarea:focus { outline: none; border-color: var(--accent); }
+textarea::placeholder { color: var(--fg-muted); }
+.actions { display: flex; gap: 8px; margin: 8px 0 16px; }
+.actions button {
+  padding: 8px 24px; font-size: 13px; font-weight: 500;
+  border-radius: var(--radius); border: none; cursor: pointer;
+}
+#run-btn { background: var(--accent); color: #fff; }
+#run-btn:hover:not(:disabled) { opacity: .9; }
+#run-btn:disabled { opacity: .4; cursor: not-allowed; }
+#stop-btn { background: var(--surface); color: var(--fg-muted); border: 1px solid var(--border); }
+#stop-btn:disabled { opacity: .4; cursor: not-allowed; }
+#stop-btn:not(:disabled):hover { color: var(--error); border-color: var(--error); }
+#output {
+  flex: 1; overflow-y: auto; padding: 16px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word;
+}
+#output:empty::before { content: "Output will appear here..."; color: var(--fg-muted); font-style: italic; }
+.tool-badge {
+  display: inline-block; padding: 2px 8px; margin: 2px 4px 2px 0;
+  font-size: 11px; font-weight: 500;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--tool-bg); color: var(--tool-fg); border-radius: 3px; vertical-align: middle;
+}
+.err-line { display: block; color: var(--error); padding: 2px 0; font-size: 13px; }
+.err-block {
+  display: block; color: var(--error); padding: 8px 12px; margin: 8px 0;
+  border-left: 3px solid var(--error); font-size: 13px;
+}
+.done-line {
+  display: block; color: var(--fg-muted); padding: 12px 0 0; font-size: 12px;
+  border-top: 1px solid var(--border); margin-top: 12px;
+}
+@media (max-width: 640px) { #app { grid-template-columns: 1fr; } aside { display: none; } }
+</style>
+</head>
+<body>
+<div id="app">
+<aside>
+  <div class="sidebar-hd">Threads</div>
+  <div id="thread-list"><div class="thread-empty">No threads yet</div></div>
+  <div class="sidebar-ft"><button id="setup-btn">Setup</button></div>
+</aside>
+<main>
+  <header><h1>Local Smartz</h1><div id="status"><span class="dot"></span>Loading...</div></header>
+  <textarea id="prompt" placeholder="Research prompt... (Cmd+Enter to run)" rows="3" autofocus></textarea>
+  <div class="actions">
+    <button id="run-btn">Run</button>
+    <button id="stop-btn" disabled>Stop</button>
+  </div>
+  <div id="output"></div>
+</main>
+</div>
+<script>
+!function() {
+  const $ = id => document.getElementById(id);
+  const out = $('output'), pr = $('prompt'), runBtn = $('run-btn'), stopBtn = $('stop-btn');
+  let ctrl = null, activeThread = null;
+
+  const setRunning = v => { runBtn.disabled = v; stopBtn.disabled = !v; pr.disabled = v; };
+  const append = el => { out.appendChild(el); out.scrollTop = out.scrollHeight; };
+  const makeEl = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text) e.textContent = text;
+    return e;
+  };
+
+  function handleEvent(d) {
+    if (d.type === 'text') append(makeEl('span', '', d.content));
+    else if (d.type === 'tool') append(makeEl('span', 'tool-badge', d.name));
+    else if (d.type === 'tool_error') append(makeEl('span', 'err-line', '[' + d.name + '] ' + d.message));
+    else if (d.type === 'done') {
+      append(makeEl('span', 'done-line', 'Done (' + (d.duration_ms / 1000).toFixed(1) + 's)'));
+      setRunning(false); fetchThreads();
+    } else if (d.type === 'error') {
+      append(makeEl('span', 'err-block', d.message));
+      setRunning(false);
+    }
+  }
+
+  async function streamSSE(url, method) {
+    ctrl = new AbortController();
+    setRunning(true);
+    try {
+      const res = await fetch(url, { method: method || 'GET', signal: ctrl.signal });
+      if (!res.ok) {
+        const body = await res.text();
+        try { handleEvent({ type: 'error', message: JSON.parse(body).error }); }
+        catch(x) { handleEvent({ type: 'error', message: body || 'Request failed' }); }
+        ctrl = null; setRunning(false); return;
+      }
+      const reader = res.body.getReader(), dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buf += dec.decode(chunk.value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].indexOf('data: ') === 0) {
+            try { handleEvent(JSON.parse(lines[i].slice(6))); } catch(x) {}
+          }
+        }
+      }
+    } catch(e) {
+      if (e.name !== 'AbortError') handleEvent({ type: 'error', message: e.message });
+    }
+    ctrl = null; setRunning(false);
+  }
+
+  runBtn.addEventListener('click', () => {
+    const text = pr.value.trim();
+    if (!text) return;
+    out.innerHTML = '';
+    let url = '/api/research?prompt=' + encodeURIComponent(text);
+    if (activeThread) url += '&thread_id=' + encodeURIComponent(activeThread);
+    streamSSE(url);
+  });
+  stopBtn.addEventListener('click', () => { if (ctrl) ctrl.abort(); });
+  $('setup-btn').addEventListener('click', () => { out.innerHTML = ''; streamSSE('/api/setup', 'POST'); });
+  pr.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); if (!runBtn.disabled) runBtn.click(); }
+  });
+
+  async function fetchThreads() {
+    try {
+      const r = await fetch('/api/threads'), threads = await r.json(), el = $('thread-list');
+      if (!Array.isArray(threads) || !threads.length) {
+        el.innerHTML = '<div class="thread-empty">No threads yet</div>'; return;
+      }
+      el.innerHTML = '';
+      threads.forEach(t => {
+        const id = t.thread_id || t.id || '', title = t.title || id;
+        const d = makeEl('div', 'thread' + (id === activeThread ? ' active' : ''), title);
+        d.onclick = () => { activeThread = (activeThread === id) ? null : id; fetchThreads(); };
+        el.appendChild(d);
+      });
+    } catch(e) {}
+  }
+
+  async function fetchStatus() {
+    try {
+      const r = await fetch('/api/status'), d = await r.json();
+      const ok = d.ollama && d.ollama.running;
+      $('status').innerHTML = '<span class="dot ' + (ok ? 'ok' : 'off') + '"></span>'
+        + (ok ? 'Ready (' + d.profile + ')' : 'Offline');
+    } catch(e) {
+      $('status').innerHTML = '<span class="dot off"></span>Offline';
+    }
+  }
+
+  fetchStatus(); fetchThreads(); setInterval(fetchStatus, 30000);
+}();
+</script>
+</body>
+</html>"""
+
+
 class LocalSmartzHandler(BaseHTTPRequestHandler):
     """HTTP request handler with SSE support."""
 
@@ -47,6 +268,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_research(parsed)
         elif path == "/api/threads":
             self._handle_threads()
+        elif path == "":
+            self._serve_ui()
         else:
             self._json_response({"error": "Not found"}, 404)
 
@@ -96,6 +319,14 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             raise
 
     # ── Endpoints ──
+
+    def _serve_ui(self):
+        body = _UI_HTML.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _handle_health(self):
         from localsmartz.profiles import get_profile
@@ -392,8 +623,8 @@ def start_server(port: int = 11435, profile_name: str | None = None):
     # Store profile_name on handler class so all requests use consistent profile
     LocalSmartzHandler._default_profile = profile_name
     server = HTTPServer(("127.0.0.1", port), LocalSmartzHandler)
-    print(f"Local Smartz server running at http://localhost:{port}", file=sys.stderr)
-    print(f"Press Ctrl+C to stop.", file=sys.stderr)
+    print(f"\n  Local Smartz running at http://localhost:{port}", file=sys.stderr)
+    print(f"  Press Ctrl+C to stop.\n", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
