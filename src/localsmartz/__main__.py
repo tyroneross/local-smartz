@@ -265,7 +265,10 @@ def _handle_command(cmd: str, args, cwd: Path, model_override: str | None, profi
         new_model = _select_model(profile)
         if new_model:
             args._model_override = new_model
-            print(f"  Model → {new_model}")
+            # Save to config for next run
+            from localsmartz.config import save_config
+            save_config(cwd, {"planning_model": new_model, "profile": profile["name"]})
+            print(f"  Model → {new_model}  \033[32mSaved\033[0m")
         else:
             current = args._model_override if hasattr(args, '_model_override') and args._model_override else profile["planning_model"]
             print(f"  Model: {current} (unchanged)")
@@ -295,18 +298,14 @@ def _interactive(args, cwd: Path):
     from localsmartz.profiles import get_profile
     from localsmartz.threads import get_thread, load_context
 
-    profile = get_profile(args.profile, model_override=args.model)
+    from localsmartz.config import resolve_model
+
+    # Resolve model via CLI flag / config / picker
+    model_override = resolve_model(cwd, args.model, args.profile)
+    profile = get_profile(args.profile, model_override=model_override)
 
     if not _preflight(profile):
         sys.exit(1)
-
-    # Model selection — show picker if no --model flag
-    model_override = args.model
-    if not model_override:
-        model_override = _select_model(profile)
-
-    if model_override:
-        profile = get_profile(args.profile, model_override=model_override)
 
     # Store on args for /model command to update
     args._model_override = model_override
@@ -387,8 +386,12 @@ def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
     verbose = not args.quiet
     thread_id = args.thread
 
-    # Use explicit model_override, or fall back to --model flag
-    effective_override = model_override if model_override is not None else args.model
+    # Use explicit model_override (from REPL), or resolve via config/picker
+    if model_override is not None:
+        effective_override = model_override
+    else:
+        from localsmartz.config import resolve_model
+        effective_override = resolve_model(cwd, args.model, args.profile)
 
     # Preflight check
     profile = get_profile(args.profile, model_override=effective_override)
