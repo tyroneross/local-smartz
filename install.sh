@@ -99,4 +99,4 @@ echo "Setting up Ollama and downloading models..."
 localsmartz --setup || true
 
 echo ""
-echo "Done! Run: localsmartz"
+echo "Done! Run 'localsmartz' to pick your model and start researching."
