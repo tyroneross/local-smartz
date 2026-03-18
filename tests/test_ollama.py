@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 from localsmartz.ollama import (
     check_server,
     is_installed,
+    list_models_with_size,
     model_available,
     validate_for_profile,
 )
@@ -71,3 +72,43 @@ def test_validate_ready():
         ok, messages = validate_for_profile(profile)
         assert ok is True
         assert any("ready" in m for m in messages)
+
+
+def test_list_models_with_size():
+    """Returns (name, size_gb) tuples sorted by size ascending."""
+    mock_data = {
+        "models": [
+            {"name": "big:70b", "size": 40_000_000_000},
+            {"name": "small:8b", "size": 5_000_000_000},
+            {"name": "mid:20b", "size": 14_000_000_000},
+        ]
+    }
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = mock_data
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("localsmartz.ollama.httpx.get", return_value=mock_resp):
+        result = list_models_with_size()
+        assert len(result) == 3
+        assert result[0][0] == "small:8b"
+        assert result[2][0] == "big:70b"
+        assert abs(result[0][1] - 5.0) < 0.1
+
+
+def test_list_models_with_size_empty():
+    """Returns empty list when no models."""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"models": []}
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("localsmartz.ollama.httpx.get", return_value=mock_resp):
+        assert list_models_with_size() == []
+
+
+def test_list_models_with_size_error():
+    """Returns empty list on connection error."""
+    import httpx
+    with patch("localsmartz.ollama.httpx.get", side_effect=httpx.ConnectError("refused")):
+        assert list_models_with_size() == []

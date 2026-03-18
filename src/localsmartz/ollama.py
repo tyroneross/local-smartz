@@ -46,6 +46,26 @@ def list_models() -> list[str]:
         return []
 
 
+def list_models_with_size() -> list[tuple[str, float]]:
+    """List models with on-disk size in GB, sorted by size ascending.
+
+    Returns:
+        List of (model_name, size_gb) tuples. Empty list on error.
+    """
+    try:
+        resp = httpx.get(f"{OLLAMA_BASE}/api/tags", timeout=5.0)
+        resp.raise_for_status()
+        data = resp.json()
+        models = [
+            (m["name"], m.get("size", 0) / 1e9)
+            for m in data.get("models", [])
+        ]
+        models.sort(key=lambda x: x[1])
+        return models
+    except Exception:
+        return []
+
+
 def model_available(model_name: str) -> bool:
     """Check if a specific model is pulled in Ollama.
 
