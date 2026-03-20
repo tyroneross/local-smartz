@@ -3,7 +3,8 @@
 Endpoints:
     GET  /api/health              → Backend readiness
     GET  /api/status              → Profile, model, Ollama state
-    GET  /api/research?prompt=... → SSE stream of research events
+    GET  /api/research?prompt=... → SSE stream of research events (legacy)
+    POST /api/research            → SSE stream of research events
     GET  /api/threads             → Thread history
     POST /api/setup               → SSE stream of model download progress
 
@@ -15,6 +16,7 @@ import json
 import sys
 import time
 import traceback
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -23,6 +25,32 @@ from urllib.parse import parse_qs, urlparse
 def _json_bytes(data: dict, status: int = 200) -> tuple[bytes, int]:
     """Serialize dict to JSON bytes."""
     return json.dumps(data).encode("utf-8"), status
+
+
+def _iso_timestamp(value) -> str:
+    """Convert a Unix timestamp to an ISO 8601 UTC string."""
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        timestamp = time.time()
+    return (
+        datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _saved_model_override(cwd: Path) -> str | None:
+    """Load a persisted planning model for non-interactive server mode."""
+    try:
+        from localsmartz.config import load_config
+
+        config = load_config(cwd)
+        if config:
+            return config.get("planning_model")
+    except Exception:
+        pass
+    return None
 
 
 _UI_HTML = r"""<!DOCTYPE html>
@@ -167,11 +195,13 @@ textarea::placeholder { color: var(--fg-muted); }
     }
   }
 
-  async function streamSSE(url, method) {
+  async function streamSSE(url, options) {
     ctrl = new AbortController();
     setRunning(true);
     try {
-      const res = await fetch(url, { method: method || 'GET', signal: ctrl.signal });
+      const req = Object.assign({ method: 'GET' }, options || {});
+      req.signal = ctrl.signal;
+      const res = await fetch(url, req);
       if (!res.ok) {
         const body = await res.text();
         try { handleEvent({ type: 'error', message: JSON.parse(body).error }); }
@@ -202,12 +232,19 @@ textarea::placeholder { color: var(--fg-muted); }
     const text = pr.value.trim();
     if (!text) return;
     out.innerHTML = '';
-    let url = '/api/research?prompt=' + encodeURIComponent(text);
-    if (activeThread) url += '&thread_id=' + encodeURIComponent(activeThread);
-    streamSSE(url);
+    const payload = { prompt: text };
+    if (activeThread) payload.thread_id = activeThread;
+    streamSSE('/api/research', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
   });
   stopBtn.addEventListener('click', () => { if (ctrl) ctrl.abort(); });
-  $('setup-btn').addEventListener('click', () => { out.innerHTML = ''; streamSSE('/api/setup', 'POST'); });
+  $('setup-btn').addEventListener('click', () => {
+    out.innerHTML = '';
+    streamSSE('/api/setup', { method: 'POST' });
+  });
   pr.addEventListener('keydown', e => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); if (!runBtn.disabled) runBtn.click(); }
   });
@@ -231,9 +268,10 @@ textarea::placeholder { color: var(--fg-muted); }
   async function fetchStatus() {
     try {
       const r = await fetch('/api/status'), d = await r.json();
-      const ok = d.ollama && d.ollama.running;
-      $('status').innerHTML = '<span class="dot ' + (ok ? 'ok' : 'off') + '"></span>'
-        + (ok ? 'Ready (' + d.profile + ')' : 'Offline');
+      const ok = d.ready === true;
+      const online = d.ollama && d.ollama.running;
+      const label = ok ? 'Ready (' + d.profile + ')' : (online ? 'Setup required' : 'Offline');
+      $('status').innerHTML = '<span class="dot ' + (ok ? 'ok' : 'off') + '"></span>' + label;
     } catch(e) {
       $('status').innerHTML = '<span class="dot off"></span>Offline';
     }
@@ -277,7 +315,9 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
 
-        if path == "/api/setup":
+        if path == "/api/research":
+            self._handle_research_post()
+        elif path == "/api/setup":
             self._handle_setup()
         else:
             self._json_response({"error": "Not found"}, 404)
@@ -318,6 +358,35 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             raise
 
+    def _read_json_body(self) -> dict:
+        content_length = self.headers.get("Content-Length", "0")
+        try:
+            length = int(content_length)
+        except ValueError as exc:
+            raise ValueError("Invalid Content-Length header") from exc
+
+        raw_body = self.rfile.read(length) if length > 0 else b""
+        if not raw_body:
+            raise ValueError("Request body is required")
+
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Request body must be valid JSON") from exc
+
+        if not isinstance(payload, dict):
+            raise ValueError("Request body must be a JSON object")
+
+        return payload
+
+    def _serialize_thread(self, thread: dict) -> dict:
+        return {
+            "id": thread.get("id", ""),
+            "title": thread.get("title", ""),
+            "entry_count": thread.get("entry_count", 0),
+            "last_updated": _iso_timestamp(thread.get("updated_at")),
+        }
+
     # ── Endpoints ──
 
     def _serve_ui(self):
@@ -331,22 +400,35 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
     def _handle_health(self):
         from localsmartz.profiles import get_profile
 
-        profile = get_profile(self._default_profile)
+        cwd = Path.cwd()
+        model_override = _saved_model_override(cwd)
+        profile = get_profile(self._default_profile, model_override=model_override)
         self._json_response({"ok": True, "profile": profile["name"]})
 
     def _handle_status(self):
         from localsmartz.profiles import get_profile
-        from localsmartz.ollama import check_server, get_version, list_models
+        from localsmartz.ollama import check_server, get_version, list_models, model_available
 
-        profile = get_profile(self._default_profile)
+        cwd = Path.cwd()
+        model_override = _saved_model_override(cwd)
+        profile = get_profile(self._default_profile, model_override=model_override)
         ollama_ok = check_server()
         version = get_version() if ollama_ok else None
         models = list_models() if ollama_ok else []
+        required_models = [profile["planning_model"]]
+        if profile["execution_model"] != profile["planning_model"]:
+            required_models.append(profile["execution_model"])
+        missing_models = [
+            model for model in required_models
+            if ollama_ok and not model_available(model)
+        ]
 
         self._json_response({
             "profile": profile["name"],
             "planning_model": profile["planning_model"],
             "execution_model": profile["execution_model"],
+            "ready": ollama_ok and not missing_models,
+            "missing_models": missing_models,
             "ollama": {
                 "running": ollama_ok,
                 "version": version,
@@ -359,24 +441,47 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
 
         cwd = str(Path.cwd())
         threads = list_threads(cwd)
-        self._json_response(threads)
+        self._json_response([self._serialize_thread(thread) for thread in threads])
 
     def _handle_research(self, parsed):
         """Stream research results as Server-Sent Events."""
         params = parse_qs(parsed.query)
         prompt = params.get("prompt", [None])[0]
+        thread_id = params.get("thread_id", [None])[0]
+        profile_name = params.get("profile", [None])[0] or self._default_profile
+        self._handle_research_request(prompt, thread_id, profile_name)
 
-        if not prompt:
+    def _handle_research_post(self):
+        """Accept research requests as JSON for app clients."""
+        try:
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._json_response({"error": str(exc)}, 400)
+            return
+
+        prompt = payload.get("prompt")
+        thread_id = payload.get("thread_id")
+        profile_name = payload.get("profile") or self._default_profile
+        self._handle_research_request(prompt, thread_id, profile_name)
+
+    def _handle_research_request(
+        self,
+        prompt: str | None,
+        thread_id: str | None,
+        profile_name: str | None,
+    ):
+        if not isinstance(prompt, str) or not prompt.strip():
             self._json_response({"error": "No prompt provided"}, 400)
             return
 
-        thread_id = params.get("thread_id", [None])[0]
-        profile_name = params.get("profile", [None])[0] or self._default_profile
+        if thread_id is not None and not isinstance(thread_id, str):
+            self._json_response({"error": "thread_id must be a string"}, 400)
+            return
 
         self._start_sse()
 
         try:
-            self._stream_research(prompt, profile_name, thread_id)
+            self._stream_research(prompt.strip(), profile_name, thread_id)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
@@ -401,9 +506,11 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             })
             return
 
+        cwd = Path.cwd()
+        model_override = _saved_model_override(cwd)
+
         # Preflight: required model must be available
-        from localsmartz.ollama import model_available
-        profile = get_profile(profile_name)
+        profile = get_profile(profile_name, model_override=model_override)
         model = profile["planning_model"]
         if not model_available(model):
             available = ", ".join(list_models()) or "none"
@@ -412,8 +519,6 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                 "message": f"Model '{model}' not found \u2192 Pull it with: ollama pull {model}\nAvailable models: {available}",
             })
             return
-
-        cwd = Path.cwd()
 
         # Ensure storage
         storage = cwd / ".localsmartz"
@@ -428,6 +533,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             profile_name=profile_name,
             thread_id=thread_id,
             cwd=cwd,
+            model_override=model_override,
         )
 
         config = {"configurable": {"thread_id": thread_id or "default"}}
@@ -546,7 +652,9 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         self._start_sse()
 
         try:
-            profile = get_profile(self._default_profile)
+            cwd = Path.cwd()
+            model_override = _saved_model_override(cwd)
+            profile = get_profile(self._default_profile, model_override=model_override)
 
             # Check Ollama
             if not is_installed():

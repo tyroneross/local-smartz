@@ -68,12 +68,18 @@ struct ResearchView: View {
             }
         }
         .task {
+            appState.ollamaStatus = .loading
             await backend.start()
             if backend.isRunning {
-                appState.ollamaStatus = .ready
+                await refreshStatus()
                 await fetchThreads()
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(30))
+                    await refreshStatus()
+                }
             } else {
                 appState.ollamaStatus = .offline
+                errorMessage = backend.errorMessage
             }
         }
     }
@@ -129,7 +135,7 @@ struct ResearchView: View {
             Image(systemName: "text.magnifyingglass")
                 .font(.system(size: 32))
                 .foregroundStyle(.secondary)
-            Text("Ask a research question to get started")
+            Text(emptyStateMessage)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -165,6 +171,7 @@ struct ResearchView: View {
         !prompt.trimmingCharacters(in: .whitespaces).isEmpty
             && !isStreaming
             && backend.isRunning
+            && appState.ollamaStatus == .ready
     }
 
     private var ollamaColor: Color {
@@ -172,6 +179,7 @@ struct ResearchView: View {
         case .ready: return .green
         case .offline: return .red
         case .loading: return .orange
+        case .needsSetup: return .orange
         case .unknown: return .secondary
         }
     }
@@ -181,7 +189,23 @@ struct ResearchView: View {
         case .ready: return "Ready"
         case .offline: return "Offline"
         case .loading: return "Loading"
+        case .needsSetup: return "Setup required"
         case .unknown: return "..."
+        }
+    }
+
+    private var emptyStateMessage: String {
+        switch appState.ollamaStatus {
+        case .ready:
+            return "Ask a research question to get started"
+        case .offline:
+            return "Start Ollama to begin researching"
+        case .loading:
+            return "Checking backend and model readiness..."
+        case .needsSetup:
+            return "Download the required model before researching"
+        case .unknown:
+            return "Preparing Local Smartz..."
         }
     }
 
@@ -208,17 +232,34 @@ struct ResearchView: View {
         isStreaming = true
         appState.isResearching = true
 
-        var components = URLComponents(string: "\(backend.baseURL)/api/research")!
-        components.queryItems = [URLQueryItem(name: "prompt", value: query)]
-        if let threadId = selectedThread {
-            components.queryItems?.append(URLQueryItem(name: "thread_id", value: threadId))
+        guard let url = URL(string: "\(backend.baseURL)/api/research") else {
+            isStreaming = false
+            appState.isResearching = false
+            errorMessage = "Could not build the research request."
+            return
         }
 
-        guard let url = components.url else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        var payload: [String: String] = ["prompt": query]
+        if let threadId = selectedThread {
+            payload["thread_id"] = threadId
+        }
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        } catch {
+            isStreaming = false
+            appState.isResearching = false
+            errorMessage = "Could not encode the research request."
+            return
+        }
 
         Task {
             do {
-                for try await event in await sseClient.stream(url: url) {
+                for try await event in await sseClient.stream(request: request) {
                     handleEvent(event)
                 }
             } catch {
@@ -228,6 +269,7 @@ struct ResearchView: View {
             }
             isStreaming = false
             appState.isResearching = false
+            await refreshStatus()
             await fetchThreads()
         }
     }
@@ -260,6 +302,37 @@ struct ResearchView: View {
         }
     }
 
+    private func refreshStatus() async {
+        guard backend.isRunning,
+              let url = URL(string: "\(backend.baseURL)/api/status") else {
+            appState.ollamaStatus = .offline
+            return
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                appState.ollamaStatus = .loading
+                return
+            }
+
+            let status = try JSONDecoder().decode(BackendStatusResponse.self, from: data)
+            appState.profile = status.profile
+
+            if !status.ollama.running {
+                appState.ollamaStatus = .offline
+            } else if status.ready {
+                appState.ollamaStatus = .ready
+            } else if !status.missingModels.isEmpty {
+                appState.ollamaStatus = .needsSetup
+            } else {
+                appState.ollamaStatus = .loading
+            }
+        } catch {
+            appState.ollamaStatus = .loading
+        }
+    }
+
     private func formatDuration(_ ms: Int) -> String {
         if ms < 1000 { return "\(ms)ms" }
         let seconds = Double(ms) / 1000.0
@@ -267,5 +340,23 @@ struct ResearchView: View {
         let minutes = Int(seconds) / 60
         let secs = Int(seconds) % 60
         return "\(minutes)m \(secs)s"
+    }
+}
+
+private struct BackendStatusResponse: Decodable {
+    let profile: String
+    let ready: Bool
+    let missingModels: [String]
+    let ollama: OllamaState
+
+    struct OllamaState: Decodable {
+        let running: Bool
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case profile
+        case ready
+        case missingModels = "missing_models"
+        case ollama
     }
 }

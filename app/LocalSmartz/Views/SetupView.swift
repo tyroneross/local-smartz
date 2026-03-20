@@ -2,20 +2,13 @@ import SwiftUI
 
 struct SetupView: View {
     @EnvironmentObject var appState: AppState
-    @StateObject private var backend = BackendManager()
 
     @State private var pythonPath = ""
     @State private var projectDirectory = ""
-    @State private var phase: SetupPhase = .detectPython
+    @State private var localsmartzReady = false
+    @State private var ollamaReady = false
     @State private var statusText = ""
     @State private var errorText = ""
-
-    enum SetupPhase {
-        case detectPython
-        case checkOllama
-        case ready
-        case failed
-    }
 
     var body: some View {
         VStack(spacing: 24) {
@@ -39,24 +32,27 @@ struct SetupView: View {
             // Setup steps
             VStack(alignment: .leading, spacing: 16) {
                 stepRow(
-                    number: 1,
                     title: "Python",
                     detail: pythonPath.isEmpty ? "Detecting..." : pythonPath,
                     done: !pythonPath.isEmpty
                 )
 
                 stepRow(
-                    number: 2,
-                    title: "Ollama",
-                    detail: phase == .checkOllama ? "Checking..." : (phase == .ready ? "Ready" : "Waiting"),
-                    done: phase == .ready
+                    title: "Local Smartz",
+                    detail: localsmartzReady ? "Installed in selected Python" : "Not installed yet",
+                    done: localsmartzReady
                 )
 
                 stepRow(
-                    number: 3,
-                    title: "Project directory",
-                    detail: projectDirectory.isEmpty ? NSHomeDirectory() : projectDirectory,
-                    done: phase == .ready
+                    title: "Workspace",
+                    detail: projectDirectory.isEmpty ? defaultWorkspaceDirectory() : projectDirectory,
+                    done: !projectDirectory.isEmpty
+                )
+
+                stepRow(
+                    title: "Ollama",
+                    detail: ollamaReady ? "Running" : "Not running",
+                    done: ollamaReady
                 )
             }
             .frame(maxWidth: 400)
@@ -85,11 +81,16 @@ struct SetupView: View {
                 }
                 .buttonStyle(.bordered)
 
+                Button("Choose Workspace...") {
+                    chooseWorkspace()
+                }
+                .buttonStyle(.bordered)
+
                 Button("Get Started") {
                     completeSetup()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(phase != .ready)
+                .disabled(!canCompleteSetup)
             }
 
             Spacer().frame(height: 16)
@@ -100,7 +101,11 @@ struct SetupView: View {
         }
     }
 
-    private func stepRow(number: Int, title: String, detail: String, done: Bool) -> some View {
+    private var canCompleteSetup: Bool {
+        !pythonPath.isEmpty && localsmartzReady && !projectDirectory.isEmpty
+    }
+
+    private func stepRow(title: String, detail: String, done: Bool) -> some View {
         HStack(spacing: 12) {
             Image(systemName: done ? "checkmark.circle.fill" : "circle")
                 .foregroundStyle(done ? .green : .secondary)
@@ -119,8 +124,12 @@ struct SetupView: View {
     }
 
     private func detectPython() async {
-        phase = .detectPython
         statusText = "Looking for Python..."
+        errorText = ""
+        localsmartzReady = false
+        ollamaReady = false
+        projectDirectory = UserDefaults.standard.string(forKey: "projectDirectory")
+            ?? defaultWorkspaceDirectory()
 
         // Try common locations
         let candidates = [
@@ -155,34 +164,55 @@ struct SetupView: View {
             return
         }
 
-        // Check if localsmartz is importable
-        statusText = "Checking localsmartz package..."
-        let importOk = await runCommand(pythonPath, arguments: ["-m", "localsmartz", "--version"])
-        if !importOk.contains("localsmartz") && !importOk.contains("0.") {
-            errorText = "localsmartz not installed. Run: pip install localsmartz"
+        await validateEnvironment()
+    }
+
+    private func validateEnvironment() async {
+        statusText = "Checking Local Smartz..."
+        await checkLocalSmartz()
+        guard localsmartzReady else { return }
+        await checkOllama()
+    }
+
+    private func checkLocalSmartz() async {
+        let versionOutput = await runCommand(
+            pythonPath,
+            arguments: ["-m", "localsmartz", "--version"]
+        )
+        localsmartzReady = versionOutput.contains("localsmartz")
+
+        if !localsmartzReady {
+            errorText = "Local Smartz is not installed in this Python environment. Install it there, then try again."
+            statusText = ""
+            return
         }
 
-        projectDirectory = NSHomeDirectory()
-        phase = .checkOllama
-        await checkOllama()
+        errorText = ""
     }
 
     private func checkOllama() async {
         statusText = "Checking Ollama..."
 
-        let result = await runCommand(pythonPath, arguments: [
-            "-c", "import httpx; r = httpx.get('http://localhost:11434/api/version', timeout=3); print(r.status_code)"
-        ])
-
-        if result.contains("200") {
-            phase = .ready
-            statusText = "Everything looks good."
-            errorText = ""
-        } else {
-            errorText = "Ollama not running \u{2192} The local LLM server isn't active \u{2192} Start it with: ollama serve"
-            phase = .ready // Allow proceeding — app will show status in toolbar
-            statusText = ""
+        guard let url = URL(string: "http://localhost:11434/api/version") else {
+            ollamaReady = false
+            return
         }
+
+        do {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 3
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                ollamaReady = true
+                statusText = "Local Smartz is ready."
+                return
+            }
+        } catch {
+            // Fall through to offline state below.
+        }
+
+        ollamaReady = false
+        statusText = "Local Smartz is installed. Start Ollama before researching."
     }
 
     private func verifyPython(_ path: String) async -> Bool {
@@ -199,11 +229,29 @@ struct SetupView: View {
 
         if panel.runModal() == .OK, let url = panel.url {
             pythonPath = url.path
-            Task { await checkOllama() }
+            Task { await validateEnvironment() }
+        }
+    }
+
+    private func chooseWorkspace() {
+        let panel = NSOpenPanel()
+        panel.title = "Select workspace directory"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+
+        if panel.runModal() == .OK, let url = panel.url {
+            projectDirectory = url.path
         }
     }
 
     private func completeSetup() {
+        try? FileManager.default.createDirectory(
+            atPath: projectDirectory,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
         UserDefaults.standard.set(pythonPath, forKey: "pythonPath")
         UserDefaults.standard.set(projectDirectory, forKey: "projectDirectory")
         appState.markConfigured()
@@ -211,20 +259,30 @@ struct SetupView: View {
 
     private func runCommand(_ command: String, arguments: [String]) async -> String {
         await withCheckedContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: command)
-            process.arguments = arguments
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            do {
-                try process.run()
-                process.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                continuation.resume(returning: String(data: data, encoding: .utf8) ?? "")
-            } catch {
-                continuation.resume(returning: "")
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: command)
+                process.arguments = arguments
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = pipe
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    continuation.resume(returning: String(data: data, encoding: .utf8) ?? "")
+                } catch {
+                    continuation.resume(returning: "")
+                }
             }
         }
+    }
+
+    private func defaultWorkspaceDirectory() -> String {
+        let baseURL = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? URL(fileURLWithPath: NSHomeDirectory())
+        return baseURL.appendingPathComponent("LocalSmartz").path
     }
 }

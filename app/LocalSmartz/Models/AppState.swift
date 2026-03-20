@@ -12,14 +12,19 @@ class AppState: ObservableObject {
         case ready
         case offline
         case loading
+        case needsSetup
     }
 
     init() {
-        if let path = UserDefaults.standard.string(forKey: "pythonPath"),
-           FileManager.default.fileExists(atPath: path) {
+        let defaults = UserDefaults.standard
+        if let pythonPath = defaults.string(forKey: "pythonPath"),
+           FileManager.default.fileExists(atPath: pythonPath),
+           let projectDirectory = defaults.string(forKey: "projectDirectory"),
+           FileManager.default.fileExists(atPath: projectDirectory) {
             self.isConfigured = true
         } else {
-            UserDefaults.standard.removeObject(forKey: "pythonPath")
+            defaults.removeObject(forKey: "pythonPath")
+            defaults.removeObject(forKey: "projectDirectory")
             self.isConfigured = false
         }
     }

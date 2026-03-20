@@ -4,18 +4,40 @@ actor SSEClient {
     private var activeTask: Task<Void, Never>?
 
     func stream(url: URL) -> AsyncThrowingStream<SSEEvent, Error> {
+        let request = URLRequest(url: url)
+        return stream(request: request)
+    }
+
+    func stream(request: URLRequest) -> AsyncThrowingStream<SSEEvent, Error> {
         AsyncThrowingStream { continuation in
             activeTask = Task {
                 do {
-                    var request = URLRequest(url: url)
+                    var request = request
                     request.timeoutInterval = 600
-                    request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    if request.value(forHTTPHeaderField: "Accept") == nil {
+                        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    }
 
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
 
-                    guard let http = response as? HTTPURLResponse,
-                          http.statusCode == 200 else {
-                        continuation.finish(throwing: SSEError.badResponse)
+                    guard let http = response as? HTTPURLResponse else {
+                        continuation.finish(throwing: SSEError.badResponse(statusCode: nil, message: nil))
+                        return
+                    }
+
+                    guard http.statusCode == 200 else {
+                        var responseBody = ""
+                        for try await byte in bytes {
+                            responseBody.append(Character(UnicodeScalar(byte)))
+                        }
+
+                        let message = SSEClient.errorMessage(from: responseBody)
+                        continuation.finish(
+                            throwing: SSEError.badResponse(
+                                statusCode: http.statusCode,
+                                message: message
+                            )
+                        )
                         return
                     }
 
@@ -56,6 +78,22 @@ actor SSEClient {
         }
     }
 
+    private static func errorMessage(from responseBody: String) -> String? {
+        guard !responseBody.isEmpty,
+              let data = responseBody.data(using: .utf8) else {
+            return nil
+        }
+
+        if let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = dict["error"] as? String,
+           !error.isEmpty {
+            return error
+        }
+
+        let trimmed = responseBody.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     func cancel() {
         activeTask?.cancel()
         activeTask = nil
@@ -63,12 +101,19 @@ actor SSEClient {
 }
 
 enum SSEError: Error, LocalizedError {
-    case badResponse
+    case badResponse(statusCode: Int?, message: String?)
     case connectionLost
 
     var errorDescription: String? {
         switch self {
-        case .badResponse: return "Backend returned an error response"
+        case .badResponse(let statusCode, let message):
+            if let message, !message.isEmpty {
+                return message
+            }
+            if let statusCode {
+                return "Backend returned HTTP \(statusCode)"
+            }
+            return "Backend returned an error response"
         case .connectionLost: return "Connection to backend lost"
         }
     }

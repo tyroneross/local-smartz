@@ -45,6 +45,23 @@ def _get_raw(port: int, path: str) -> tuple[int, str, str]:
     return status, ctype, body
 
 
+def _post(port: int, path: str, payload: dict) -> tuple[int, dict]:
+    """Helper — make a POST request with JSON, return (status, json_body)."""
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    body = json.dumps(payload)
+    conn.request(
+        "POST",
+        path,
+        body=body,
+        headers={"Content-Type": "application/json"},
+    )
+    resp = conn.getresponse()
+    status = resp.status
+    response_body = json.loads(resp.read().decode("utf-8"))
+    conn.close()
+    return status, response_body
+
+
 # ── Web UI ──
 
 def test_ui_serves_html(server):
@@ -83,10 +100,13 @@ def test_status_returns_profile(server):
     with patch("localsmartz.profiles.get_profile", return_value=mock_profile), \
          patch("localsmartz.ollama.check_server", return_value=True), \
          patch("localsmartz.ollama.get_version", return_value="0.5.0"), \
-         patch("localsmartz.ollama.list_models", return_value=["qwen3:8b"]):
+         patch("localsmartz.ollama.list_models", return_value=["qwen3:8b"]), \
+         patch("localsmartz.ollama.model_available", return_value=True):
         status, body = _get(server, "/api/status")
     assert status == 200
     assert body["profile"] == "lite"
+    assert body["ready"] is True
+    assert body["missing_models"] == []
     assert body["ollama"]["running"] is True
     assert body["ollama"]["version"] == "0.5.0"
 
@@ -98,6 +118,7 @@ def test_status_ollama_offline(server):
          patch("localsmartz.ollama.check_server", return_value=False):
         status, body = _get(server, "/api/status")
     assert status == 200
+    assert body["ready"] is False
     assert body["ollama"]["running"] is False
     assert body["ollama"]["version"] is None
 
@@ -115,13 +136,14 @@ def test_threads_empty(server):
 def test_threads_with_data(server):
     """GET /api/threads returns thread list."""
     mock_threads = [
-        {"id": "t1", "title": "AI trends", "entry_count": 3, "last_updated": "2026-03-15T12:00:00"},
+        {"id": "t1", "title": "AI trends", "entry_count": 3, "updated_at": 1773576000},
     ]
     with patch("localsmartz.threads.list_threads", return_value=mock_threads):
         status, body = _get(server, "/api/threads")
     assert status == 200
     assert len(body) == 1
     assert body[0]["id"] == "t1"
+    assert body[0]["last_updated"].endswith("Z")
 
 
 # ── Research endpoint ──
@@ -129,6 +151,13 @@ def test_threads_with_data(server):
 def test_research_missing_prompt(server):
     """GET /api/research without prompt returns 400."""
     status, body = _get(server, "/api/research")
+    assert status == 400
+    assert "error" in body
+
+
+def test_research_post_missing_prompt(server):
+    """POST /api/research without prompt returns 400."""
+    status, body = _post(server, "/api/research", {})
     assert status == 400
     assert "error" in body
 

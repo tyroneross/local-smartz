@@ -62,7 +62,14 @@ class BackendManager: ObservableObject {
         self.port = testPort
 
         let pythonPath = UserDefaults.standard.string(forKey: "pythonPath") ?? "/usr/bin/python3"
-        let projectDir = UserDefaults.standard.string(forKey: "projectDirectory") ?? NSHomeDirectory()
+        let projectDir = UserDefaults.standard.string(forKey: "projectDirectory")
+            ?? defaultWorkspaceDirectory()
+
+        try? FileManager.default.createDirectory(
+            atPath: projectDir,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
@@ -79,11 +86,15 @@ class BackendManager: ObservableObject {
             // Monitor stderr
             Task.detached { [weak self] in
                 let handle = errorPipe.fileHandleForReading
-                while let data = try? handle.availableData, !data.isEmpty {
+                while true {
+                    let data = handle.availableData
+                    guard !data.isEmpty else { break }
                     if let errorStr = String(data: data, encoding: .utf8) {
-                        await MainActor.run {
-                            if let self = self, !self.isRunning {
-                                self.errorMessage = errorStr.trimmingCharacters(in: .whitespacesAndNewlines)
+                        await MainActor.run { [weak self] in
+                            if let self, !self.isRunning {
+                                self.errorMessage = errorStr.trimmingCharacters(
+                                    in: .whitespacesAndNewlines
+                                )
                             }
                         }
                     }
@@ -152,5 +163,13 @@ class BackendManager: ObservableObject {
         }
         close(socketFD)
         return result == 0
+    }
+
+    private func defaultWorkspaceDirectory() -> String {
+        let baseURL = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? URL(fileURLWithPath: NSHomeDirectory())
+        return baseURL.appendingPathComponent("LocalSmartz").path
     }
 }

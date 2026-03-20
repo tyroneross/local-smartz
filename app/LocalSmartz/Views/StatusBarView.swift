@@ -62,6 +62,10 @@ struct StatusBarView: View {
             Text("Loading")
                 .font(.caption)
                 .foregroundStyle(.orange)
+        case .needsSetup:
+            Text("Setup")
+                .font(.caption)
+                .foregroundStyle(.orange)
         case .unknown:
             Text("...")
                 .font(.caption)
