@@ -56,6 +56,7 @@ def load_config(cwd: Path) -> dict | None:
 def save_config(cwd: Path, config: dict) -> None:
     """Save config to .localsmartz/config.json.
 
+    Read-modify-write: merges new keys with existing config.
     Atomic write: writes to temp file in same directory, then renames.
     Creates .localsmartz/ directory if it doesn't exist.
     """
@@ -64,17 +65,29 @@ def save_config(cwd: Path, config: dict) -> None:
 
     path = _config_path(cwd)
 
+    # Read existing config to merge
+    existing = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text())
+            if not isinstance(existing, dict):
+                existing = {}
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+
+    # Merge: new keys overwrite existing, existing keys preserved
+    merged = {**existing, **config}
+
     # Atomic write
     fd, tmp_path = tempfile.mkstemp(
         dir=str(config_dir), suffix=".tmp", prefix="config_"
     )
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(config, f, indent=2)
+            json.dump(merged, f, indent=2)
             f.write("\n")
         os.replace(tmp_path, str(path))
     except Exception:
-        # Clean up temp file on failure
         try:
             os.unlink(tmp_path)
         except OSError:

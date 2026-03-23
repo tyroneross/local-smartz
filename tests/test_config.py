@@ -126,3 +126,22 @@ def test_first_run_picker_empty_input_selects_recommended(tmp_path, monkeypatch)
         monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True})())
         result = first_run_picker(tmp_path, "full")
         assert result == "large:70b"
+
+
+def test_save_config_merges_existing_keys(tmp_path):
+    """save_config merges with existing config, doesn't overwrite."""
+    save_config(tmp_path, {"planning_model": "model-a", "profile": "full"})
+    save_config(tmp_path, {"folders": ["~/docs"]})
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded["planning_model"] == "model-a"
+    assert loaded["folders"] == ["~/docs"]
+
+
+def test_save_config_overwrites_same_key(tmp_path):
+    """save_config overwrites keys that are explicitly passed."""
+    save_config(tmp_path, {"planning_model": "model-a", "profile": "full"})
+    save_config(tmp_path, {"planning_model": "model-b"})
+    loaded = load_config(tmp_path)
+    assert loaded["planning_model"] == "model-b"
+    assert loaded["profile"] == "full"
