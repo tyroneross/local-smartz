@@ -7,6 +7,15 @@ from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
 
+def _browser_available() -> bool:
+    """Check if Playwright is installed."""
+    try:
+        import playwright
+        return True
+    except ImportError:
+        return False
+
+
 def _extract_title(soup: BeautifulSoup) -> str:
     """Extract page title from HTML."""
     og = soup.find("meta", property="og:title")
@@ -160,14 +169,20 @@ def _html_table_to_markdown(table_element) -> str:
 
 
 @tool
-def scrape_url(url: str, extract_tables: bool = False, selector: str | None = None) -> str:
+def scrape_url(url: str, extract_tables: bool = False, selector: str | None = None, use_browser: bool = False) -> str:
     """Fetch a URL and extract its main content as clean markdown.
 
     Args:
         url: The URL to scrape
         extract_tables: If True, convert HTML tables to markdown tables
         selector: Optional CSS selector to extract specific content
+        use_browser: If True, use Playwright browser instead of httpx
     """
+    # Explicit browser request — skip httpx entirely
+    if use_browser and _browser_available():
+        from localsmartz.tools.browser import scrape_with_browser
+        return scrape_with_browser(url, selector=selector)
+
     try:
         try:
             import truststore
@@ -210,6 +225,21 @@ def scrape_url(url: str, extract_tables: bool = False, selector: str | None = No
             content_text = _extract_text(target, extract_tables)
     else:
         content_text = _extract_main_content(soup, extract_tables)
+
+    # Auto-fallback: if content suspiciously short, retry with Playwright (full profile only)
+    if len(content_text.strip()) < 500 and _browser_available():
+        try:
+            from localsmartz.config import load_config
+            from pathlib import Path
+            config = load_config(Path.cwd())
+            is_full = config and config.get("profile") == "full"
+            if is_full:
+                from localsmartz.tools.browser import scrape_with_browser
+                browser_content = scrape_with_browser(url, selector=selector)
+                if len(browser_content.strip()) > len(content_text.strip()):
+                    content_text = browser_content
+        except Exception:
+            pass  # Fallback failure is non-fatal
 
     sections: list[str] = []
     sections.append(f"# {title}" if title else f"# {url}")
