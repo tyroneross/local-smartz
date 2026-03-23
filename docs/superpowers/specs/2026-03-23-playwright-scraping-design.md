@@ -22,7 +22,9 @@ scrape_url(url) →
   3. Return best result
 ```
 
-Optional `use_browser: bool = False` parameter for explicit Playwright requests.
+Add `use_browser: bool = False` parameter to `scrape_url()` signature. When `True`, skip httpx entirely and go straight to Playwright (regardless of profile). This lets the LLM explicitly request browser scraping when it knows a page is JS-rendered.
+
+Note on `selector` semantics: httpx path uses `select_one()` (first match), Playwright path uses `query_selector_all()` (all matches, joined with `\n\n`). The browser behavior returns more content — this is intentional and documented, not a bug.
 
 ### Profile gating
 
@@ -192,7 +194,7 @@ Add auto-fallback after the httpx+bs4 attempt:
 
 ```python
 # After existing content extraction, before returning:
-if len(content_text.strip()) < 100 and _browser_available():
+if len(content_text.strip()) < 500 and is_full and _browser_available():
     # Content too short — likely JS-rendered, retry with browser
     from localsmartz.tools.browser import scrape_with_browser
     browser_content = scrape_with_browser(url, selector=selector)
@@ -230,18 +232,21 @@ This avoids any mutable module-level flags.
 
 In the terminal wizard Step 1, after Ollama check:
 ```python
-    # Check Playwright browsers
+    # Check Playwright browsers (only if playwright is installed)
     try:
         import playwright
-        # Check if chromium is installed
-        import subprocess
-        result = subprocess.run(
-            ["playwright", "install", "--dry-run", "chromium"],
-            capture_output=True, text=True
-        )
-        if "already installed" not in result.stdout.lower():
+        from pathlib import Path as _P
+        import os
+        # Check if Chromium is cached (standard Playwright cache location)
+        cache_dir = _P(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", _P.home() / ".cache" / "ms-playwright"))
+        chromium_dirs = list(cache_dir.glob("chromium-*")) if cache_dir.exists() else []
+        if not chromium_dirs:
             print("  Installing browser for web scraping...")
+            import subprocess
             subprocess.run(["playwright", "install", "chromium"], check=True)
+            print("  \033[32m\u2713\033[0m Browser installed")
+        else:
+            print("  \033[32m\u2713\033[0m Browser: ready")
     except ImportError:
         pass  # Playwright not installed — skip
 ```
