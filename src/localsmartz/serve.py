@@ -60,92 +60,174 @@ _UI_HTML = r"""<!DOCTYPE html>
 <title>Local Smartz</title>
 <style>
 :root {
-  --bg: #f5f5f5; --surface: #fff; --border: #e0e0e0;
-  --fg: #1a1a1a; --fg-muted: #666; --accent: #0066cc;
-  --error: #cc2200; --success: #228833;
-  --tool-bg: #eef2ff; --tool-fg: #4455aa; --radius: 6px;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1a1a1a; --surface: #242424; --border: #333;
-    --fg: #e0e0e0; --fg-muted: #888; --accent: #4a9eff;
-    --error: #ff4444; --success: #44cc44;
-    --tool-bg: #2a2a3a; --tool-fg: #8899dd;
-  }
+  --bg: #0c0c0c; --surface: #161616; --surface-raised: #1c1c1c;
+  --border: rgba(255,255,255,0.06); --border-hover: rgba(255,255,255,0.12);
+  --fg: #e4e4e4; --fg-secondary: rgba(228,228,228,0.6); --fg-muted: rgba(228,228,228,0.3);
+  --teal: #0ea5e9; --teal-dim: rgba(14,165,233,0.15); --teal-glow: rgba(14,165,233,0.25);
+  --amber: #f59e0b; --amber-dim: rgba(245,158,11,0.15);
+  --green: #22c55e; --green-dim: rgba(34,197,94,0.2);
+  --red: #ef4444;
+  --radius: 10px;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   background: var(--bg); color: var(--fg); height: 100vh; overflow: hidden;
 }
-#app { display: grid; grid-template-columns: 200px 1fr; height: 100vh; }
+#app { display: grid; grid-template-columns: 240px 1fr; height: 100vh; }
 aside {
   background: var(--surface); border-right: 1px solid var(--border);
   display: flex; flex-direction: column; overflow-y: auto;
 }
-.sidebar-hd {
-  padding: 16px 16px 8px; font-size: 11px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: .05em; color: var(--fg-muted);
+.brand {
+  display: flex; align-items: center; gap: 10px;
+  padding: 18px 16px 14px; border-bottom: 1px solid var(--border);
 }
-.thread {
-  padding: 8px 16px; font-size: 13px; cursor: pointer;
-  border-left: 2px solid transparent; color: var(--fg-muted);
+.brand-icon {
+  width: 32px; height: 32px; border-radius: 8px;
+  background: linear-gradient(135deg, var(--teal), #0284c7);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: #fff; flex-shrink: 0;
+}
+.brand-text { font-size: 13px; font-weight: 600; color: var(--fg); }
+.brand-sub { font-size: 10px; color: var(--fg-muted); margin-top: 1px; }
+.panel-section {
+  padding: 12px 0; border-bottom: 1px solid var(--border);
+}
+.panel-label {
+  padding: 0 16px 6px; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .08em; color: var(--fg-muted);
+}
+.model-card {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 16px; cursor: default;
+}
+.model-name { font-size: 12px; font-weight: 500; color: var(--fg); }
+.model-size { font-size: 11px; color: var(--fg-muted); margin-top: 2px; }
+.model-change {
+  font-size: 11px; color: var(--teal); cursor: pointer; flex-shrink: 0;
+  padding: 3px 8px; border-radius: 4px; border: 1px solid var(--teal-dim);
+  transition: background .15s;
+}
+.model-change:hover { background: var(--teal-dim); }
+.model-list { display: flex; flex-direction: column; }
+.model-option {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 16px; font-size: 12px; cursor: pointer;
+  border-bottom: 1px solid var(--border); transition: background .15s;
+}
+.model-option:hover { background: var(--surface-raised); }
+.model-option:last-child { border-bottom: none; }
+.folder-item {
+  display: flex; align-items: center; padding: 5px 16px; font-size: 11px;
+  color: var(--fg-secondary); gap: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.thread:hover { color: var(--fg); background: var(--bg); }
-.thread.active { color: var(--fg); font-weight: 500; border-left-color: var(--accent); }
-.thread-empty { padding: 8px 16px; font-size: 12px; color: var(--fg-muted); font-style: italic; }
-.sidebar-ft { margin-top: auto; padding: 16px; border-top: 1px solid var(--border); }
-#setup-btn {
-  width: 100%; padding: 8px; background: var(--surface); color: var(--fg-muted);
-  border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; font-size: 13px;
+.folder-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--teal); flex-shrink: 0;
 }
-#setup-btn:hover { color: var(--fg); border-color: var(--fg-muted); }
-main { display: flex; flex-direction: column; padding: 24px; overflow: hidden; }
-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-header h1 { font-size: 16px; font-weight: 600; }
-#status { font-size: 12px; color: var(--fg-muted); display: flex; align-items: center; gap: 6px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-muted); flex-shrink: 0; }
-.dot.ok { background: var(--success); }
-.dot.off { background: var(--error); }
+.folder-remove {
+  margin-left: auto; cursor: pointer; color: var(--fg-muted);
+  font-size: 14px; padding: 0 4px; transition: color .15s; flex-shrink: 0;
+}
+.folder-remove:hover { color: var(--red); }
+.add-folder {
+  display: block; width: calc(100% - 32px); margin: 6px 16px 4px;
+  padding: 5px 10px; font-size: 11px; cursor: pointer;
+  background: transparent; color: var(--fg-muted);
+  border: 1px dashed var(--border-hover); border-radius: 5px;
+  transition: color .15s, border-color .15s;
+}
+.add-folder:hover { color: var(--teal); border-color: var(--teal-dim); }
+.folder-input {
+  width: calc(100% - 32px); display: block; padding: 5px 8px; font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--surface-raised); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 4px;
+  margin: 4px 16px 0; outline: none;
+}
+.folder-input:focus { border-color: var(--teal); }
+.thread {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 16px; cursor: pointer; transition: background .15s;
+}
+.thread:hover { background: var(--surface-raised); }
+.thread.active { background: var(--teal-dim); }
+.thread-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--fg-muted); flex-shrink: 0; margin-top: 4px;
+}
+.thread.active .thread-dot { background: var(--teal); }
+.thread-info { overflow: hidden; }
+.thread-title {
+  font-size: 12px; color: var(--fg); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.thread-time { font-size: 10px; color: var(--fg-muted); margin-top: 2px; }
+.thread-empty { padding: 8px 16px; font-size: 11px; color: var(--fg-muted); font-style: italic; }
+.status-bar {
+  padding: 10px 16px; font-size: 11px; color: var(--fg-muted);
+  border-top: 1px solid var(--border); display: flex; align-items: center; gap: 6px;
+  margin-top: auto;
+}
+.status-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--fg-muted); flex-shrink: 0;
+}
+main {
+  display: flex; flex-direction: column; padding: 28px 32px 24px;
+  overflow: hidden; background: var(--bg);
+}
+.main-header { margin-bottom: 20px; }
+.main-header h1 { font-size: 20px; font-weight: 600; color: var(--fg); }
+.main-header p { font-size: 13px; color: var(--fg-muted); margin-top: 4px; }
 textarea {
-  width: 100%; padding: 12px; font-size: 14px; font-family: inherit;
+  width: 100%; padding: 14px; font-size: 14px; font-family: inherit;
   background: var(--surface); color: var(--fg); border: 1px solid var(--border);
-  border-radius: var(--radius); resize: vertical; min-height: 64px; line-height: 1.5;
+  border-radius: var(--radius); resize: vertical; min-height: 80px; line-height: 1.6;
+  transition: border-color .15s;
 }
-textarea:focus { outline: none; border-color: var(--accent); }
+textarea:focus { outline: none; border-color: var(--teal); }
 textarea::placeholder { color: var(--fg-muted); }
-.actions { display: flex; gap: 8px; margin: 8px 0 16px; }
-.actions button {
-  padding: 8px 24px; font-size: 13px; font-weight: 500;
+.actions { display: flex; gap: 8px; margin: 10px 0 18px; }
+.btn-run {
+  padding: 9px 28px; font-size: 13px; font-weight: 600;
   border-radius: var(--radius); border: none; cursor: pointer;
+  background: var(--teal); color: #fff; transition: opacity .15s;
 }
-#run-btn { background: var(--accent); color: #fff; }
-#run-btn:hover:not(:disabled) { opacity: .9; }
-#run-btn:disabled { opacity: .4; cursor: not-allowed; }
-#stop-btn { background: var(--surface); color: var(--fg-muted); border: 1px solid var(--border); }
-#stop-btn:disabled { opacity: .4; cursor: not-allowed; }
-#stop-btn:not(:disabled):hover { color: var(--error); border-color: var(--error); }
+.btn-run:hover:not(:disabled) { opacity: .88; }
+.btn-run:disabled { opacity: .35; cursor: not-allowed; }
+.btn-stop {
+  padding: 9px 20px; font-size: 13px; font-weight: 500;
+  border-radius: var(--radius); cursor: pointer;
+  background: var(--surface); color: var(--fg-muted);
+  border: 1px solid var(--border); transition: color .15s, border-color .15s;
+}
+.btn-stop:disabled { opacity: .35; cursor: not-allowed; }
+.btn-stop:not(:disabled):hover { color: var(--red); border-color: var(--red); }
 #output {
-  flex: 1; overflow-y: auto; padding: 16px;
+  flex: 1; overflow-y: auto; padding: 18px;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-  font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word;
+  font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-wrap: break-word;
+  color: var(--fg);
 }
 #output:empty::before { content: "Output will appear here..."; color: var(--fg-muted); font-style: italic; }
+.done-line {
+  display: block; color: var(--fg-muted); padding: 12px 0 0; font-size: 12px;
+  border-top: 1px solid var(--border); margin-top: 12px;
+}
 .tool-badge {
   display: inline-block; padding: 2px 8px; margin: 2px 4px 2px 0;
   font-size: 11px; font-weight: 500;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  background: var(--tool-bg); color: var(--tool-fg); border-radius: 3px; vertical-align: middle;
+  background: var(--teal-dim); color: var(--teal); border-radius: 3px;
 }
-.err-line { display: block; color: var(--error); padding: 2px 0; font-size: 13px; }
+.err-line { display: block; color: var(--red); padding: 2px 0; font-size: 13px; }
 .err-block {
-  display: block; color: var(--error); padding: 8px 12px; margin: 8px 0;
-  border-left: 3px solid var(--error); font-size: 13px;
-}
-.done-line {
-  display: block; color: var(--fg-muted); padding: 12px 0 0; font-size: 12px;
-  border-top: 1px solid var(--border); margin-top: 12px;
+  display: block; color: var(--red); padding: 8px 12px; margin: 8px 0;
+  border-left: 3px solid var(--red); font-size: 13px;
 }
 @media (max-width: 640px) { #app { grid-template-columns: 1fr; } aside { display: none; } }
 </style>
@@ -153,16 +235,33 @@ textarea::placeholder { color: var(--fg-muted); }
 <body>
 <div id="app">
 <aside>
-  <div class="sidebar-hd">Threads</div>
-  <div id="thread-list"><div class="thread-empty">No threads yet</div></div>
-  <div class="sidebar-ft"><button id="setup-btn">Setup</button></div>
+  <div class="brand">
+    <div class="brand-icon">LS</div>
+    <div><div class="brand-text">Local Smartz</div><div class="brand-sub" id="version"></div></div>
+  </div>
+  <div class="panel-section" id="model-section">
+    <div class="panel-label">Model</div>
+    <div id="model-content"></div>
+  </div>
+  <div class="panel-section">
+    <div class="panel-label">Folders</div>
+    <div id="folder-list"></div>
+    <button class="add-folder" id="add-folder-btn">+ Add folder</button>
+  </div>
+  <div class="panel-section" style="flex:1;border-bottom:none">
+    <div class="panel-label">Threads</div>
+    <div id="thread-list"><div class="thread-empty">No threads yet</div></div>
+  </div>
+  <div class="status-bar" id="status-bar">
+    <span class="status-dot"></span> Loading...
+  </div>
 </aside>
 <main>
-  <header><h1>Local Smartz</h1><div id="status"><span class="dot"></span>Loading...</div></header>
-  <textarea id="prompt" placeholder="Research prompt... (Cmd+Enter to run)" rows="3" autofocus></textarea>
+  <div class="main-header"><h1>Research</h1><p>Ask anything. Local models, no cloud dependency.</p></div>
+  <textarea id="prompt" placeholder="What would you like to research?" rows="3" autofocus></textarea>
   <div class="actions">
-    <button id="run-btn">Run</button>
-    <button id="stop-btn" disabled>Stop</button>
+    <button id="run-btn" class="btn-run">Run</button>
+    <button id="stop-btn" class="btn-stop" disabled>Stop</button>
   </div>
   <div id="output"></div>
 </main>
@@ -181,6 +280,15 @@ textarea::placeholder { color: var(--fg-muted); }
     if (text) e.textContent = text;
     return e;
   };
+
+  function timeAgo(iso) {
+    if (!iso) return 'unknown';
+    const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
+  }
 
   function handleEvent(d) {
     if (d.type === 'text') append(makeEl('span', '', d.content));
@@ -241,13 +349,119 @@ textarea::placeholder { color: var(--fg-muted); }
     });
   });
   stopBtn.addEventListener('click', () => { if (ctrl) ctrl.abort(); });
-  $('setup-btn').addEventListener('click', () => {
-    out.innerHTML = '';
-    streamSSE('/api/setup', { method: 'POST' });
-  });
   pr.addEventListener('keydown', e => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); if (!runBtn.disabled) runBtn.click(); }
   });
+
+  let currentModel = '', currentProfile = '';
+  async function fetchModels() {
+    try {
+      const r = await fetch('/api/models'), d = await r.json();
+      currentModel = d.current || '';
+      currentProfile = d.profile || '';
+      renderModelCard(d);
+    } catch(e) {}
+  }
+
+  function renderModelCard(d) {
+    const mc = $('model-content');
+    const model = d.models.find(m => m.name === d.current) || d.models[0] || {};
+    mc.innerHTML = '<div class="model-card" id="model-card-inner">' +
+      '<div><div class="model-name">' + (d.current || 'No model') + '</div>' +
+      '<div class="model-size">' + (model.size_gb ? model.size_gb.toFixed(1) + ' GB' : '') +
+      (d.profile ? ' \u00b7 ' + d.profile + ' profile' : '') + '</div></div>' +
+      '<span class="model-change">Change</span></div>';
+    mc.querySelector('.model-change').onclick = () => renderModelList(d.models);
+  }
+
+  function renderModelList(models) {
+    const mc = $('model-content');
+    let html = '<div class="model-list">';
+    models.forEach(m => {
+      const active = m.name === currentModel ? ' style="color:var(--teal)"' : '';
+      html += '<div class="model-option"' + active + ' data-model="' + m.name + '">' +
+        '<span class="model-name">' + m.name + '</span>' +
+        '<span class="model-size">' + m.size_gb.toFixed(1) + ' GB</span></div>';
+    });
+    html += '<div class="model-option" style="color:var(--fg-muted);border:none" id="model-cancel">Cancel</div></div>';
+    mc.innerHTML = html;
+    mc.querySelectorAll('.model-option[data-model]').forEach(el => {
+      el.onclick = () => selectModel(el.dataset.model);
+    });
+    $('model-cancel').onclick = () => fetchModels();
+  }
+
+  async function selectModel(name) {
+    try {
+      const r = await fetch('/api/models/select', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: name })
+      });
+      if (r.ok) { fetchModels(); fetchStatus(); }
+    } catch(e) {}
+  }
+
+  async function fetchFolders() {
+    try {
+      const r = await fetch('/api/folders'), d = await r.json();
+      renderFolders(d);
+    } catch(e) {}
+  }
+
+  function renderFolders(d) {
+    const fl = $('folder-list');
+    fl.innerHTML = '';
+    const ws = makeEl('div', 'folder-item', '');
+    ws.innerHTML = '<span class="folder-dot"></span> ' + shortenPath(d.workspace);
+    fl.appendChild(ws);
+    (d.folders || []).forEach(f => {
+      const item = makeEl('div', 'folder-item', '');
+      item.innerHTML = '<span class="folder-dot" style="background:var(--amber)"></span> ' +
+        shortenPath(f) + '<span class="folder-remove" data-path="' + f + '">\u00d7</span>';
+      item.querySelector('.folder-remove').onclick = () => removeFolder(f);
+      fl.appendChild(item);
+    });
+  }
+
+  function shortenPath(p) {
+    return p.replace(/^\/Users\/[^/]+/, '~');
+  }
+
+  $('add-folder-btn').addEventListener('click', function() {
+    const existing = $('folder-input-field');
+    if (existing) { existing.remove(); return; }
+    const inp = document.createElement('input');
+    inp.type = 'text'; inp.id = 'folder-input-field';
+    inp.className = 'folder-input';
+    inp.placeholder = 'Enter folder path...';
+    inp.addEventListener('keydown', async e => {
+      if (e.key === 'Enter') {
+        const path = inp.value.trim();
+        if (!path) return;
+        const r = await fetch('/api/folders', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: path })
+        });
+        if (r.ok) { inp.remove(); fetchFolders(); }
+        else {
+          const err = await r.json();
+          inp.style.borderColor = 'var(--red)';
+          inp.placeholder = err.error || 'Invalid path';
+          inp.value = '';
+        }
+      } else if (e.key === 'Escape') { inp.remove(); }
+    });
+    this.parentNode.insertBefore(inp, this);
+    inp.focus();
+  });
+
+  async function removeFolder(path) {
+    await fetch('/api/folders', {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: path })
+    });
+    fetchFolders();
+  }
 
   async function fetchThreads() {
     try {
@@ -257,8 +471,12 @@ textarea::placeholder { color: var(--fg-muted); }
       }
       el.innerHTML = '';
       threads.forEach(t => {
-        const id = t.thread_id || t.id || '', title = t.title || id;
-        const d = makeEl('div', 'thread' + (id === activeThread ? ' active' : ''), title);
+        const id = t.id || '', title = t.title || id;
+        const d = makeEl('div', 'thread' + (id === activeThread ? ' active' : ''), '');
+        d.innerHTML = '<span class="thread-dot"></span><div class="thread-info">' +
+          '<div class="thread-title">' + title + '</div>' +
+          '<div class="thread-time">' + (t.entry_count || 0) + ' entr' +
+          ((t.entry_count === 1) ? 'y' : 'ies') + ' \u00b7 ' + timeAgo(t.last_updated) + '</div></div>';
         d.onclick = () => { activeThread = (activeThread === id) ? null : id; fetchThreads(); };
         el.appendChild(d);
       });
@@ -268,16 +486,21 @@ textarea::placeholder { color: var(--fg-muted); }
   async function fetchStatus() {
     try {
       const r = await fetch('/api/status'), d = await r.json();
-      const ok = d.ready === true;
       const online = d.ollama && d.ollama.running;
-      const label = ok ? 'Ready (' + d.profile + ')' : (online ? 'Setup required' : 'Offline');
-      $('status').innerHTML = '<span class="dot ' + (ok ? 'ok' : 'off') + '"></span>' + label;
+      const modelCount = d.ollama && d.ollama.models ? d.ollama.models.length : 0;
+      const sb = $('status-bar');
+      sb.innerHTML = '<span class="status-dot" style="background:var(--' + (online ? 'green' : 'red') +
+        ');box-shadow:0 0 4px var(--' + (online ? 'green-dim' : '') + ')"></span> ' +
+        (online ? 'Ollama running \u00b7 ' + modelCount + ' model' + (modelCount !== 1 ? 's' : '') : 'Ollama offline');
+      const v = $('version');
+      if (v) v.textContent = 'v0.1.0';
     } catch(e) {
-      $('status').innerHTML = '<span class="dot off"></span>Offline';
+      $('status-bar').innerHTML = '<span class="status-dot" style="background:var(--red)"></span> Offline';
     }
   }
 
-  fetchStatus(); fetchThreads(); setInterval(fetchStatus, 30000);
+  fetchStatus(); fetchModels(); fetchFolders(); fetchThreads();
+  setInterval(fetchStatus, 30000);
 }();
 </script>
 </body>
