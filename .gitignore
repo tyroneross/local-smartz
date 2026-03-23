@@ -9,3 +9,4 @@ build/
 .bookmark/
 *.xcodeproj/
 .dmg-staging/
+.env

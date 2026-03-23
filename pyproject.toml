@@ -12,6 +12,7 @@ license = "MIT"
 dependencies = [
     "deepagents",
     "langchain-ollama",
+    "langsmith>=0.3.0",
     # Document processing
     "pypdf>=4.3.0",
     "pdfplumber>=0.11.0",
