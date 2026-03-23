@@ -2,52 +2,78 @@
 
 Local-first multi-agent research system powered by [Ollama](https://ollama.com) and [DeepAgents](https://github.com/langchain-ai/deepagents). All LLM inference runs on your hardware — no cloud API keys needed.
 
-## Quick Start
+## Install
+
+### One-line install (recommended)
 
 ```bash
-# 1. Clone and install
-git clone https://github.com/tyroneross/local-smartz.git
-cd local-smartz
-pip install -e .
-
-# 2. Setup Ollama and download models
-localsmartz --setup
-
-# 3. Research
-localsmartz "What are the top AI trends in 2026?"
+curl -fsSL https://raw.githubusercontent.com/tyroneross/local-smartz/main/install.sh | bash
 ```
 
-## Requirements
+This will:
+1. Check Python 3.12+ is installed
+2. Install Ollama if missing (via Homebrew)
+3. Install `localsmartz` CLI (via `uv`, `pipx`, or `pip`)
+4. Run `localsmartz --setup` to download models
+5. Launch the first-run model picker
+
+### Manual install
+
+```bash
+# Clone
+git clone https://github.com/tyroneross/local-smartz.git
+cd local-smartz
+
+# Install (pick one)
+uv tool install -e .          # uv (fastest)
+pipx install -e .             # pipx
+pip install -e .              # pip
+
+# Setup Ollama + models
+localsmartz --setup
+
+# Verify
+localsmartz --check
+```
+
+### Requirements
 
 - **Python 3.12+**
 - **Ollama** — [download](https://ollama.com/download) or `brew install ollama`
 - **8GB+ RAM** (lite profile) or **64GB+ RAM** (full profile)
 
-## Hardware Profiles
+## Quick Start
 
-| | Full (64GB+ RAM) | Lite (<64GB RAM) |
-|---|---|---|
-| **Planning model** | Llama 3.1 70B | Qwen 3 8B |
-| **Execution model** | Qwen 2.5-Coder 32B | Qwen 3 8B |
-| **Quality review** | Yes | No |
+```bash
+# Single query
+localsmartz "What are the top AI trends in 2026?"
 
-Profile is auto-detected from system RAM, or set manually with `--profile lite`.
+# Interactive REPL
+localsmartz
+
+# Web UI
+localsmartz --serve
+# Open http://localhost:11435
+```
 
 ## Usage
+
+### CLI
 
 ```bash
 # Single query
 localsmartz "Compare React vs Vue for enterprise apps"
 
-# Interactive REPL
+# Interactive REPL (slash commands: /help, /model, /thread, /exit)
 localsmartz
 
 # With thread for multi-session research
 localsmartz --thread market-research "What is the current state of the EV market?"
 localsmartz --thread market-research "Now compare Tesla vs BYD specifically"
 
-# Force lite profile
-localsmartz --profile lite "Summarize this PDF" < report.pdf
+# Force lite profile or specific model
+localsmartz --profile lite "Summarize this document"
+localsmartz --model qwen3:8b-q4_K_M "Quick question"
 
 # Check Ollama status
 localsmartz --check
@@ -55,6 +81,46 @@ localsmartz --check
 # List research threads
 localsmartz --list-threads
 ```
+
+### Web UI
+
+```bash
+localsmartz --serve                  # Start at localhost:11435
+localsmartz --serve --port 8080      # Custom port
+```
+
+The web UI provides:
+- **Model selector** — switch between available Ollama models
+- **Folder management** — configure which directories the agent can access
+- **Thread sidebar** — view and resume past research sessions
+- **SSE streaming** — real-time output as the agent works
+
+### macOS App
+
+A native SwiftUI desktop app is available in `app/`. It wraps the web API with a menu bar interface.
+
+```bash
+cd app
+xcodegen generate        # Generate Xcode project from project.yml
+xcodebuild -scheme LocalSmartz build
+open ~/Library/Developer/Xcode/DerivedData/LocalSmartz-*/Build/Products/Debug/Local\ Smartz.app
+```
+
+Or install via the pre-built DMG in `app/LocalSmartz-Installer.dmg`.
+
+## Hardware Profiles
+
+| | Full (64GB+ RAM) | Lite (<64GB RAM) |
+|---|---|---|
+| **Planning model** | Llama 3.1 70B | Qwen 3 8B |
+| **Execution model** | Qwen 2.5-Coder 32B | Qwen 3 8B |
+| **Max turns** | 20 | 10 |
+| **Quality review** | Yes | No |
+| **Subagent delegation** | Yes | No |
+
+Profile is auto-detected from system RAM, or set manually with `--profile lite`.
+
+The first-run model picker lets you choose any model available in Ollama. Your selection is saved to `.localsmartz/config.json` per project.
 
 ## Tools
 
@@ -71,11 +137,29 @@ localsmartz --list-threads
 
 Plus built-in DeepAgents tools: `write_todos` (planning), `task` (subagent delegation), `read_file`/`write_file` (context management).
 
+## API
+
+When running with `--serve`, the following endpoints are available:
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/` | GET | Web UI |
+| `/api/health` | GET | Liveness check |
+| `/api/status` | GET | Profile, models, Ollama state |
+| `/api/models` | GET | List available models |
+| `/api/models/select` | POST | Switch active model |
+| `/api/folders` | GET | List research folders |
+| `/api/folders` | POST | Add a research folder |
+| `/api/folders` | DELETE | Remove a research folder |
+| `/api/threads` | GET | List research threads |
+| `/api/research` | POST | Run research (SSE stream) |
+| `/api/setup` | POST | Setup Ollama + models (SSE stream) |
+
 ## Architecture
 
 Single DeepAgent with all tools — DeepAgents handles orchestration:
 - **Planning**: Built-in `write_todos` decomposes questions into steps
-- **Research**: `web_search` → `scrape_url` → extract findings
+- **Research**: `web_search` -> `scrape_url` -> extract findings
 - **Analysis**: `python_exec` for all calculations (local models hallucinate math)
 - **Output**: `create_report` saves markdown/HTML/DOCX reports
 - **Delegation**: Built-in `task` tool spawns subagents for context isolation
@@ -84,14 +168,20 @@ Single DeepAgent with all tools — DeepAgents handles orchestration:
 
 ```
 src/localsmartz/
+├── __main__.py           # CLI entry (argparse, REPL, --serve)
 ├── agent.py              # Single DeepAgent + system prompt
+├── serve.py              # HTTP server + embedded web UI
+├── config.py             # Persistent model + folder config
 ├── profiles.py           # Full/Lite hardware detection
 ├── ollama.py             # Ollama health check + setup
 ├── threads.py            # Research continuity across sessions
 ├── artifacts.py          # Output tracking
+├── validation.py         # Tool call validation + loop detection
 ├── tools/                # 8 custom tools
 ├── agents/prompts/       # Subagent prompt templates
 └── domains/core/         # Core domain pack
+
+app/                      # macOS SwiftUI desktop app
 ```
 
-Storage: `.localsmartz/` (threads, artifacts, scripts, reports)
+Storage: `.localsmartz/` per project (threads, artifacts, config, scripts, reports)
