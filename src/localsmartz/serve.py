@@ -289,6 +289,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
 
     # Set by start_server() — profile override from CLI (None = auto-detect)
     _default_profile: str | None = None
+    _model_override: str | None = None
 
     # Suppress default logging to stderr
     def log_message(self, format, *args):
@@ -306,6 +307,10 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_research(parsed)
         elif path == "/api/threads":
             self._handle_threads()
+        elif path == "/api/models":
+            self._handle_models()
+        elif path == "/api/folders":
+            self._handle_folders()
         elif path == "":
             self._serve_ui()
         else:
@@ -319,6 +324,10 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_research_post()
         elif path == "/api/setup":
             self._handle_setup()
+        elif path == "/api/models/select":
+            self._handle_model_select()
+        elif path == "/api/folders":
+            self._handle_folder_add()
         else:
             self._json_response({"error": "Not found"}, 404)
 
@@ -327,11 +336,19 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         self._cors_headers()
         self.end_headers()
 
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        if path == "/api/folders":
+            self._handle_folder_delete()
+        else:
+            self._json_response({"error": "Not found"}, 404)
+
     # ── Helpers ──
 
     def _cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def _json_response(self, data: dict, status: int = 200):
@@ -507,7 +524,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             return
 
         cwd = Path.cwd()
-        model_override = _saved_model_override(cwd)
+        model_override = LocalSmartzHandler._model_override or _saved_model_override(cwd)
 
         # Preflight: required model must be available
         profile = get_profile(profile_name, model_override=model_override)
@@ -625,10 +642,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         full_result = agent.invoke(None, config=config)
         response = extract_final_response(full_result) if full_result else "No response generated."
 
-        duration_ms = int((time.time() - start_time) * 1000)
-        self._send_event({"type": "done", "duration_ms": duration_ms})
-
-        # Log to thread
+        # Log to thread BEFORE sending done event (prevents race condition)
         if thread_id and full_result:
             try:
                 append_entry(
@@ -641,6 +655,93 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                 )
             except Exception:
                 pass
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        self._send_event({"type": "done", "duration_ms": duration_ms, "thread_id": thread_id or ""})
+
+    def _handle_models(self):
+        """Return available Ollama models with current selection."""
+        from localsmartz.ollama import list_models_with_size
+        from localsmartz.profiles import get_profile
+        from localsmartz.config import load_config
+
+        models = [{"name": n, "size_gb": round(s, 1)} for n, s in list_models_with_size()]
+        cwd = Path.cwd()
+        config = load_config(cwd) or {}
+        current = LocalSmartzHandler._model_override or config.get("planning_model", "")
+        profile = get_profile(self._default_profile, model_override=current or None)
+        self._json_response({
+            "models": models,
+            "current": current or (profile["planning_model"] if profile else ""),
+            "profile": profile["name"] if profile else "unknown",
+        })
+
+    def _handle_model_select(self):
+        """Switch the active model."""
+        from localsmartz.ollama import model_available
+        from localsmartz.config import save_config
+        from localsmartz.profiles import get_profile
+
+        try:
+            body = self._read_json_body()
+        except ValueError:
+            self._json_response({"error": "Invalid request body"}, 400)
+            return
+        if not body.get("model"):
+            self._json_response({"error": "No model specified"}, 400)
+            return
+        model = body["model"]
+        if not model_available(model):
+            self._json_response({"error": f"Model '{model}' not available in Ollama"}, 400)
+            return
+        cwd = Path.cwd()
+        save_config(cwd, {"planning_model": model})
+        LocalSmartzHandler._model_override = model
+        profile = get_profile(self._default_profile, model_override=model)
+        self._json_response({"ok": True, "model": model, "profile": profile["name"]})
+
+    def _handle_folders(self):
+        """Return workspace and configured research folders."""
+        from localsmartz.config import get_folders
+        cwd = Path.cwd()
+        self._json_response({
+            "workspace": str(cwd),
+            "folders": get_folders(cwd),
+        })
+
+    def _handle_folder_add(self):
+        """Add a research folder."""
+        from localsmartz.config import add_folder
+        try:
+            body = self._read_json_body()
+        except ValueError:
+            self._json_response({"error": "Invalid request body"}, 400)
+            return
+        if not body.get("path"):
+            self._json_response({"error": "No path specified"}, 400)
+            return
+        folder = Path(body["path"]).expanduser()
+        if not folder.is_dir():
+            self._json_response({"error": f"Path is not a directory: {body['path']}"}, 400)
+            return
+        cwd = Path.cwd()
+        folders = add_folder(cwd, body["path"])
+        self._json_response({"ok": True, "folders": folders})
+
+    def _handle_folder_delete(self):
+        """Remove a research folder."""
+        from localsmartz.config import remove_folder
+        try:
+            body = self._read_json_body()
+        except ValueError:
+            self._json_response({"error": "Invalid request body"}, 400)
+            return
+        if not body.get("path"):
+            self._json_response({"error": "No path specified"}, 400)
+            return
+        cwd = Path.cwd()
+        folders = remove_folder(cwd, body["path"])
+        self._json_response({"ok": True, "folders": folders})
 
     def _handle_setup(self):
         """Stream model setup progress as SSE events."""

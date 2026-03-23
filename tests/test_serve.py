@@ -62,6 +62,23 @@ def _post(port: int, path: str, payload: dict) -> tuple[int, dict]:
     return status, response_body
 
 
+def _delete(port: int, path: str, payload: dict) -> tuple[int, dict]:
+    """Helper — make a DELETE request with JSON, return (status, json_body)."""
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    body = json.dumps(payload)
+    conn.request(
+        "DELETE",
+        path,
+        body=body,
+        headers={"Content-Type": "application/json"},
+    )
+    resp = conn.getresponse()
+    status = resp.status
+    response_body = json.loads(resp.read().decode("utf-8"))
+    conn.close()
+    return status, response_body
+
+
 # ── Web UI ──
 
 def test_ui_serves_html(server):
@@ -180,3 +197,43 @@ def test_options_cors(server):
     assert resp.status == 204
     assert resp.getheader("Access-Control-Allow-Origin") == "*"
     conn.close()
+
+
+def test_get_models(server):
+    """GET /api/models returns model list with current and profile."""
+    status, data = _get(server, "/api/models")
+    assert status == 200
+    assert "models" in data
+    assert "current" in data
+    assert "profile" in data
+
+
+def test_post_model_select_invalid(server):
+    """POST /api/models/select rejects unavailable models."""
+    status, data = _post(server, "/api/models/select", {"model": "nonexistent-model-xyz"})
+    assert status == 400
+
+
+def test_get_folders(server):
+    """GET /api/folders returns workspace and configured folders."""
+    status, data = _get(server, "/api/folders")
+    assert status == 200
+    assert "workspace" in data
+    assert isinstance(data["folders"], list)
+
+
+def test_post_folder_add_nonexistent(server):
+    """POST /api/folders rejects nonexistent paths."""
+    status, data = _post(server, "/api/folders", {"path": "/nonexistent/path/xyz"})
+    assert status == 400
+
+
+def test_cors_includes_delete(server):
+    """CORS OPTIONS response includes DELETE in allowed methods."""
+    conn = HTTPConnection("127.0.0.1", server, timeout=5)
+    conn.request("OPTIONS", "/api/folders")
+    resp = conn.getresponse()
+    methods = resp.getheader("Access-Control-Allow-Methods", "")
+    conn.close()
+    assert resp.status == 204
+    assert "DELETE" in methods
