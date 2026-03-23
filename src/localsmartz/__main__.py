@@ -215,6 +215,29 @@ def _setup(args):
     if ram_gb:
         print(f"  \033[32m\u2713\033[0m {ram_gb} GB RAM \u2014 {profile_name} profile")
 
+    # Check Playwright browsers (full profile only)
+    if profile_name == "full":
+        try:
+            import playwright as _pw  # noqa: F401
+            from pathlib import Path as _P
+            import os as _os
+            cache_dir = _P(_os.environ.get(
+                "PLAYWRIGHT_BROWSERS_PATH",
+                _P.home() / ".cache" / "ms-playwright"
+            ))
+            chromium_dirs = list(cache_dir.glob("chromium-*")) if cache_dir.exists() else []
+            if not chromium_dirs:
+                print("  Installing browser for web scraping...")
+                import subprocess
+                subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+                print(f"  \033[32m\u2713\033[0m Browser installed")
+            else:
+                print(f"  \033[32m\u2713\033[0m Browser: ready")
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"  \033[33m!\033[0m Browser check skipped: {e}")
+
     # Step 2: Choose model
     print("\n  [2/4] Choose a model:\n")
     models = list_models_with_size()
