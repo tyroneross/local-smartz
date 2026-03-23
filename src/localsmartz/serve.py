@@ -493,7 +493,7 @@ textarea::placeholder { color: var(--fg-muted); }
         ');box-shadow:0 0 4px var(--' + (online ? 'green-dim' : '') + ')"></span> ' +
         (online ? 'Ollama running \u00b7 ' + modelCount + ' model' + (modelCount !== 1 ? 's' : '') : 'Ollama offline');
       const v = $('version');
-      if (v) v.textContent = 'v0.1.0';
+      if (v && d.version) v.textContent = 'v' + d.version;
     } catch(e) {
       $('status-bar').innerHTML = '<span class="status-dot" style="background:var(--red)"></span> Offline';
     }
@@ -648,6 +648,9 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
     def _handle_status(self):
         from localsmartz.profiles import get_profile
         from localsmartz.ollama import check_server, get_version, list_models, model_available
+        from localsmartz.utils.hardware import get_ram_gb
+        from localsmartz import __version__
+        import platform as _platform
 
         cwd = Path.cwd()
         model_override = _saved_model_override(cwd)
@@ -674,6 +677,9 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                 "version": version,
                 "models": models,
             },
+            "version": __version__,
+            "ram_gb": get_ram_gb(),
+            "platform": _platform.system().lower(),
         })
 
     def _handle_threads(self):

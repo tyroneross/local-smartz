@@ -237,3 +237,29 @@ def test_cors_includes_delete(server):
     conn.close()
     assert resp.status == 204
     assert "DELETE" in methods
+
+
+def test_status_includes_version(server):
+    """GET /api/status includes version field."""
+    status, data = _get(server, "/api/status")
+    assert status == 200
+    assert "version" in data
+    assert isinstance(data["version"], str)
+    assert data["version"]
+
+
+def test_status_includes_ram(server):
+    """GET /api/status includes ram_gb field."""
+    status, data = _get(server, "/api/status")
+    assert status == 200
+    assert "ram_gb" in data
+    assert isinstance(data["ram_gb"], int)
+    assert data["ram_gb"] > 0
+
+
+def test_status_includes_platform(server):
+    """GET /api/status includes platform field."""
+    status, data = _get(server, "/api/status")
+    assert status == 200
+    assert "platform" in data
+    assert data["platform"] in ("darwin", "linux", "windows")
