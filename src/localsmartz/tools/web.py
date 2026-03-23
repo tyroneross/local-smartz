@@ -203,7 +203,11 @@ def scrape_url(url: str, extract_tables: bool = False, selector: str | None = No
         target = soup.select_one(selector)
         if not target:
             return f"Error: CSS selector '{selector}' matched nothing"
-        content_text = _extract_text(target, extract_tables)
+        # Guard: select_one can return NavigableString (text node) not Tag
+        if not hasattr(target, "children"):
+            content_text = str(target).strip()
+        else:
+            content_text = _extract_text(target, extract_tables)
     else:
         content_text = _extract_main_content(soup, extract_tables)
 
@@ -231,7 +235,8 @@ def web_search(query: str, max_results: int = 5) -> str:
     try:
         import warnings
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            warnings.filterwarnings("ignore", message=".*renamed.*ddgs.*")
             from duckduckgo_search import DDGS
     except ImportError:
         return "Error: duckduckgo-search not installed. Run: pip install ddgs"
@@ -239,7 +244,7 @@ def web_search(query: str, max_results: int = 5) -> str:
     try:
         import warnings as _w
         with _w.catch_warnings():
-            _w.simplefilter("ignore", RuntimeWarning)
+            _w.filterwarnings("ignore", category=RuntimeWarning)
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=max_results))
 
