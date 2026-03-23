@@ -83,6 +83,9 @@ def main():
         help="Server port (default: 11435, used with --serve)",
     )
     parser.add_argument(
+        "--trace", action="store_true", help="Enable LangSmith tracing"
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version="%(prog)s 0.1.0",
@@ -90,6 +93,13 @@ def main():
 
     args = parser.parse_args()
     cwd = Path(args.cwd) if args.cwd else Path.cwd()
+
+    # Configure LangSmith tracing
+    from localsmartz.tracing import configure_tracing
+    if hasattr(args, 'trace') and args.trace:
+        import os
+        os.environ["LANGSMITH_TRACING"] = "true"
+    configure_tracing(cwd)
 
     # List threads mode
     if args.list_threads:
