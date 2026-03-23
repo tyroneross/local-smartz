@@ -31,15 +31,65 @@ echo "Python $PY_VERSION: OK"
 if ! command -v ollama &>/dev/null; then
     echo ""
     echo "Ollama not found. Installing..."
-    if command -v brew &>/dev/null; then
-        brew install ollama
-    else
-        echo "Install Ollama manually: https://ollama.com/download"
-        echo "Then re-run this script."
-        exit 1
-    fi
+    case "$(uname -s)" in
+        Darwin)
+            if command -v brew &>/dev/null; then
+                brew install ollama
+            else
+                echo "  Downloading Ollama for macOS..."
+                curl -fsSL https://ollama.com/download/Ollama-darwin.zip -o /tmp/Ollama.zip
+                unzip -oq /tmp/Ollama.zip -d /Applications
+                rm /tmp/Ollama.zip
+                echo "  Ollama installed to /Applications. Opening it now..."
+                open /Applications/Ollama.app
+                echo "  Waiting for Ollama to start..."
+                sleep 5
+            fi
+            ;;
+        Linux)
+            echo "  Running Ollama's Linux installer..."
+            curl -fsSL https://ollama.ai/install.sh | sh
+            ;;
+        *)
+            echo "  Unsupported OS. Install Ollama manually: https://ollama.com/download"
+            echo "  Then re-run this script."
+            exit 1
+            ;;
+    esac
 fi
 echo "Ollama: installed"
+
+# ── Ensure Ollama is running ──
+if ! curl -sf http://localhost:11434/api/tags &>/dev/null; then
+    echo ""
+    echo "Starting Ollama..."
+    case "$(uname -s)" in
+        Darwin)
+            # macOS: Ollama runs as an app, not a daemon
+            open /Applications/Ollama.app 2>/dev/null || ollama serve &>/dev/null &
+            ;;
+        Linux)
+            # Linux: start as background process
+            ollama serve &>/dev/null &
+            ;;
+    esac
+    # Wait for it to come up
+    for i in $(seq 1 15); do
+        if curl -sf http://localhost:11434/api/tags &>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    if ! curl -sf http://localhost:11434/api/tags &>/dev/null; then
+        echo "Warning: Ollama is installed but not responding."
+        echo "  Start it manually: ollama serve"
+        echo "  Then re-run: localsmartz --setup"
+    else
+        echo "Ollama: running"
+    fi
+else
+    echo "Ollama: running"
+fi
 
 # ── Detect local repo vs remote install ──
 echo ""

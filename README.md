@@ -12,10 +12,13 @@ curl -fsSL https://raw.githubusercontent.com/tyroneross/local-smartz/main/instal
 
 This will:
 1. Check Python 3.12+ is installed
-2. Install Ollama if missing (via Homebrew)
-3. Install `localsmartz` CLI (via `uv`, `pipx`, or `pip`)
-4. Run `localsmartz --setup` to download models
-5. Launch the first-run model picker
+2. Install Ollama if missing (macOS: Homebrew or direct download; Linux: official installer)
+3. Start Ollama if it's not running
+4. Install `localsmartz` CLI (via `uv`, `pipx`, or `pip`)
+5. Download the default models for your hardware profile (~5-40 GB)
+6. Launch the first-run model picker
+
+**No prior Ollama install needed** — the script handles everything. You just need Python 3.12+.
 
 ### Manual install
 
@@ -38,9 +41,22 @@ localsmartz --check
 
 ### Requirements
 
-- **Python 3.12+**
-- **Ollama** — [download](https://ollama.com/download) or `brew install ollama`
-- **8GB+ RAM** (lite profile) or **64GB+ RAM** (full profile)
+- **Python 3.12+** — check with `python3 --version`
+- **Ollama** — installed automatically by the script, or [download manually](https://ollama.com/download)
+- **8GB+ RAM** for lite profile (~5 GB disk for models)
+- **64GB+ RAM** for full profile (~40 GB disk for models)
+
+### Don't have Ollama?
+
+The install script handles it automatically. If you prefer to install manually:
+
+| Platform | Install Command |
+|----------|----------------|
+| macOS (Homebrew) | `brew install ollama` |
+| macOS (direct) | Download from [ollama.com/download](https://ollama.com/download) |
+| Linux | `curl -fsSL https://ollama.ai/install.sh \| sh` |
+
+After installing, start it with `ollama serve` (Linux) or open the Ollama app (macOS).
 
 ## Quick Start
 
