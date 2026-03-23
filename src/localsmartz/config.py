@@ -178,19 +178,11 @@ def first_run_picker(cwd: Path, profile_name: str | None = None) -> str:
     v_str = f" (v{version})" if version else ""
     print(f"  \033[32mOllama:\033[0m running{v_str}")
 
-    import platform
-    import subprocess
-    try:
-        if platform.system() == "Darwin":
-            ram_bytes = int(subprocess.check_output(
-                ["sysctl", "-n", "hw.memsize"], text=True
-            ).strip())
-        else:
-            import os as _os
-            ram_bytes = _os.sysconf("SC_PAGE_SIZE") * _os.sysconf("SC_PHYS_PAGES")
-        ram_gb = int(ram_bytes / (1024 ** 3))
+    from localsmartz.utils.hardware import get_ram_gb
+    ram_gb = get_ram_gb()
+    if ram_gb > 0:
         print(f"  Hardware: {ram_gb} GB RAM · {detected} profile")
-    except Exception:
+    else:
         print(f"  Profile: {detected}")
 
     print()
