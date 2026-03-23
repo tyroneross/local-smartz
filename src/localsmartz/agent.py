@@ -305,6 +305,10 @@ def run_research(
     # Streaming mode — show tool calls and progress as they happen
     final_state = None
     tools_used = set()
+    showed_thinking = False
+
+    # Immediate feedback — show "Thinking..." before LLM responds
+    print("  Thinking...", end="", flush=True, file=sys.stderr)
 
     for chunk in agent.stream(input_msg, config=config, stream_mode="updates"):
         for node_name, state_update in chunk.items():
@@ -322,6 +326,11 @@ def run_research(
                     for tc in msg.tool_calls:
                         name = tc.get("name", "unknown")
                         tools_used.add(name)
+
+                        # Clear "Thinking..." on first tool call
+                        if not showed_thinking:
+                            print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
+                            showed_thinking = True
                         turn_count += 1
                         args_preview = _preview_args(tc.get("args", {}))
                         print(f"  ▸ {name}({args_preview})", file=sys.stderr)
@@ -352,6 +361,10 @@ def run_research(
             break
         if loop_broken:
             break
+
+    # Clear "Thinking..." if no tools were used (simple answer)
+    if not showed_thinking:
+        print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
 
     if tools_used:
         print(f"---\nTools used: {', '.join(sorted(tools_used))}", file=sys.stderr)
