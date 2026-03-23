@@ -46,8 +46,10 @@ def load_config(cwd: Path) -> dict | None:
     if not isinstance(data, dict):
         return None
 
-    model = data.get("planning_model")
-    if not model or not isinstance(model, str):
+    # Valid if it has planning_model OR folders
+    has_model = isinstance(data.get("planning_model"), str) and data["planning_model"]
+    has_folders = isinstance(data.get("folders"), list)
+    if not has_model and not has_folders:
         return None
 
     return data
@@ -93,6 +95,22 @@ def save_config(cwd: Path, config: dict) -> None:
         except OSError:
             pass
         raise
+
+
+def get_folders(cwd: Path) -> list[str]:
+    """Get configured research folders. Returns [] if none configured.
+
+    Reads config JSON directly — does not depend on load_config validation.
+    """
+    path = _config_path(cwd)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+        folders = data.get("folders", [])
+        return folders if isinstance(folders, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
 
 
 def first_run_picker(cwd: Path, profile_name: str | None = None) -> str:
@@ -213,7 +231,7 @@ def resolve_model(cwd: Path, cli_model: str | None, profile_name: str | None) ->
 
     # Priority 2: Saved config
     config = load_config(cwd)
-    if config:
+    if config and config.get("planning_model"):
         model = config["planning_model"]
         # Validate model still exists in Ollama
         if check_server() and model_available(model):

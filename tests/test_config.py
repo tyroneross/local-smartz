@@ -145,3 +145,48 @@ def test_save_config_overwrites_same_key(tmp_path):
     loaded = load_config(tmp_path)
     assert loaded["planning_model"] == "model-b"
     assert loaded["profile"] == "full"
+
+
+def test_load_config_folders_only(tmp_path):
+    """Config with only folders (no planning_model) is valid."""
+    save_config(tmp_path, {"folders": ["~/docs"]})
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded["folders"] == ["~/docs"]
+
+
+def test_get_folders_returns_list(tmp_path):
+    """get_folders returns folder list from config."""
+    from localsmartz.config import get_folders
+    save_config(tmp_path, {"planning_model": "x", "folders": ["/a", "/b"]})
+    assert get_folders(tmp_path) == ["/a", "/b"]
+
+
+def test_get_folders_empty_when_missing(tmp_path):
+    """get_folders returns [] when no folders key or no config."""
+    from localsmartz.config import get_folders
+    assert get_folders(tmp_path) == []
+    save_config(tmp_path, {"planning_model": "x"})
+    assert get_folders(tmp_path) == []
+
+
+def test_get_folders_corrupted_config(tmp_path):
+    """get_folders returns [] for corrupted config."""
+    from localsmartz.config import get_folders
+    config_dir = tmp_path / ".localsmartz"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text("not json")
+    assert get_folders(tmp_path) == []
+
+
+def test_resolve_model_folders_only_config_runs_picker(tmp_path):
+    """Config with only folders (no planning_model) falls through to picker."""
+    save_config(tmp_path, {"folders": ["/docs"]})
+    with patch("localsmartz.config.check_server", return_value=True), \
+         patch("localsmartz.config.list_models_with_size", return_value=[("m:8b", 5.0)]), \
+         patch("localsmartz.config.get_version", return_value="0.15.2"), \
+         patch("localsmartz.config.detect_profile", return_value="lite"), \
+         patch("sys.stdin") as mock_stdin:
+        mock_stdin.isatty.return_value = False
+        result = resolve_model(tmp_path, cli_model=None, profile_name="lite")
+        assert result == "m:8b"
