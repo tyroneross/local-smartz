@@ -979,6 +979,21 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             check_server, is_installed, model_available, pull_model,
         )
 
+        # Parse optional model parameter — empty body is valid
+        target_model = None
+        content_length = self.headers.get("Content-Length", "0")
+        try:
+            length = int(content_length)
+        except ValueError:
+            length = 0
+        if length > 0:
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                if isinstance(body, dict):
+                    target_model = body.get("model")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+
         self._start_sse()
 
         try:
@@ -1021,9 +1036,12 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._send_event({"type": "text", "content": "Ollama is running."})
 
             # Check and pull models
-            models = [profile["planning_model"]]
-            if profile["execution_model"] != profile["planning_model"]:
-                models.append(profile["execution_model"])
+            if target_model:
+                models = [target_model]
+            else:
+                models = [profile["planning_model"]]
+                if profile["execution_model"] != profile["planning_model"]:
+                    models.append(profile["execution_model"])
 
             for model in models:
                 if model_available(model):

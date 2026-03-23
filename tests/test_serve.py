@@ -263,3 +263,35 @@ def test_status_includes_platform(server):
     assert status == 200
     assert "platform" in data
     assert data["platform"] in ("darwin", "linux", "windows")
+
+
+def test_setup_accepts_empty_body(server):
+    """POST /api/setup with no body doesn't 400."""
+    import socket as _socket, time as _time
+
+    mock_profile = {"name": "lite", "planning_model": "qwen3:8b", "execution_model": "qwen3:8b"}
+    with patch("localsmartz.profiles.get_profile", return_value=mock_profile), \
+         patch("localsmartz.ollama.is_installed", return_value=True), \
+         patch("localsmartz.ollama.check_server", return_value=True), \
+         patch("localsmartz.ollama.model_available", return_value=True):
+        # Use raw socket: http.client.read() blocks on keep-alive SSE streams
+        s = _socket.socket()
+        s.settimeout(10)
+        s.connect(("127.0.0.1", server))
+        s.send(b"POST /api/setup HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n")
+        _time.sleep(0.5)
+        body = b""
+        try:
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                body += chunk
+        except _socket.timeout:
+            pass
+        s.close()
+
+    text = body.decode("utf-8")
+    # Should start SSE stream (200), NOT 400 for missing body
+    assert "HTTP/1.0 200" in text or "HTTP/1.1 200" in text
+    assert "data:" in text
