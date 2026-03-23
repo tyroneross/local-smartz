@@ -166,13 +166,145 @@ def _check(args):
 
 
 def _setup(args):
-    """Interactive setup — install Ollama and pull models."""
-    from localsmartz.profiles import get_profile
-    from localsmartz.ollama import setup
+    """Interactive 4-step setup wizard."""
+    from localsmartz.profiles import get_profile, detect_profile
+    from localsmartz.ollama import (
+        check_server, is_installed, list_models_with_size,
+        model_available, pull_model, get_version,
+    )
+    from localsmartz.config import save_config, get_folders, add_folder
+    from localsmartz.utils.hardware import get_ram_gb
 
-    profile = get_profile(args.profile, model_override=args.model)
-    ok = setup(profile)
-    sys.exit(0 if ok else 1)
+    interactive = sys.stdin.isatty()
+    cwd = Path(args.cwd) if args.cwd else Path.cwd()
+
+    print("\n  \033[1mLocal Smartz Setup\033[0m")
+    print("  " + "=" * 20)
+
+    # Step 1: Check Ollama
+    print("\n  [1/4] Checking Ollama...")
+    if not is_installed():
+        print("  \033[31m\u2717\033[0m Ollama is not installed.")
+        print("\n  Install Ollama:")
+        print("    macOS:  Download from https://ollama.com/download")
+        print("    Linux:  curl -fsSL https://ollama.ai/install.sh | sh")
+        sys.exit(1)
+
+    while not check_server():
+        print("  \033[31m\u2717\033[0m Ollama is not running.")
+        if not interactive:
+            print("  Start Ollama manually: ollama serve")
+            sys.exit(1)
+        input("  Start Ollama, then press Enter to check again... ")
+
+    version = get_version()
+    ram_gb = get_ram_gb()
+    profile_name = detect_profile()
+    v_str = f" (v{version})" if version else ""
+    print(f"  \033[32m\u2713\033[0m Ollama running{v_str}")
+    if ram_gb:
+        print(f"  \033[32m\u2713\033[0m {ram_gb} GB RAM \u2014 {profile_name} profile")
+
+    # Step 2: Choose model
+    print("\n  [2/4] Choose a model:\n")
+    models = list_models_with_size()
+
+    if models:
+        print("  Already downloaded:")
+        for i, (name, size) in enumerate(models):
+            rec = "  \033[94m\u2190 recommended\033[0m" if i == len(models) - 1 else ""
+            print(f"    {i + 1}. {name:<30s} ({size:.1f} GB){rec}")
+    else:
+        print("  No models downloaded yet.")
+        print("  Downloading recommended model...")
+        rec_model = "qwen3:8b-q4_K_M" if ram_gb < 64 else "llama3.1:70b-instruct-q5_K_M"
+        pull_model(rec_model)
+        models = list_models_with_size()
+        print(f"  \033[32m\u2713\033[0m Downloaded {rec_model}")
+
+    if interactive and models:
+        default = len(models)
+        try:
+            choice = input(f"\n  Select [{default}]: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            sys.exit(130)
+        if not choice:
+            idx = default - 1
+        else:
+            try:
+                idx = int(choice) - 1
+                if not (0 <= idx < len(models)):
+                    idx = default - 1
+            except ValueError:
+                idx = default - 1
+    else:
+        idx = len(models) - 1 if models else 0
+
+    selected_model = models[idx][0] if models else None
+    if selected_model:
+        save_config(cwd, {"planning_model": selected_model, "profile": profile_name})
+        print(f"  \033[32m\u2713\033[0m Model: {selected_model}")
+
+    # Step 3: Workspace
+    print(f"\n  [3/4] Workspace folder")
+    if interactive:
+        default_ws = str(cwd)
+        print(f"  Where are the files you want to research?")
+        try:
+            ws_input = input(f"  Default: {default_ws}\n  > ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            sys.exit(130)
+        if ws_input and ws_input != default_ws:
+            ws_path = Path(ws_input).expanduser()
+            if ws_path.is_dir():
+                add_folder(cwd, ws_input)
+                print(f"  \033[32m\u2713\033[0m Added: {ws_input}")
+            else:
+                print(f"  \033[33m!\033[0m Not a directory, skipping")
+        print(f"  \033[32m\u2713\033[0m Workspace: {default_ws}")
+
+        while True:
+            try:
+                extra = input("  Add another folder? (path or Enter to skip) > ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print()
+                break
+            if not extra:
+                break
+            extra_path = Path(extra).expanduser()
+            if extra_path.is_dir():
+                add_folder(cwd, extra)
+                print(f"  \033[32m\u2713\033[0m Added: {extra}")
+            else:
+                print(f"  \033[33m!\033[0m Not a directory")
+    else:
+        print(f"  \033[32m\u2713\033[0m Workspace: {cwd} (non-interactive, using default)")
+
+    # Step 4: Test
+    print(f"\n  [4/4] Testing...")
+    if selected_model and interactive:
+        print('  Query: "What is artificial intelligence?"')
+        try:
+            profile = get_profile(profile_name, model_override=selected_model)
+            from localsmartz.agent import create_agent
+            agent = create_agent(profile)
+            result = agent.invoke(
+                {"messages": [{"role": "user", "content": "What is artificial intelligence? Answer in one sentence."}]}
+            )
+            response = result.get("messages", [{}])[-1].get("content", "No response")
+            if len(response) > 200:
+                response = response[:200] + "..."
+            print(f"  \u2192 {response}")
+            print("  \033[32m\u2713\033[0m Working!")
+        except Exception as e:
+            print(f"  \033[33m!\033[0m Test failed: {e}")
+            print("  Setup is complete, but you may need to check your model.")
+    else:
+        print("  \033[32m\u2713\033[0m Skipped (non-interactive)")
+
+    print(f"\n  \033[1mSetup complete!\033[0m Run 'localsmartz' to start researching.\n")
 
 
 def _preflight(profile: dict) -> bool:
@@ -303,6 +435,17 @@ def _interactive(args, cwd: Path):
     # Resolve model via CLI flag / config / picker
     model_override = resolve_model(cwd, args.model, args.profile)
     profile = get_profile(args.profile, model_override=model_override)
+
+    # First-run auto-trigger: if no model configured, run setup wizard
+    from localsmartz.config import load_config as _load_cfg
+    _cfg = _load_cfg(cwd)
+    if not _cfg or not _cfg.get("planning_model"):
+        print("  First run detected \u2014 starting setup wizard...\n")
+        _setup(args)
+        # Reload profile after setup
+        from localsmartz.config import resolve_model
+        model_override = resolve_model(cwd, args.model, args.profile)
+        profile = get_profile(args.profile, model_override=model_override)
 
     if not _preflight(profile):
         sys.exit(1)
