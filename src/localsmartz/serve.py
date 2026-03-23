@@ -69,6 +69,38 @@ _UI_HTML = r"""<!DOCTYPE html>
   --red: #ef4444;
   --radius: 10px;
 }
+.wizard-container { max-width: 480px; margin: 0 auto; padding-top: 40px; }
+.wizard-steps { display: flex; gap: 8px; justify-content: center; margin-bottom: 32px; }
+.wizard-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-muted); transition: background .3s; }
+.wizard-dot.done { background: var(--teal); }
+.wizard-dot.active { background: var(--fg); }
+.wizard-title { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+.wizard-desc { font-size: 13px; color: var(--fg-muted); margin-bottom: 24px; line-height: 1.5; }
+.wizard-status { display: flex; align-items: center; gap: 8px; padding: 12px; background: var(--surface-raised); border-radius: 6px; margin-bottom: 12px; font-size: 13px; }
+.wizard-model-option {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 12px; margin-bottom: 4px; background: var(--surface-raised);
+  border: 1px solid var(--border); border-radius: 6px; cursor: pointer; transition: all .2s;
+}
+.wizard-model-option:hover { border-color: var(--teal-dim); }
+.wizard-model-option.selected { border-color: var(--teal); background: var(--teal-dim); }
+.wizard-model-name { font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
+.wizard-model-meta { font-size: 11px; color: var(--fg-muted); }
+.wizard-progress { width: 100%; height: 4px; background: var(--surface-raised); border-radius: 2px; margin: 12px 0; overflow: hidden; }
+.wizard-progress-fill { height: 100%; background: var(--teal); width: 0; transition: width .3s; }
+.wizard-btn { display: inline-block; padding: 10px 32px; font-size: 14px; font-weight: 500; border: none; border-radius: 6px; cursor: pointer; transition: all .2s; margin-top: 16px; }
+.wizard-btn-primary { background: linear-gradient(135deg, var(--teal), #6366f1); color: #fff; box-shadow: 0 2px 8px var(--teal-dim); }
+.wizard-btn-primary:hover { box-shadow: 0 4px 16px var(--teal-glow); }
+.wizard-btn-primary:disabled { opacity: .3; cursor: not-allowed; }
+.wizard-btn-secondary { background: var(--surface); color: var(--fg-muted); border: 1px solid var(--border); margin-left: 8px; }
+.wizard-test-output { padding: 12px; background: var(--surface-raised); border-radius: 6px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; min-height: 60px; margin: 12px 0; }
+.wizard-input {
+  width: 100%; padding: 10px 12px; font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--surface-raised); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px;
+}
+.wizard-input:focus { outline: none; border-color: var(--teal); }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -257,6 +289,12 @@ textarea::placeholder { color: var(--fg-muted); }
   </div>
 </aside>
 <main>
+  <div id="wizard" style="display:none">
+    <div class="wizard-container">
+      <div class="wizard-steps" id="wizard-steps"></div>
+      <div id="wizard-content"></div>
+    </div>
+  </div>
   <div class="main-header"><h1>Research</h1><p>Ask anything. Local models, no cloud dependency.</p></div>
   <textarea id="prompt" placeholder="What would you like to research?" rows="3" autofocus></textarea>
   <div class="actions">
@@ -494,9 +532,289 @@ textarea::placeholder { color: var(--fg-muted); }
         (online ? 'Ollama running \u00b7 ' + modelCount + ' model' + (modelCount !== 1 ? 's' : '') : 'Ollama offline');
       const v = $('version');
       if (v && d.version) v.textContent = 'v' + d.version;
+      // Wizard trigger
+      if (!d.ready && !wizardDismissed) showWizard();
     } catch(e) {
       $('status-bar').innerHTML = '<span class="status-dot" style="background:var(--red)"></span> Offline';
     }
+  }
+
+  // \u2500\u2500 Setup Wizard \u2500\u2500
+  let wizardStep = 0, wizardDismissed = false, wizardStatus = null;
+  const wizardEl = $('wizard');
+  const SUGGESTED_MODELS = [
+    { name: 'qwen3:8b-q4_K_M', size: '5 GB', desc: 'Fast, good for quick questions', minRam: 8 },
+    { name: 'qwen2.5-coder:32b-instruct-q5_K_M', size: '23 GB', desc: 'Strong coding and analysis', minRam: 32 },
+    { name: 'llama3.1:70b-instruct-q5_K_M', size: '40 GB', desc: 'Most capable, best quality', minRam: 64 },
+  ];
+
+  function showWizard() {
+    wizardEl.style.display = '';
+    document.querySelectorAll('main > :not(#wizard)').forEach(el => el.style.display = 'none');
+    document.querySelector('aside').style.opacity = '0.4';
+    document.querySelector('aside').style.pointerEvents = 'none';
+    renderWizardStep();
+  }
+
+  function hideWizard() {
+    wizardDismissed = true;
+    wizardEl.style.display = 'none';
+    document.querySelectorAll('main > :not(#wizard)').forEach(el => el.style.display = '');
+    document.querySelector('aside').style.opacity = '';
+    document.querySelector('aside').style.pointerEvents = '';
+    fetchModels(); fetchFolders(); fetchThreads(); fetchStatus();
+  }
+
+  function renderWizardDots() {
+    const dots = $('wizard-steps');
+    dots.innerHTML = '';
+    for (let i = 0; i < 4; i++) {
+      dots.appendChild(makeEl('span', 'wizard-dot' + (i < wizardStep ? ' done' : '') + (i === wizardStep ? ' active' : '')));
+    }
+  }
+
+  function renderWizardStep() {
+    renderWizardDots();
+    const c = $('wizard-content');
+    c.innerHTML = '';
+    if (wizardStep === 0) renderWizStep1(c);
+    else if (wizardStep === 1) renderWizStep2(c);
+    else if (wizardStep === 2) renderWizStep3(c);
+    else if (wizardStep === 3) renderWizStep4(c);
+  }
+
+  // Step 1: Ollama Status Check
+  function renderWizStep1(c) {
+    c.innerHTML = '<div class="wizard-title">Welcome to Local Smartz</div>' +
+      '<div class="wizard-desc">Let\u2019s get you set up. This takes about a minute.</div>' +
+      '<div id="wiz-status">Checking Ollama...</div>';
+    fetch('/api/status').then(r => r.json()).then(d => {
+      wizardStatus = d;
+      const el = $('wiz-status');
+      if (d.ollama && d.ollama.running) {
+        let info = '<div class="wizard-status"><span style="color:var(--green)">\u2713</span> Ollama running' +
+          (d.ollama.version ? ' (v' + d.ollama.version + ')' : '') + '</div>';
+        if (d.ram_gb) info += '<div class="wizard-status"><span style="color:var(--green)">\u2713</span> ' +
+          d.ram_gb + ' GB RAM</div>';
+        el.innerHTML = info;
+        setTimeout(() => { wizardStep = 1; renderWizardStep(); }, 1500);
+      } else {
+        let instruct = '';
+        if (d.platform === 'darwin') {
+          instruct = 'Download Ollama from <a href="https://ollama.com/download" target="_blank" style="color:var(--teal)">ollama.com/download</a>, open the app, then click Check Again.';
+        } else {
+          instruct = 'Run: <code style="background:var(--surface-raised);padding:2px 6px;border-radius:3px">curl -fsSL https://ollama.ai/install.sh | sh && ollama serve</code>';
+        }
+        el.innerHTML = '<div class="wizard-status"><span style="color:var(--red)">\u2717</span> Ollama is not running</div>' +
+          '<div class="wizard-desc">' + instruct + '</div>' +
+          '<button class="wizard-btn wizard-btn-secondary" onclick="renderWizStep1($(\'wizard-content\'))">Check Again</button>';
+      }
+    }).catch(() => {
+      $('wiz-status').innerHTML = '<div class="wizard-status"><span style="color:var(--red)">\u2717</span> Cannot reach server</div>';
+    });
+  }
+
+  // Step 2: Model Selection
+  function renderWizStep2(c) {
+    c.innerHTML = '<div class="wizard-title">Choose a model</div>' +
+      '<div class="wizard-desc">Pick an AI model to power your research. Larger models give better results but need more RAM and disk space.</div>' +
+      '<div id="wiz-models">Loading models...</div>';
+    fetch('/api/models').then(r => r.json()).then(d => {
+      const el = $('wiz-models');
+      let html = '';
+      const existing = d.models || [];
+      const ramGb = (wizardStatus && wizardStatus.ram_gb) || 8;
+
+      if (existing.length) {
+        html += '<div style="font-size:11px;color:var(--fg-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Already downloaded</div>';
+        existing.forEach(m => {
+          html += '<div class="wizard-model-option" data-model="' + m.name + '">' +
+            '<div><div class="wizard-model-name">' + m.name + '</div>' +
+            '<div class="wizard-model-meta">' + m.size_gb.toFixed(1) + ' GB</div></div></div>';
+        });
+      }
+
+      // Suggested models not yet downloaded
+      const existingNames = existing.map(m => m.name);
+      const suggestions = SUGGESTED_MODELS.filter(s => !existingNames.includes(s.name) && s.minRam <= ramGb);
+      if (suggestions.length) {
+        html += '<div style="font-size:11px;color:var(--fg-muted);text-transform:uppercase;letter-spacing:.06em;margin:16px 0 8px">Download a new model</div>';
+        suggestions.forEach(s => {
+          html += '<div class="wizard-model-option" data-download="' + s.name + '">' +
+            '<div><div class="wizard-model-name">' + s.name + '</div>' +
+            '<div class="wizard-model-meta">' + s.size + ' \u2014 ' + s.desc + '</div></div>' +
+            '<span style="color:var(--teal);font-size:11px">Download</span></div>';
+        });
+      }
+
+      html += '<div id="wiz-model-actions" style="margin-top:16px"></div>';
+      el.innerHTML = html;
+
+      // Click handlers for existing models
+      el.querySelectorAll('[data-model]').forEach(opt => {
+        opt.onclick = () => {
+          el.querySelectorAll('.wizard-model-option').forEach(o => o.classList.remove('selected'));
+          opt.classList.add('selected');
+          $('wiz-model-actions').innerHTML = '<button class="wizard-btn wizard-btn-primary" id="wiz-select-btn">Select</button>';
+          $('wiz-select-btn').onclick = () => selectWizModel(opt.dataset.model);
+        };
+      });
+
+      // Click handlers for download options
+      el.querySelectorAll('[data-download]').forEach(opt => {
+        opt.onclick = () => downloadWizModel(opt.dataset.download, el);
+      });
+    });
+  }
+
+  function selectWizModel(name) {
+    fetch('/api/models/select', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({model: name})
+    }).then(r => { if (r.ok) { wizardStep = 2; renderWizardStep(); } });
+  }
+
+  function downloadWizModel(name, container) {
+    const actions = $('wiz-model-actions');
+    actions.innerHTML = '<div class="wizard-desc">Downloading ' + name + '...</div>' +
+      '<div class="wizard-progress"><div class="wizard-progress-fill" id="wiz-dl-progress"></div></div>' +
+      '<div id="wiz-dl-status" style="font-size:11px;color:var(--fg-muted)">Starting...</div>';
+
+    fetch('/api/setup', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({model: name})
+    }).then(res => {
+      const reader = res.body.getReader(), dec = new TextDecoder();
+      let buf = '';
+      function read() {
+        reader.read().then(({done, value}) => {
+          if (done) return;
+          buf += dec.decode(value, {stream:true});
+          const lines = buf.split('\n'); buf = lines.pop();
+          lines.forEach(line => {
+            if (line.indexOf('data: ') === 0) {
+              try {
+                const ev = JSON.parse(line.slice(6));
+                if (ev.type === 'text') $('wiz-dl-status').textContent = ev.content;
+                if (ev.type === 'done') {
+                  actions.innerHTML = '<div class="wizard-status"><span style="color:var(--green)">\u2713</span> Downloaded ' + name + '</div>' +
+                    '<button class="wizard-btn wizard-btn-primary" id="wiz-post-dl-select">Select ' + name + '</button>';
+                  $('wiz-post-dl-select').onclick = () => selectWizModel(name);
+                }
+                if (ev.type === 'error') {
+                  actions.innerHTML = '<div class="wizard-status"><span style="color:var(--red)">\u2717</span> ' + ev.message + '</div>' +
+                    '<button class="wizard-btn wizard-btn-secondary" onclick="renderWizStep2($(\'wizard-content\'))">Try Again</button>';
+                }
+              } catch(e) {}
+            }
+          });
+          read();
+        });
+      }
+      read();
+    });
+  }
+
+  // Step 3: Workspace
+  function renderWizStep3(c) {
+    fetch('/api/folders').then(r => r.json()).then(d => {
+      c.innerHTML = '<div class="wizard-title">Set your workspace</div>' +
+        '<div class="wizard-desc">Where are the files you want to research? Local Smartz can read PDFs, spreadsheets, and text files from folders you choose.</div>' +
+        '<div class="wizard-status" style="margin-bottom:16px"><span style="color:var(--teal)">\u25cf</span> ' + d.workspace + '</div>' +
+        '<input class="wizard-input" id="wiz-folder-input" placeholder="Add another folder path (optional)">' +
+        '<div id="wiz-folder-list"></div>' +
+        '<div id="wiz-folder-error" style="font-size:12px;color:var(--red);margin-top:4px"></div>' +
+        '<button class="wizard-btn wizard-btn-primary" id="wiz-ws-continue">Continue</button>';
+
+      $('wiz-folder-input').addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          const path = e.target.value.trim();
+          if (!path) return;
+          fetch('/api/folders', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({path: path})
+          }).then(r => {
+            if (r.ok) { e.target.value = ''; $('wiz-folder-error').textContent = ''; renderWizFolders(); }
+            else r.json().then(d => { $('wiz-folder-error').textContent = d.error || 'Invalid path'; });
+          });
+        }
+      });
+
+      $('wiz-ws-continue').onclick = () => { wizardStep = 3; renderWizardStep(); };
+      renderWizFolders();
+    });
+  }
+
+  function renderWizFolders() {
+    fetch('/api/folders').then(r => r.json()).then(d => {
+      const el = $('wiz-folder-list');
+      if (!el) return;
+      el.innerHTML = '';
+      (d.folders || []).forEach(f => {
+        const item = makeEl('div', 'wizard-status', '');
+        item.innerHTML = '<span style="color:var(--amber)">\u25cf</span> ' + f +
+          ' <span style="cursor:pointer;color:var(--fg-muted);margin-left:auto" data-rmfolder="' + f + '">\u00d7</span>';
+        item.querySelector('[data-rmfolder]').onclick = () => {
+          fetch('/api/folders', {method:'DELETE',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path:f})}).then(() => renderWizFolders());
+        };
+        el.appendChild(item);
+      });
+    });
+  }
+
+  // Step 4: Test Run
+  function renderWizStep4(c) {
+    c.innerHTML = '<div class="wizard-title">Testing your setup</div>' +
+      '<div class="wizard-desc">Running a quick query to make sure everything works...</div>' +
+      '<div class="wizard-test-output" id="wiz-test-out">Starting...</div>' +
+      '<div id="wiz-test-actions"></div>';
+
+    const testOut = $('wiz-test-out');
+    testOut.textContent = '';
+
+    fetch('/api/research', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({prompt: 'What is artificial intelligence? Answer in one sentence.'})
+    }).then(res => {
+      const reader = res.body.getReader(), dec = new TextDecoder();
+      let buf = '';
+      function read() {
+        reader.read().then(({done, value}) => {
+          if (done) return;
+          buf += dec.decode(value, {stream:true});
+          const lines = buf.split('\n'); buf = lines.pop();
+          lines.forEach(line => {
+            if (line.indexOf('data: ') === 0) {
+              try {
+                const ev = JSON.parse(line.slice(6));
+                if (ev.type === 'text') testOut.textContent += ev.content;
+                if (ev.type === 'tool') testOut.textContent += '[' + ev.name + '] ';
+                if (ev.type === 'done') {
+                  $('wiz-test-actions').innerHTML =
+                    '<div class="wizard-status" style="margin-top:12px"><span style="color:var(--green)">\u2713</span> Everything is working!</div>' +
+                    '<button class="wizard-btn wizard-btn-primary" id="wiz-done-btn">Start Researching</button>';
+                  $('wiz-done-btn').onclick = hideWizard;
+                }
+                if (ev.type === 'error') {
+                  testOut.textContent += '\nError: ' + ev.message;
+                  $('wiz-test-actions').innerHTML =
+                    '<div class="wizard-status" style="margin-top:12px"><span style="color:var(--red)">\u2717</span> Test failed</div>' +
+                    '<button class="wizard-btn wizard-btn-secondary" onclick="renderWizStep4($(\'wizard-content\'))">Try Again</button>' +
+                    '<button class="wizard-btn wizard-btn-primary" onclick="hideWizard()">Skip</button>';
+                }
+              } catch(e) {}
+            }
+          });
+          read();
+        });
+      }
+      read();
+    }).catch(e => {
+      testOut.textContent = 'Error: ' + e.message;
+      $('wiz-test-actions').innerHTML =
+        '<button class="wizard-btn wizard-btn-secondary" onclick="renderWizStep4($(\'wizard-content\'))">Try Again</button>';
+    });
   }
 
   fetchStatus(); fetchModels(); fetchFolders(); fetchThreads();
