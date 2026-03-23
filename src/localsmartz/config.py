@@ -113,6 +113,31 @@ def get_folders(cwd: Path) -> list[str]:
         return []
 
 
+def add_folder(cwd: Path, folder_path: str) -> list[str]:
+    """Add a research folder to config. Returns updated list.
+
+    Expands ~, normalizes path. No-op if already present.
+    """
+    expanded = str(Path(folder_path).expanduser())
+    folders = get_folders(cwd)
+    if expanded not in folders:
+        folders.append(expanded)
+    save_config(cwd, {"folders": folders})
+    return folders
+
+
+def remove_folder(cwd: Path, folder_path: str) -> list[str]:
+    """Remove a research folder from config. Returns updated list.
+
+    Expands ~, normalizes path. No-op if not present.
+    """
+    expanded = str(Path(folder_path).expanduser())
+    folders = get_folders(cwd)
+    folders = [f for f in folders if f != expanded]
+    save_config(cwd, {"folders": folders})
+    return folders
+
+
 def first_run_picker(cwd: Path, profile_name: str | None = None) -> str:
     """Interactive model picker for first run. Returns selected model name.
 

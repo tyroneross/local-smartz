@@ -190,3 +190,55 @@ def test_resolve_model_folders_only_config_runs_picker(tmp_path):
         mock_stdin.isatty.return_value = False
         result = resolve_model(tmp_path, cli_model=None, profile_name="lite")
         assert result == "m:8b"
+
+
+def test_add_folder(tmp_path):
+    """add_folder adds a path to the folders list."""
+    from localsmartz.config import add_folder, get_folders
+    add_folder(tmp_path, "/Users/test/docs")
+    assert get_folders(tmp_path) == ["/Users/test/docs"]
+
+
+def test_add_folder_no_duplicates(tmp_path):
+    """add_folder doesn't add the same path twice."""
+    from localsmartz.config import add_folder, get_folders
+    add_folder(tmp_path, "/Users/test/docs")
+    add_folder(tmp_path, "/Users/test/docs")
+    assert get_folders(tmp_path) == ["/Users/test/docs"]
+
+
+def test_add_folder_expands_tilde(tmp_path):
+    """add_folder expands ~ to absolute path."""
+    from localsmartz.config import add_folder, get_folders
+    import os
+    add_folder(tmp_path, "~/test-folder-xyz")
+    folders = get_folders(tmp_path)
+    assert len(folders) == 1
+    assert folders[0] == os.path.expanduser("~/test-folder-xyz")
+
+
+def test_remove_folder(tmp_path):
+    """remove_folder removes a path from the list."""
+    from localsmartz.config import add_folder, remove_folder, get_folders
+    add_folder(tmp_path, "/a")
+    add_folder(tmp_path, "/b")
+    remove_folder(tmp_path, "/a")
+    assert get_folders(tmp_path) == ["/b"]
+
+
+def test_remove_folder_nonexistent(tmp_path):
+    """remove_folder is a no-op for paths not in the list."""
+    from localsmartz.config import add_folder, remove_folder, get_folders
+    add_folder(tmp_path, "/a")
+    remove_folder(tmp_path, "/nonexistent")
+    assert get_folders(tmp_path) == ["/a"]
+
+
+def test_add_folder_preserves_model(tmp_path):
+    """add_folder doesn't overwrite planning_model."""
+    from localsmartz.config import add_folder
+    save_config(tmp_path, {"planning_model": "my-model", "profile": "full"})
+    add_folder(tmp_path, "/docs")
+    loaded = load_config(tmp_path)
+    assert loaded["planning_model"] == "my-model"
+    assert loaded["folders"] == ["/docs"]
