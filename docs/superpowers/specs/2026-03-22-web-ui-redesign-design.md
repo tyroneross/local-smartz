@@ -78,7 +78,7 @@ This spec addresses all three while redesigning the UI with the Alt C "Creative"
 
 ### Brand Section
 - Gradient icon (28x28, border-radius 6px, teal→indigo gradient)
-- "Local Smartz" (13px semibold) + "v0.1.0" (10px muted)
+- "Local Smartz" (13px semibold) + version from `__init__.py` (10px muted) — read via `/api/status` response, not hardcoded in HTML
 - Bottom border separator
 
 ### Model Card
@@ -140,7 +140,7 @@ Returns available Ollama models with sizes.
 }
 ```
 
-Implementation: calls `list_models_with_size()` from `ollama.py`, reads current from config or profile default.
+Implementation: calls `list_models_with_size()` from `ollama.py` (returns `list[tuple[str, float]]` — convert to list of dicts). `current` comes from config's `planning_model` or profile default. `profile` comes from `get_profile()` call, not from the model list.
 
 ### `POST /api/models/select`
 
@@ -154,7 +154,7 @@ Switches the active model.
 {"ok": true, "model": "qwen3:8b-q4_K_M", "profile": "full"}
 ```
 
-Implementation: validates model exists in Ollama, calls `save_config()`, updates the handler's `_default_profile` model override.
+Implementation: validates model exists in Ollama via `model_available()`, then does a read-modify-write on config (load existing → update `planning_model` → save). Adds a class-level `_model_override: str | None` cache on the handler (separate from `_default_profile`, which is a profile name like "full"/"lite", not a model name). Research requests check `_model_override` first, falling back to config/profile default.
 
 ### `GET /api/folders`
 
@@ -179,7 +179,9 @@ Adds a research folder.
 {"ok": true, "folders": ["/Users/tyroneross/Documents/research-data"]}
 ```
 
-Validates path exists and is a directory. Expands `~`. Saves to config.
+Validates path exists and is a directory. Expands `~`. Saves to config via read-modify-write.
+
+**Trust model:** This is a trusted-user-only local tool (server binds to 127.0.0.1). No path restriction is enforced — the user can register any folder they have filesystem access to. The folder list is stored in config only; the agent's file-reading tools (`read_text_file`, etc.) enforce their own access at invocation time.
 
 ### `DELETE /api/folders`
 
@@ -195,7 +197,9 @@ Removes a research folder.
 
 ### Thread sidebar fix
 
-The `done` SSE event already triggers `fetchThreads()`. The issue is likely a race condition — thread entry not yet written when the client fetches. Fix: add `thread_id` to the done event so the UI can optimistically show the new thread, then confirm on next fetch.
+The `done` SSE event already triggers `fetchThreads()`. The issue is a race condition — `done` is emitted before `append_entry()` completes, so the thread isn't written yet when the client fetches.
+
+**Fix:** Move the `done` event emission to AFTER `append_entry()` completes in `_stream_research()`. Include `thread_id` in the done event payload so the UI knows which thread was created/updated. The client-side `fetchThreads()` call (triggered by the done handler) will then find the thread reliably since persistence is complete before the event fires.
 
 ## Config Changes
 
@@ -212,14 +216,15 @@ The `done` SSE event already triggers `fetchThreads()`. The issue is likely a ra
 
 - `folders` is a list of absolute or `~`-prefixed paths
 - Workspace (cwd) is NOT stored — always implicit
-- `load_config()` returns `folders` as `[]` if missing
-- `save_config()` preserves existing keys when updating
+- **`load_config()` validation change:** Relax the `planning_model` requirement. A config with only `folders` (no `planning_model`) is valid — return it with `folders` intact. The `planning_model` validation only matters for `resolve_model()`, not for folder reads.
+- Add `get_folders(cwd)` helper: reads config JSON directly, returns `folders` list or `[]`. Does not depend on `load_config()` validation.
+- **`save_config()` becomes read-modify-write:** Load existing config from disk, merge new keys, write back. This prevents model select from overwriting folders, and vice versa. Current implementation overwrites — must change.
 
 ## Files to Modify
 
 | File | Changes |
 |------|---------|
-| `src/localsmartz/serve.py` | Replace `_UI_HTML` (lines 56-284). Add `_handle_models()`, `_handle_model_select()`, `_handle_folders()`, `_handle_folder_add()`, `_handle_folder_delete()`. Update `do_GET`/`do_POST`/`do_DELETE` routing. Add `thread_id` to done event. |
+| `src/localsmartz/serve.py` | Replace `_UI_HTML` (lines 56-284). Add `_handle_models()`, `_handle_model_select()`, `_handle_folders()`, `_handle_folder_add()`, `_handle_folder_delete()`. Add `do_DELETE` method (net-new). Update `do_GET`/`do_POST` routing. Add `DELETE` to CORS `Access-Control-Allow-Methods`. Add `_model_override` class variable. Move `done` event after `append_entry()`. Add `thread_id` to done event. |
 | `src/localsmartz/config.py` | Add `folders` support: `get_folders(cwd)`, `add_folder(cwd, path)`, `remove_folder(cwd, path)`. Ensure `save_config()` merges keys. |
 | `tests/test_serve.py` | Add tests for `/api/models`, `/api/models/select`, `/api/folders` endpoints |
 | `tests/test_config.py` | Add tests for folders config CRUD |
