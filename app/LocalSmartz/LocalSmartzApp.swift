@@ -8,7 +8,7 @@ struct LocalSmartzApp: App {
         WindowGroup {
             Group {
                 if appState.isConfigured {
-                    ResearchView()
+                    MainView()
                 } else {
                     SetupView()
                 }
@@ -24,6 +24,11 @@ struct LocalSmartzApp: App {
 
         MenuBarExtra("Local Smartz", systemImage: "magnifyingglass.circle.fill") {
             StatusBarView()
+                .environmentObject(appState)
+        }
+
+        Settings {
+            SettingsView()
                 .environmentObject(appState)
         }
     }

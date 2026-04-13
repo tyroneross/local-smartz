@@ -10,34 +10,45 @@ Local-first multi-agent research system powered by [Ollama](https://ollama.com) 
 curl -fsSL https://raw.githubusercontent.com/tyroneross/local-smartz/main/install.sh | bash
 ```
 
-This will:
-1. Check Python 3.12+ is installed
-2. Install Ollama if missing (macOS: Homebrew or direct download; Linux: official installer)
-3. Start Ollama if it's not running
-4. Install `localsmartz` CLI (via `uv`, `pipx`, or `pip`)
-5. Download the default models for your hardware profile (~5-40 GB)
-6. Launch the first-run model picker
+Flags:
+- `--no-ollama` — skip Ollama install / start (use if you already manage Ollama yourself)
 
-**No prior Ollama install needed** — the script handles everything. You just need Python 3.12+.
+The script:
+1. Checks Python 3.12+ is installed (exits with a pointer to the installer if not)
+2. Installs Ollama if missing (macOS: Homebrew or direct download; Linux: official installer)
+3. Starts Ollama if it's not running
+4. Installs `localsmartz` CLI — prefers `uv tool install -e .`, falls back to `pipx`, then `pip --user`
+5. Runs `localsmartz --setup` only in an interactive shell (downloads default models, ~5–40 GB)
 
 ### Manual install
 
-```bash
-# Clone
-git clone https://github.com/tyroneross/local-smartz.git
-cd local-smartz
+1. Install **Python 3.12+** — [python.org/downloads/macos](https://www.python.org/downloads/macos/) or `brew install python@3.12`
+2. Install **Ollama** — [ollama.com/download](https://ollama.com/download) or `brew install ollama`
+3. Clone and install:
 
-# Install (pick one)
-uv tool install -e .          # uv (fastest)
-pipx install -e .             # pipx
-pip install -e .              # pip
+   ```bash
+   git clone https://github.com/tyroneross/local-smartz.git
+   cd local-smartz
 
-# Setup Ollama + models
-localsmartz --setup
+   # Pick one
+   uv tool install -e .     # uv (recommended, fastest)
+   pipx install -e .        # pipx
+   pip install -e .         # pip
+   ```
+4. Run first-run setup:
 
-# Verify
-localsmartz --check
-```
+   ```bash
+   localsmartz --setup
+   localsmartz --check      # verify
+   ```
+
+### Cross-Mac install
+
+Installing `localsmartz` on a fresh Mac:
+
+- The native macOS app (`.app` bundle in `app/`) requires **Python 3.12+ on `PATH`** at launch time. Bundled-Python work is planned; until it lands, install Python first.
+- **Plugins** live at `$HOME/.localsmartz/plugins/` (per-user, not in the repo). Copying the repo between machines does not copy your plugins.
+- **Settings** live at `$HOME/.localsmartz/global.json`. Project-scoped state stays in `.localsmartz/` inside the project directory.
 
 ### Requirements
 
@@ -57,6 +68,18 @@ The install script handles it automatically. If you prefer to install manually:
 | Linux | `curl -fsSL https://ollama.ai/install.sh \| sh` |
 
 After installing, start it with `ollama serve` (Linux) or open the Ollama app (macOS).
+
+## Plugins & Skills
+
+Local-smartz can load plugins, skills, and MCP servers from external directories (default search path includes RossLabs-AI-Toolkit). Add one with:
+
+```bash
+localsmartz plugins install <path>
+```
+
+See `localsmartz plugins --help` for the full CLI.
+
+> This feature is being wired up in the current build — the exact command surface (list, remove, validate) lands with this release. If `localsmartz plugins` is not yet available on your install, pull latest and re-run the installer.
 
 ## Quick Start
 

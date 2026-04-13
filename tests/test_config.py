@@ -78,19 +78,39 @@ def test_resolve_model_from_config(tmp_path):
         assert result == "saved:model"
 
 
-def test_resolve_model_stale_config_retriggers(tmp_path, capsys):
-    """If saved model no longer available, warns and triggers picker."""
+def test_resolve_model_stale_config_falls_back(tmp_path, capsys):
+    """If saved model no longer available but a substitute is, use it (with a warning).
+    Picker is only re-triggered when no usable substitute exists at all."""
     save_config(tmp_path, {"planning_model": "deleted:model", "profile": "lite"})
 
     with patch("localsmartz.config.check_server", return_value=True), \
          patch("localsmartz.config.model_available", return_value=False), \
-         patch("localsmartz.config.list_models_with_size", return_value=[("other:8b", 5.0)]), \
+         patch("localsmartz.ollama.check_server", return_value=True), \
+         patch("localsmartz.ollama.model_available", return_value=False), \
+         patch("localsmartz.ollama.list_models_with_size", return_value=[("other:8b", 5.0)]):
+        result = resolve_model(tmp_path, cli_model=None, profile_name="lite")
+        assert result == "other:8b"
+        captured = capsys.readouterr()
+        assert "deleted:model" in captured.err
+        assert "other:8b" in captured.err
+
+
+def test_resolve_model_stale_no_fallback_retriggers_picker(tmp_path, capsys):
+    """If saved model is gone AND no substitute exists, fall through to first-run picker."""
+    save_config(tmp_path, {"planning_model": "deleted:model", "profile": "lite"})
+
+    with patch("localsmartz.config.check_server", return_value=True), \
+         patch("localsmartz.config.model_available", return_value=False), \
+         patch("localsmartz.ollama.check_server", return_value=True), \
+         patch("localsmartz.ollama.model_available", return_value=False), \
+         patch("localsmartz.ollama.list_models_with_size", return_value=[]), \
+         patch("localsmartz.config.list_models_with_size", return_value=[("picker_pick:8b", 5.0)]), \
          patch("localsmartz.config.get_version", return_value="0.15.2"), \
          patch("localsmartz.config.detect_profile", return_value="lite"), \
          patch("sys.stdin") as mock_stdin:
         mock_stdin.isatty.return_value = False  # non-interactive → auto-select
         result = resolve_model(tmp_path, cli_model=None, profile_name="lite")
-        assert result == "other:8b"
+        assert result == "picker_pick:8b"
         captured = capsys.readouterr()
         assert "no longer available" in captured.err
 

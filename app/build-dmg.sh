@@ -46,7 +46,51 @@ if [ ! -d "${APP_BUNDLE}" ]; then
     exit 1
 fi
 
-# Step 4: Prepare staging directory
+# Step 4: Embed a self-contained Python into the .app bundle
+# This makes the distributed .app work without any external `python3` install.
+echo ""
+echo "=== Embedding Python runtime ==="
+bash scripts/embed-python.sh
+
+EMBEDDED_PY_SRC="build/embedded-python"
+APP_RESOURCES="${APP_BUNDLE}/Contents/Resources"
+APP_PY_DIR="${APP_RESOURCES}/python"
+
+if [ ! -x "${EMBEDDED_PY_SRC}/bin/python3" ]; then
+    echo "Error: embedded Python not found at ${EMBEDDED_PY_SRC}/bin/python3"
+    exit 1
+fi
+
+echo "  -> Copying embedded Python into ${APP_PY_DIR}"
+mkdir -p "${APP_RESOURCES}"
+rm -rf "${APP_PY_DIR}"
+# Use cp -R; preserve symlinks and perms.
+cp -R "${EMBEDDED_PY_SRC}" "${APP_PY_DIR}"
+
+# Install the local-smartz Python package into the bundled Python's
+# site-packages. The repo root (containing pyproject.toml / setup.py) is
+# the parent of this `app/` dir.
+REPO_ROOT="$(cd .. && pwd)"
+echo "  -> Installing localsmartz from ${REPO_ROOT} into bundled Python"
+"${APP_PY_DIR}/bin/python3" -m pip install \
+    --no-warn-script-location \
+    --disable-pip-version-check \
+    "${REPO_ROOT}"
+
+# Slim the bundle: drop __pycache__ directories.
+echo "  -> Stripping __pycache__ from bundled Python"
+find "${APP_PY_DIR}" -type d -name __pycache__ -prune -exec rm -rf {} +
+
+# Ad-hoc codesign so Gatekeeper at least runs the bundle on the build host.
+# TODO(local-smartz): replace ad-hoc "-" with a Developer ID Application
+# certificate (and notarization) before public distribution.
+echo "  -> Ad-hoc codesigning embedded Python (TODO: Developer ID for release)"
+codesign --force --deep --sign - "${APP_PY_DIR}" || \
+    echo "  WARNING: ad-hoc codesign failed; continuing"
+codesign --force --deep --sign - "${APP_BUNDLE}" || \
+    echo "  WARNING: ad-hoc codesign of .app failed; continuing"
+
+# Step 5: Prepare staging directory
 echo ""
 echo "=== Preparing DMG contents ==="
 rm -rf "${STAGING_DIR}" "${DMG_FILE}"
@@ -55,7 +99,7 @@ mkdir -p "${STAGING_DIR}"
 cp -R "${APP_BUNDLE}" "${STAGING_DIR}/"
 ln -s /Applications "${STAGING_DIR}/Applications"
 
-# Step 5: Create DMG
+# Step 6: Create DMG
 echo ""
 echo "=== Creating DMG ==="
 hdiutil create \

@@ -22,6 +22,14 @@ from localsmartz.tools.web import web_search, scrape_url
 from localsmartz.tools.documents import parse_pdf, read_spreadsheet, read_text_file
 from localsmartz.tools.reports import create_report, create_spreadsheet
 from localsmartz.tools.compute import python_exec
+from localsmartz.plugins.agent_integration import (
+    build_mcp_tools,
+    build_plugin_tools,
+    build_skill_prompt_section,
+    close_mcp_clients,
+    get_active_skills,
+)
+from localsmartz.plugins.mcp_client import MCPClient
 
 
 # All custom tools — DeepAgents adds write_todos, task, ls, read_file,
@@ -191,11 +199,70 @@ def _create_model(profile: dict, role: str) -> ChatOllama:
     )
 
 
+def _build_system_prompt(
+    profile: dict,
+    *,
+    include_plugin_skills: bool,
+    thread_id: str | None = None,
+    cwd: Path | None = None,
+    extra_system_prompt: str = "",
+) -> str:
+    """Assemble the system prompt for a given profile.
+
+    Extracted so tests can verify prompt construction without spinning up
+    the full agent (which requires a live Ollama server).
+    """
+    is_lite = profile["name"] == "lite"
+    prompt = SYSTEM_PROMPT_LITE if is_lite else SYSTEM_PROMPT_FULL
+
+    if thread_id and cwd is not None:
+        context = load_context(thread_id, str(cwd))
+        if context:
+            prompt += f"\n\n## Previous Research Context\n\n{context}"
+
+    if include_plugin_skills:
+        skills = get_active_skills()
+        section = build_skill_prompt_section(skills)
+        if section:
+            prompt += "\n" + section
+
+    if extra_system_prompt:
+        prompt += extra_system_prompt
+
+    return prompt
+
+
+def _build_tool_set(
+    profile: dict,
+    *,
+    include_plugin_tools: bool,
+    include_mcp: bool,
+) -> tuple[list, list[MCPClient]]:
+    """Build the flat tool list. Returns (tools, mcp_clients_to_close)."""
+    is_lite = profile["name"] == "lite"
+    tools: list = list(LITE_TOOLS if is_lite else ALL_TOOLS)
+
+    if include_plugin_tools:
+        tools.extend(build_plugin_tools(profile_name=profile["name"]))
+
+    mcp_clients: list[MCPClient] = []
+    if include_mcp:
+        mcp_tools, mcp_clients = build_mcp_tools()
+        tools.extend(mcp_tools)
+
+    return tools, mcp_clients
+
+
 def create_agent(
     profile_name: str | None = None,
     thread_id: str | None = None,
     cwd: Path | None = None,
     model_override: str | None = None,
+    *,
+    include_plugin_skills: bool | None = None,
+    include_plugin_tools: bool | None = None,
+    include_mcp: bool = False,
+    extra_system_prompt: str = "",
 ):
     """Create the Local Smartz research agent.
 
@@ -211,26 +278,44 @@ def create_agent(
         thread_id: Optional thread ID for context continuity
         cwd: Working directory (default: cwd)
         model_override: If set, replaces planning_model (user-selected model)
+        include_plugin_skills: Inject active plugin skills into system prompt.
+            Defaults to True for full profile, False for lite (small models
+            can't absorb large prompts).
+        include_plugin_tools: Expose plugin commands as guidance tools.
+            Defaults to True for full, False for lite.
+        include_mcp: Start registered MCP servers and expose their tools.
+            Default False -- opt in when ready; startup can be slow.
 
     Returns:
-        Tuple of (agent, profile, checkpointer)
+        Tuple of (agent, profile, checkpointer, mcp_clients). ``mcp_clients``
+        may be empty; caller should call ``close()`` on each at session end.
     """
     cwd = cwd or Path.cwd()
     profile = get_profile(profile_name, model_override=model_override)
     is_lite = profile["name"] == "lite"
 
+    # Profile-aware defaults: lite keeps its prompt + tool budget tight.
+    if include_plugin_skills is None:
+        include_plugin_skills = not is_lite
+    if include_plugin_tools is None:
+        include_plugin_tools = not is_lite
+
     # Use planning model for the main agent
     model = _create_model(profile, "planning")
 
-    # Profile-specific system prompt
-    system_prompt = SYSTEM_PROMPT_LITE if is_lite else SYSTEM_PROMPT_FULL
-    if thread_id:
-        context = load_context(thread_id, str(cwd))
-        if context:
-            system_prompt += f"\n\n## Previous Research Context\n\n{context}"
+    system_prompt = _build_system_prompt(
+        profile,
+        include_plugin_skills=include_plugin_skills,
+        thread_id=thread_id,
+        cwd=cwd,
+        extra_system_prompt=extra_system_prompt,
+    )
 
-    # Profile-specific tool set
-    tools = LITE_TOOLS if is_lite else ALL_TOOLS
+    tools, mcp_clients = _build_tool_set(
+        profile,
+        include_plugin_tools=include_plugin_tools,
+        include_mcp=include_mcp,
+    )
 
     checkpointer = MemorySaver()
 
@@ -246,7 +331,7 @@ def create_agent(
         checkpointer=checkpointer,
     )
 
-    return agent, profile, checkpointer
+    return agent, profile, checkpointer, mcp_clients
 
 
 def run_research(
@@ -271,11 +356,12 @@ def run_research(
         Final agent state dict with messages
     """
     cwd = cwd or Path.cwd()
-    agent, profile, checkpointer = create_agent(
+    agent, profile, checkpointer, mcp_clients = create_agent(
         profile_name=profile_name,
         thread_id=thread_id,
         cwd=cwd,
         model_override=model_override,
+        include_mcp=True,
     )
 
     if verbose:
@@ -288,8 +374,11 @@ def run_research(
     input_msg = {"messages": [{"role": "user", "content": prompt}]}
 
     if not verbose:
-        # Silent mode — invoke directly
-        return agent.invoke(input_msg, config=config)
+        # Silent mode — invoke directly, still close MCP clients on exit.
+        try:
+            return agent.invoke(input_msg, config=config)
+        finally:
+            close_mcp_clients(mcp_clients)
 
     # Import validation for lite profile monitoring
     from localsmartz.validation import LoopDetector
@@ -376,8 +465,12 @@ def run_research(
 
     # Reconstruct result from final state
     # stream() returns incremental updates; get full state from checkpointer
-    full_result = agent.invoke(None, config=config)
-    return full_result if full_result else (final_state or {})
+    try:
+        full_result = agent.invoke(None, config=config)
+        return full_result if full_result else (final_state or {})
+    finally:
+        # Ensure spawned MCP server processes exit when the session ends.
+        close_mcp_clients(mcp_clients)
 
 
 def _preview_args(args: dict, max_len: int = 60) -> str:

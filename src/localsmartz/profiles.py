@@ -6,7 +6,11 @@ import subprocess
 
 PROFILES = {
     "full": {
-        "planning_model": "llama3.1:70b-instruct-q5_K_M",
+        # Fast planning model — a lightweight model for planning + first-token
+        # latency dominates simple-query timing, so this is qwen3:8b (5 GB).
+        # Execution still uses a strong 32B coder model for heavy lifting.
+        # Users can override via the toolbar picker or `localsmartz --model`.
+        "planning_model": "qwen3:8b-q4_K_M",
         "execution_model": "qwen2.5-coder:32b-instruct-q5_K_M",
         "agents": ["planner", "researcher", "analyzer", "writer", "reviewer"],
         "max_concurrent_agents": 2,
@@ -24,6 +28,95 @@ PROFILES = {
         "subagent_delegation": False,
     },
 }
+
+
+# Per-agent role descriptions surfaced to the UI and (when "single agent mode"
+# is active) injected into the system prompt so the LLM stays in role.
+AGENT_ROLES = {
+    "planner": {
+        "title": "Planner",
+        "summary": "Decomposes the question into steps. Owns the to-do list.",
+        "system_focus": (
+            "You are the PLANNER agent. Your single job is to break the user's question "
+            "into a concrete, ordered list of steps. Use write_todos. Do NOT execute "
+            "research or compute results yourself — just plan. End by listing the steps."
+        ),
+    },
+    "researcher": {
+        "title": "Researcher",
+        "summary": "Gathers information from the web and local files.",
+        "system_focus": (
+            "You are the RESEARCHER agent. Use web_search, scrape_url, parse_pdf, "
+            "read_text_file, and read_spreadsheet to gather raw information. "
+            "Do not analyze or write a report — collect sources and key findings, "
+            "save them with write_file, and stop."
+        ),
+    },
+    "analyzer": {
+        "title": "Analyzer",
+        "summary": "Computes, calculates, and reasons over data.",
+        "system_focus": (
+            "You are the ANALYZER agent. Use python_exec for ALL computation, "
+            "statistics, and data manipulation. Read prior research from disk with "
+            "read_file. Output structured findings — no narrative writing."
+        ),
+    },
+    "writer": {
+        "title": "Writer",
+        "summary": "Composes the final report or answer.",
+        "system_focus": (
+            "You are the WRITER agent. Compose the final user-facing answer or report. "
+            "Use create_report when the user wants a deliverable. Pull facts from prior "
+            "files via read_file. Do not run new searches or computations."
+        ),
+    },
+    "reviewer": {
+        "title": "Reviewer",
+        "summary": "Critiques the output for accuracy and clarity.",
+        "system_focus": (
+            "You are the REVIEWER agent. Read the most recent answer or report and "
+            "produce a critique: factual issues, missing context, unclear claims, "
+            "structural problems. Do not rewrite — review and recommend."
+        ),
+    },
+}
+
+
+def list_agents(profile: dict) -> list[dict]:
+    """Return the agents for a profile, decorated with title + summary."""
+    out = []
+    for name in profile.get("agents", []):
+        meta = AGENT_ROLES.get(name)
+        if meta is None:
+            out.append({
+                "name": name,
+                "title": name.title(),
+                "summary": "",
+            })
+        else:
+            out.append({
+                "name": name,
+                "title": meta["title"],
+                "summary": meta["summary"],
+            })
+    return out
+
+
+def agent_focus_prompt(agent_name: str | None) -> str:
+    """Return a system prompt suffix that pins the LLM to one role.
+
+    Empty when agent_name is None or unknown — the default multi-agent flow runs.
+    """
+    if not agent_name:
+        return ""
+    meta = AGENT_ROLES.get(agent_name)
+    if not meta:
+        return ""
+    return (
+        "\n\n## Single-Agent Mode\n\n"
+        f"{meta['system_focus']}\n\n"
+        "Do not delegate via the task tool. Do the work in your own scope and stop."
+    )
 
 
 def detect_profile() -> str:

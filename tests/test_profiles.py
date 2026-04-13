@@ -6,7 +6,10 @@ from localsmartz.profiles import get_profile, get_model, detect_profile, PROFILE
 def test_get_profile_full():
     profile = get_profile("full")
     assert profile["name"] == "full"
-    assert "70b" in profile["planning_model"]
+    # Planning model is a fast lightweight model for low first-token latency;
+    # execution still escalates to a strong coder model.
+    assert "8b" in profile["planning_model"]
+    assert "32b" in profile["execution_model"]
     assert profile["max_concurrent_agents"] == 2
 
 
@@ -25,7 +28,7 @@ def test_get_profile_auto():
 
 def test_get_model():
     profile = get_profile("full")
-    assert "70b" in get_model(profile, "planning")
+    assert "8b" in get_model(profile, "planning")
     assert "32b" in get_model(profile, "execution")
 
 

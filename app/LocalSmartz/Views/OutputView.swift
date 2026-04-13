@@ -5,6 +5,25 @@ struct OutputView: View {
     let toolCalls: [ToolCallEntry]
     let isStreaming: Bool
 
+    var streamingStatus: String {
+        if toolCalls.isEmpty { return "Thinking…" }
+        if let last = toolCalls.last {
+            switch last.name {
+            case "web_search": return "Searching the web…"
+            case "scrape_url": return "Reading a page…"
+            case "parse_pdf":  return "Reading a PDF…"
+            case "python_exec": return "Running calculations…"
+            case "create_report", "create_spreadsheet": return "Writing the report…"
+            case "read_text_file", "read_spreadsheet": return "Reading a file…"
+            default:
+                if last.name.starts(with: "plugin_") { return "Running plugin command…" }
+                if last.name.starts(with: "mcp_") { return "Calling MCP tool…" }
+                return "Working…"
+            }
+        }
+        return "Researching…"
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -20,22 +39,46 @@ struct OutputView: View {
                         }
                     }
 
-                    // Research output
+                    // Research output — render markdown natively so bold,
+                    // italics, links, and inline code display as formatted
+                    // text. `.inlineOnlyPreservingWhitespace` keeps newlines
+                    // so lists/headings remain readable even though their
+                    // block styling isn't applied.
                     if !outputText.isEmpty {
-                        Text(outputText)
-                            .font(.body)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if let attributed = try? AttributedString(
+                            markdown: outputText,
+                            options: AttributedString.MarkdownParsingOptions(
+                                interpretedSyntax: .inlineOnlyPreservingWhitespace
+                            )
+                        ) {
+                            Text(attributed)
+                                .font(.body)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            Text(outputText)
+                                .font(.body)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
 
                     if isStreaming {
-                        HStack(spacing: 6) {
+                        HStack(spacing: 8) {
                             ProgressView()
                                 .controlSize(.small)
-                            Text("Researching...")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(streamingStatus)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(.primary)
+                                if let last = toolCalls.last {
+                                    Text("Last step: \(last.display)")
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                         }
+                        .padding(.top, 4)
                     }
 
                     // Scroll anchor
@@ -43,6 +86,7 @@ struct OutputView: View {
                         .frame(height: 1)
                         .id("bottom")
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding()
             }
             .onChange(of: outputText) {
@@ -71,3 +115,4 @@ struct ToolCallEntry: Equatable {
         return name
     }
 }
+

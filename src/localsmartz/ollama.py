@@ -1,15 +1,62 @@
 """Ollama health check, model validation, and setup helpers."""
 
+import os
 import platform
 import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import httpx
 
 
 OLLAMA_BASE = "http://localhost:11434"
+
+
+# Curated catalog of suggested models. Shown to users alongside "installed"
+# so they can see what's available to pull without hunting on ollama.com.
+# Size is the approximate on-disk estimate; actual will be reported for installed.
+SUGGESTED_MODELS: list[dict] = [
+    # Lite-class (fast, low RAM) ---------------------------------------------
+    {"name": "qwen3:8b-q4_K_M",                   "size_gb_estimate": 5.2, "ram_class": "lite",  "note": "Fast general model (lite profile default)"},
+    {"name": "llama3.2:3b",                       "size_gb_estimate": 2.0, "ram_class": "lite",  "note": "Small fast model, good for quick queries"},
+    {"name": "phi3:mini",                         "size_gb_estimate": 2.3, "ram_class": "lite",  "note": "Microsoft Phi-3 mini"},
+    {"name": "gemma2:9b",                         "size_gb_estimate": 5.4, "ram_class": "lite",  "note": "Google Gemma 2 9B"},
+    # Full-class (mid range, 16-32GB+ RAM) -----------------------------------
+    {"name": "qwen2.5-coder:32b-instruct-q5_K_M", "size_gb_estimate": 23.0, "ram_class": "full", "note": "Strong code/agent model (default execution)"},
+    {"name": "gpt-oss:20b",                       "size_gb_estimate": 14.0, "ram_class": "full", "note": "OSS-tuned model"},
+    # Heavy (64GB+ RAM) ------------------------------------------------------
+    {"name": "llama3.1:70b-instruct-q5_K_M",      "size_gb_estimate": 48.0, "ram_class": "heavy","note": "Full profile default planning model"},
+    {"name": "gpt-oss:120b",                      "size_gb_estimate": 65.0, "ram_class": "heavy","note": "Largest OSS model"},
+]
+
+
+def ollama_models_path() -> Path:
+    """Return the path Ollama uses to store models.
+
+    Respects the OLLAMA_MODELS env var (user override), else falls back to
+    the platform default (~/.ollama/models on macOS and Linux).
+    """
+    override = os.environ.get("OLLAMA_MODELS")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".ollama" / "models"
+
+
+def ollama_disk_usage_bytes() -> int:
+    """Total bytes on disk used by Ollama's models directory (best-effort)."""
+    root = ollama_models_path()
+    if not root.exists():
+        return 0
+    total = 0
+    for entry in root.rglob("*"):
+        try:
+            if entry.is_file():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def check_server() -> bool:
@@ -90,6 +137,35 @@ def model_available(model_name: str) -> bool:
 def suggest_pull(model_name: str) -> str:
     """Generate an ollama pull command."""
     return f"ollama pull {model_name}"
+
+
+def resolve_available_model(
+    requested: str, min_gb: float = 1.0
+) -> tuple[str | None, str | None]:
+    """Resolve a possibly-missing model to one that is actually pulled.
+
+    Returns (model_name, warning_or_error):
+      - (requested, None) if requested is available
+      - (substitute, warning) if requested is missing but a >=min_gb substitute exists
+      - (None, error) if Ollama is down or no usable model is available
+    """
+    if not check_server():
+        return None, "Ollama is not running. Start it with: ollama serve"
+    if model_available(requested):
+        return requested, None
+    candidates = [(n, s) for n, s in list_models_with_size() if s >= min_gb]
+    if not candidates:
+        return (
+            None,
+            f"Model '{requested}' not pulled and no other suitable model found. "
+            f"Pull one with: {suggest_pull(requested)}",
+        )
+    chosen = candidates[-1][0]  # largest available
+    warning = (
+        f"Model '{requested}' not pulled — using '{chosen}' instead. "
+        f"For the recommended model: {suggest_pull(requested)}"
+    )
+    return chosen, warning
 
 
 def validate_for_profile(profile: dict) -> tuple[bool, list[str]]:

@@ -1,0 +1,69 @@
+name: macOS App Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "pyproject.toml"
+      - ".github/workflows/macos.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "pyproject.toml"
+      - ".github/workflows/macos.yml"
+  workflow_dispatch:
+
+jobs:
+  build-mac-app:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install xcodegen
+
+      - name: Generate Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd app
+          xcodegen generate
+
+      - name: Build (unsigned, Release)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd app
+          xcodebuild \
+            -scheme LocalSmartz \
+            -configuration Release \
+            -derivedDataPath build/ \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Locate built .app
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH=$(find app/build -type d -name "LocalSmartz.app" -path "*/Release/*" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "LocalSmartz.app not found under app/build" >&2
+            exit 1
+          fi
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload built .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalSmartz-app-unsigned
+          path: ${{ steps.locate.outputs.app_path }}
+          if-no-files-found: error

@@ -1,0 +1,52 @@
+name: Python Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # Try dev extras first; fall back to base install + pytest if not defined.
+          pip install -e ".[dev]" || pip install -e . pytest
+
+      - name: Run pytest
+        shell: bash
+        run: |
+          set -euo pipefail
+          # test_ollama.py and test_serve.py are integration tests that require a
+          # running Ollama instance. CI runners don't have Ollama, so skip them here.
+          pytest tests/ -v --tb=short \
+            --ignore=tests/test_ollama.py \
+            --ignore=tests/test_serve.py \
+            --junitxml=pytest-results.xml
+
+      - name: Upload pytest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results-${{ matrix.os }}
+          path: pytest-results.xml
+          if-no-files-found: ignore

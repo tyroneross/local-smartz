@@ -13,11 +13,13 @@ Same pattern as stratagem/ui.py.
 """
 
 import json
+import os
+import subprocess
 import sys
 import time
 import traceback
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -850,8 +852,22 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_threads()
         elif path == "/api/models":
             self._handle_models()
+        elif path == "/api/models/catalog":
+            self._handle_models_catalog()
+        elif path == "/api/agents":
+            self._handle_agents()
+        elif path == "/api/skills":
+            self._handle_list_skills()
+        elif path == "/api/ollama/info":
+            self._handle_ollama_info()
+        elif path == "/api/observability/info":
+            self._handle_observability_info()
         elif path == "/api/folders":
             self._handle_folders()
+        elif path == "/api/secrets":
+            self._handle_secrets_list()
+        elif path == "/api/logs":
+            self._handle_logs_list(parsed)
         elif path == "":
             self._serve_ui()
         else:
@@ -867,8 +883,20 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_setup()
         elif path == "/api/models/select":
             self._handle_model_select()
+        elif path == "/api/models/pull":
+            self._handle_model_pull()
+        elif path == "/api/skills/refactor":
+            self._handle_skill_refactor()
+        elif path == "/api/skills/new":
+            self._handle_skill_new()
+        elif path == "/api/plugins/save":
+            self._handle_plugin_save()
         elif path == "/api/folders":
             self._handle_folder_add()
+        elif path == "/api/secrets":
+            self._handle_secrets_set()
+        elif path == "/api/issues/report":
+            self._handle_issues_report()
         else:
             self._json_response({"error": "Not found"}, 404)
 
@@ -882,6 +910,12 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/")
         if path == "/api/folders":
             self._handle_folder_delete()
+        elif path == "/api/models":
+            self._handle_model_delete()
+        elif path == "/api/secrets":
+            self._handle_secrets_delete(parsed)
+        elif path == "/api/logs":
+            self._handle_logs_clear()
         else:
             self._json_response({"error": "Not found"}, 404)
 
@@ -965,7 +999,10 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
 
     def _handle_status(self):
         from localsmartz.profiles import get_profile
-        from localsmartz.ollama import check_server, get_version, list_models, model_available
+        from localsmartz.ollama import (
+            check_server, get_version, list_models, model_available,
+            resolve_available_model,
+        )
         from localsmartz.utils.hardware import get_ram_gb
         from localsmartz import __version__
         import platform as _platform
@@ -984,10 +1021,23 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             if ollama_ok and not model_available(model)
         ]
 
+        # Fallback: if the planning model is missing but a usable substitute is
+        # installed, the user is functionally ready — surface that.
+        effective_model = profile["planning_model"]
+        fallback_warning: str | None = None
+        if ollama_ok and profile["planning_model"] in missing_models:
+            chosen, warning = resolve_available_model(profile["planning_model"])
+            if chosen and chosen != profile["planning_model"]:
+                effective_model = chosen
+                fallback_warning = warning
+                missing_models = [m for m in missing_models if m != profile["planning_model"]]
+
         self._json_response({
             "profile": profile["name"],
             "planning_model": profile["planning_model"],
             "execution_model": profile["execution_model"],
+            "effective_model": effective_model,
+            "fallback_warning": fallback_warning,
             "ready": ollama_ok and not missing_models,
             "missing_models": missing_models,
             "ollama": {
@@ -1013,7 +1063,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         prompt = params.get("prompt", [None])[0]
         thread_id = params.get("thread_id", [None])[0]
         profile_name = params.get("profile", [None])[0] or self._default_profile
-        self._handle_research_request(prompt, thread_id, profile_name)
+        agent = params.get("agent", [None])[0]
+        self._handle_research_request(prompt, thread_id, profile_name, agent)
 
     def _handle_research_post(self):
         """Accept research requests as JSON for app clients."""
@@ -1026,13 +1077,15 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         prompt = payload.get("prompt")
         thread_id = payload.get("thread_id")
         profile_name = payload.get("profile") or self._default_profile
-        self._handle_research_request(prompt, thread_id, profile_name)
+        agent = payload.get("agent")  # Optional: pin to a single agent
+        self._handle_research_request(prompt, thread_id, profile_name, agent)
 
     def _handle_research_request(
         self,
         prompt: str | None,
         thread_id: str | None,
         profile_name: str | None,
+        agent: str | None = None,
     ):
         if not isinstance(prompt, str) or not prompt.strip():
             self._json_response({"error": "No prompt provided"}, 400)
@@ -1045,7 +1098,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         self._start_sse()
 
         try:
-            self._stream_research(prompt.strip(), profile_name, thread_id)
+            self._stream_research(prompt.strip(), profile_name, thread_id, agent)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
@@ -1055,11 +1108,19 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-    def _stream_research(self, prompt: str, profile_name: str | None, thread_id: str | None):
+    def _stream_research(
+        self,
+        prompt: str,
+        profile_name: str | None,
+        thread_id: str | None,
+        focus_agent: str | None = None,
+    ):
         """Run research agent and emit SSE events."""
         from localsmartz.agent import create_agent, extract_final_response
-        from localsmartz.profiles import get_profile
-        from localsmartz.ollama import check_server, model_available, list_models
+        from localsmartz.profiles import get_profile, agent_focus_prompt
+        from localsmartz.ollama import (
+            check_server, model_available, list_models, resolve_available_model,
+        )
         from localsmartz.threads import create_thread, append_entry
 
         # Preflight: Ollama must be running
@@ -1073,16 +1134,29 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         cwd = Path.cwd()
         model_override = LocalSmartzHandler._model_override or _saved_model_override(cwd)
 
-        # Preflight: required model must be available
+        # Preflight: required model must be available — fall back to the largest
+        # installed substitute if the configured model isn't pulled. Mirrors the
+        # behavior of the CLI _preflight() and /api/status. If no substitute
+        # exists either, surface the original error.
         profile = get_profile(profile_name, model_override=model_override)
         model = profile["planning_model"]
         if not model_available(model):
-            available = ", ".join(list_models()) or "none"
-            self._send_event({
-                "type": "error",
-                "message": f"Model '{model}' not found \u2192 Pull it with: ollama pull {model}\nAvailable models: {available}",
-            })
-            return
+            chosen, msg = resolve_available_model(model)
+            if chosen is None:
+                available = ", ".join(list_models()) or "none"
+                self._send_event({
+                    "type": "error",
+                    "message": (
+                        f"Model '{model}' not found \u2192 Pull it with: ollama pull {model}\n"
+                        f"Available models: {available}"
+                    ),
+                })
+                return
+            # Substitute found — switch to it for this run, surface the warning
+            # as an info-style text event so the user sees what happened.
+            model_override = chosen
+            if msg:
+                self._send_event({"type": "text", "content": f"[note] {msg}\n\n"})
 
         # Ensure storage
         storage = cwd / ".localsmartz"
@@ -1093,11 +1167,16 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         if thread_id:
             create_thread(thread_id, str(cwd), title=prompt[:60])
 
-        agent, profile, checkpointer = create_agent(
+        focus_suffix = agent_focus_prompt(focus_agent)
+        if focus_suffix:
+            self._send_event({"type": "text", "content": f"[focus] running as `{focus_agent}` agent only\n\n"})
+
+        agent, profile, checkpointer, mcp_clients = create_agent(
             profile_name=profile_name,
             thread_id=thread_id,
             cwd=cwd,
             model_override=model_override,
+            extra_system_prompt=focus_suffix,
         )
 
         config = {"configurable": {"thread_id": thread_id or "default"}}
@@ -1206,6 +1285,10 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         duration_ms = int((time.time() - start_time) * 1000)
         self._send_event({"type": "done", "duration_ms": duration_ms, "thread_id": thread_id or ""})
 
+        if mcp_clients:
+            from localsmartz.plugins.agent_integration import close_mcp_clients
+            close_mcp_clients(mcp_clients)
+
     def _handle_models(self):
         """Return available Ollama models with current selection."""
         from localsmartz.ollama import list_models_with_size
@@ -1246,6 +1329,365 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         LocalSmartzHandler._model_override = model
         profile = get_profile(self._default_profile, model_override=model)
         self._json_response({"ok": True, "model": model, "profile": profile["name"]})
+
+    def _handle_models_catalog(self):
+        """Return the curated catalog with installed/not-installed flags.
+
+        Installed models NOT in the catalog are appended as extra rows so the
+        user sees everything they have.
+        """
+        from localsmartz.ollama import (
+            SUGGESTED_MODELS,
+            list_models_with_size,
+            model_available,
+        )
+        from localsmartz.config import load_config
+        from localsmartz.profiles import get_profile
+
+        installed = {name: size for name, size in list_models_with_size()}
+        cwd = Path.cwd()
+        config = load_config(cwd) or {}
+        current = LocalSmartzHandler._model_override or config.get("planning_model", "")
+        profile = get_profile(self._default_profile, model_override=current or None)
+
+        rows: list[dict] = []
+        catalog_names: set[str] = set()
+        for item in SUGGESTED_MODELS:
+            name = item["name"]
+            catalog_names.add(name)
+            is_installed = model_available(name)
+            actual_size = None
+            if name in installed:
+                actual_size = round(installed[name], 1)
+            rows.append({
+                **item,
+                "installed": is_installed,
+                "installed_size_gb": actual_size,
+                "current": name == current,
+            })
+        # Append extras (user has it pulled but it's not in the curated list)
+        for name, size in installed.items():
+            if name not in catalog_names:
+                rows.append({
+                    "name": name,
+                    "size_gb_estimate": round(size, 1),
+                    "ram_class": "custom",
+                    "note": "Pulled manually",
+                    "installed": True,
+                    "installed_size_gb": round(size, 1),
+                    "current": name == current,
+                })
+        self._json_response({
+            "catalog": rows,
+            "current": current or (profile["planning_model"] if profile else ""),
+            "profile": profile["name"] if profile else "unknown",
+        })
+
+    def _handle_model_pull(self):
+        """Stream SSE progress for `ollama pull <model>`."""
+        try:
+            body = self._read_json_body()
+        except ValueError:
+            self._json_response({"error": "Invalid request body"}, 400)
+            return
+        model = body.get("model", "").strip() if isinstance(body.get("model"), str) else ""
+        if not model:
+            self._json_response({"error": "No model specified"}, 400)
+            return
+
+        self._start_sse()
+        self._send_event({"type": "step", "message": f"Pulling {model}..."})
+        try:
+            proc = subprocess.Popen(
+                ["ollama", "pull", model],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except FileNotFoundError:
+            self._send_event({"type": "error", "message": "`ollama` not on PATH"})
+            return
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                self._send_event({"type": "progress", "model": model, "line": line})
+            proc.wait()
+            if proc.returncode == 0:
+                self._send_event({"type": "done", "model": model})
+            else:
+                self._send_event({
+                    "type": "error",
+                    "message": f"ollama pull exited {proc.returncode}",
+                })
+        except (BrokenPipeError, ConnectionResetError):
+            proc.terminate()
+
+    def _handle_model_delete(self):
+        """DELETE /api/models?name=<model> — remove a model from Ollama."""
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        model = (qs.get("name") or [""])[0].strip()
+        if not model:
+            self._json_response({"error": "No model specified (use ?name=...)"}, 400)
+            return
+        try:
+            result = subprocess.run(
+                ["ollama", "rm", model],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except FileNotFoundError:
+            self._json_response({"error": "`ollama` not on PATH"}, 500)
+            return
+        except subprocess.TimeoutExpired:
+            self._json_response({"error": "`ollama rm` timed out"}, 504)
+            return
+        if result.returncode != 0:
+            self._json_response({
+                "error": f"ollama rm failed: {result.stderr.strip() or result.stdout.strip()}"
+            }, 500)
+            return
+        self._json_response({"ok": True, "removed": model})
+
+    # ── Plugin/skill authoring ───────────────────────────────────────────
+
+    def _llm_complete(self, system: str, user: str, max_tokens: int = 2048) -> str:
+        """Call the active local LLM with a single user turn.
+        Used by the authoring endpoints — synchronous, returns text only."""
+        from langchain_ollama import ChatOllama
+        from localsmartz.profiles import get_profile
+        from localsmartz.config import load_config
+
+        cwd = Path.cwd()
+        config = load_config(cwd) or {}
+        model = LocalSmartzHandler._model_override or config.get("planning_model")
+        if not model:
+            profile = get_profile(self._default_profile)
+            model = profile["planning_model"]
+
+        from localsmartz.ollama import resolve_available_model
+        chosen, _ = resolve_available_model(model)
+        if chosen:
+            model = chosen
+
+        llm = ChatOllama(model=model, temperature=0, num_ctx=8192, num_predict=max_tokens)
+        msgs = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        resp = llm.invoke(msgs)
+        return getattr(resp, "content", str(resp))
+
+    _SKILL_REFACTOR_SYSTEM = """You are a skill refactoring assistant. You receive an existing SKILL.md (with YAML frontmatter `name` and `description`) plus authoring guidance (often AGENTS.md / CLAUDE.md style notes). Produce a single replacement SKILL.md.
+
+Rules:
+- KEEP the existing `name` field unchanged unless the guidance explicitly renames the skill.
+- Update `description` to reflect any new triggering criteria.
+- Body: rewrite to be clear, actionable, sectioned. Keep useful original content.
+- Return ONLY the SKILL.md file content (frontmatter + body). No prose, no code fences, no explanation."""
+
+    _SKILL_NEW_SYSTEM = """You are a skill authoring assistant. Given a name and a free-text description, produce a SKILL.md file with valid YAML frontmatter and a useful markdown body.
+
+Frontmatter required:
+  name: <kebab-case-name>
+  description: Use when ... (80-200 chars, lists trigger phrases)
+
+Body sections to include:
+  ## When to activate
+  ## What it does
+  ## Notes / pitfalls
+
+Return ONLY the SKILL.md file content. No prose, no code fences, no explanation."""
+
+    _PLUGIN_JSON_SYSTEM = """You are generating a plugin.json file for a local-smartz plugin. Given a plugin name and one-line description, return JSON with these fields:
+  { "name": "<kebab>", "version": "0.1.0", "description": "<>", "author": {"name": "Local Smartz user"} }
+Return ONLY the JSON, no prose, no code fences."""
+
+    def _handle_skill_refactor(self):
+        try:
+            body = self._read_json_body()
+        except ValueError:
+            self._json_response({"error": "Invalid JSON body"}, 400)
+            return
+        skill_name = (body.get("name") or "").strip()
+        guidance = (body.get("guidance") or "").strip()
+        if not skill_name or not guidance:
+            self._json_response({"error": "name and guidance are required"}, 400)
+            return
+
+        from localsmartz.plugins import Registry
+        reg = Registry.from_default_root()
+        match = next((s for s in reg.list_skills() if s.name == skill_name), None)
+        if match is None:
+            self._json_response({"error": f"Skill not found: {skill_name}"}, 404)
+            return
+
+        existing = match.source_path.read_text(errors="ignore") if match.source_path.exists() else ""
+        user = (
+            f"Existing SKILL.md:\n\n```\n{existing}\n```\n\n"
+            f"Authoring guidance:\n\n{guidance}\n\n"
+            "Produce the full replacement SKILL.md."
+        )
+        try:
+            content = self._llm_complete(self._SKILL_REFACTOR_SYSTEM, user, max_tokens=3072)
+        except Exception as e:  # noqa: BLE001
+            self._json_response({"error": f"LLM call failed: {e}"}, 500)
+            return
+        self._json_response({
+            "name": skill_name,
+            "original": existing,
+            "proposed": content.strip(),
+        })
+
+    def _handle_skill_new(self):
+        try:
+            body = self._read_json_body()
+        except ValueError:
+            self._json_response({"error": "Invalid JSON body"}, 400)
+            return
+        name = (body.get("name") or "").strip()
+        description = (body.get("description") or "").strip()
+        if not name or not description:
+            self._json_response({"error": "name and description are required"}, 400)
+            return
+
+        try:
+            skill_md = self._llm_complete(
+                self._SKILL_NEW_SYSTEM,
+                f"name: {name}\n\ndescription / context:\n{description}",
+                max_tokens=2048,
+            )
+            plugin_json = self._llm_complete(
+                self._PLUGIN_JSON_SYSTEM,
+                f"name: {name}\ndescription: {description[:200]}",
+                max_tokens=512,
+            )
+        except Exception as e:  # noqa: BLE001
+            self._json_response({"error": f"LLM call failed: {e}"}, 500)
+            return
+        self._json_response({
+            "name": name,
+            "skill_md": skill_md.strip(),
+            "plugin_json": plugin_json.strip(),
+        })
+
+    def _handle_plugin_save(self):
+        try:
+            body = self._read_json_body()
+        except ValueError:
+            self._json_response({"error": "Invalid JSON body"}, 400)
+            return
+        target = body.get("target_path")
+        plugin_name = (body.get("plugin_name") or "").strip()
+        files = body.get("files") or {}
+        if not target or not plugin_name or not isinstance(files, dict):
+            self._json_response({"error": "target_path, plugin_name, files required"}, 400)
+            return
+
+        target_path = Path(target).expanduser().resolve()
+        if not target_path.is_dir():
+            self._json_response({"error": f"target_path is not a directory: {target_path}"}, 400)
+            return
+
+        plugin_dir = target_path / plugin_name
+        if plugin_dir.exists():
+            self._json_response({
+                "error": f"Plugin already exists at {plugin_dir} — pick a different name or remove it first"
+            }, 409)
+            return
+
+        try:
+            plugin_dir.mkdir(parents=True)
+            # Standard layout
+            (plugin_dir / ".claude-plugin").mkdir()
+            skills_dir = plugin_dir / "skills" / plugin_name
+            skills_dir.mkdir(parents=True)
+
+            for rel_path, content in files.items():
+                if not isinstance(content, str):
+                    continue
+                # Whitelist of allowed targets to keep things sane
+                if rel_path == "plugin.json":
+                    (plugin_dir / ".claude-plugin" / "plugin.json").write_text(content)
+                elif rel_path == "SKILL.md":
+                    (skills_dir / "SKILL.md").write_text(content)
+                elif rel_path in ("CLAUDE.md", "AGENTS.md", "README.md"):
+                    (plugin_dir / rel_path).write_text(content)
+        except OSError as e:
+            self._json_response({"error": f"Filesystem error: {e}"}, 500)
+            return
+
+        self._json_response({
+            "ok": True,
+            "plugin_name": plugin_name,
+            "plugin_dir": str(plugin_dir),
+        })
+
+    def _handle_agents(self):
+        """Surface the conceptual agents in the active profile."""
+        from localsmartz.profiles import get_profile, list_agents
+
+        profile = get_profile(self._default_profile)
+        self._json_response({
+            "profile": profile["name"],
+            "agents": list_agents(profile),
+        })
+
+    def _handle_list_skills(self):
+        """Return installed skills (name + description + plugin)."""
+        from localsmartz.plugins import Registry
+        try:
+            reg = Registry.from_default_root()
+            skills = reg.list_skills()
+        except Exception as e:  # noqa: BLE001
+            self._json_response({"error": str(e)}, 500)
+            return
+        rows = [
+            {
+                "name": s.name,
+                "description": s.description,
+                "plugin": s.plugin_name or "",
+                "source_path": str(s.source_path),
+            }
+            for s in skills
+        ]
+        # Use a list (not dict) so the Swift client can decode directly into [Skill].
+        body = json.dumps(rows).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_observability_info(self):
+        from localsmartz import observability
+        self._json_response(observability.status())
+
+    def _handle_ollama_info(self):
+        """Surface Ollama's model storage path + disk usage."""
+        from localsmartz.ollama import (
+            check_server,
+            get_version,
+            list_models_with_size,
+            ollama_disk_usage_bytes,
+            ollama_models_path,
+        )
+        path = ollama_models_path()
+        models = list_models_with_size()
+        self._json_response({
+            "running": check_server(),
+            "version": get_version(),
+            "models_path": str(path),
+            "path_exists": path.exists(),
+            "source": "OLLAMA_MODELS" if os.environ.get("OLLAMA_MODELS") else "default",
+            "model_count": len(models),
+            "total_size_bytes": ollama_disk_usage_bytes(),
+        })
 
     def _handle_folders(self):
         """Return workspace and configured research folders."""
@@ -1386,6 +1828,149 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    # ── Secrets ──
+
+    def _handle_secrets_list(self):
+        from localsmartz import secrets as _secrets
+        try:
+            self._json_response(_secrets.masked_all())
+        except Exception as e:  # noqa: BLE001
+            self._json_response({"error": str(e)}, 500)
+
+    def _handle_secrets_set(self):
+        from localsmartz import secrets as _secrets
+        from localsmartz import log_buffer
+        try:
+            body = self._read_json_body()
+        except ValueError as e:
+            self._json_response({"error": str(e)}, 400)
+            return
+        provider = body.get("provider")
+        value = body.get("value")
+        if not provider or not isinstance(provider, str):
+            self._json_response({"error": "provider is required"}, 400)
+            return
+        if not value or not isinstance(value, str):
+            self._json_response({"error": "value is required"}, 400)
+            return
+        try:
+            source = _secrets.set(provider, value)
+        except Exception as e:  # noqa: BLE001
+            self._json_response({"error": str(e)}, 500)
+            return
+        env_name = _secrets.PRESET_BY_NAME.get(provider)
+        if env_name:
+            os.environ[env_name] = value
+        log_buffer.info("secrets", f"set {provider} ({source})")
+        self._json_response({"ok": True, "source": source})
+
+    def _handle_secrets_delete(self, parsed):
+        from localsmartz import secrets as _secrets
+        from localsmartz import log_buffer
+        query = parse_qs(parsed.query)
+        provider_vals = query.get("provider", [])
+        provider = provider_vals[0] if provider_vals else None
+        if not provider:
+            self._json_response({"error": "provider is required"}, 400)
+            return
+        try:
+            _secrets.delete(provider)
+        except Exception as e:  # noqa: BLE001
+            self._json_response({"error": str(e)}, 500)
+            return
+        env_name = _secrets.PRESET_BY_NAME.get(provider)
+        if env_name:
+            os.environ.pop(env_name, None)
+        log_buffer.info("secrets", f"deleted {provider}")
+        self._json_response({"ok": True})
+
+    # ── Logs ──
+
+    def _handle_logs_list(self, parsed):
+        from localsmartz import log_buffer
+        query = parse_qs(parsed.query)
+        since_raw = query.get("since", ["0"])[0]
+        try:
+            since = int(since_raw)
+        except (TypeError, ValueError):
+            since = 0
+        entries = log_buffer.since(since)
+        body = json.dumps(entries).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_logs_clear(self):
+        from localsmartz import log_buffer
+        log_buffer.clear()
+        self._json_response({"ok": True})
+
+    # ── Issue report ──
+
+    def _handle_issues_report(self):
+        from localsmartz import log_buffer
+        try:
+            body = self._read_json_body()
+        except ValueError as e:
+            self._json_response({"error": str(e)}, 400)
+            return
+        title = (body.get("title") or "").strip()
+        description = (body.get("description") or "").strip()
+        include_logs = bool(body.get("include_logs"))
+        if not title:
+            self._json_response({"error": "title is required"}, 400)
+            return
+
+        ts = int(time.time())
+        slug_chars = []
+        for ch in title.lower():
+            if ch.isalnum():
+                slug_chars.append(ch)
+            elif ch in (" ", "-", "_"):
+                slug_chars.append("-")
+        slug = "".join(slug_chars).strip("-")[:40] or "issue"
+        issues_dir = Path.home() / ".localsmartz" / "issues"
+        try:
+            issues_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self._json_response({"error": f"failed to create issues dir: {e}"}, 500)
+            return
+        path = issues_dir / f"{ts}_{slug}.md"
+
+        lines = [
+            f"# {title}",
+            "",
+            f"**Timestamp:** {_iso_timestamp(ts)}",
+            f"**Unix:** {ts}",
+            "",
+            "## Description",
+            "",
+            description or "_(no description provided)_",
+            "",
+        ]
+        if include_logs:
+            snap = log_buffer.snapshot()
+            lines.append("## Logs")
+            lines.append("")
+            lines.append("```")
+            for entry in snap:
+                lines.append(
+                    f"[{entry.get('seq')}] {_iso_timestamp(entry.get('ts'))} "
+                    f"{entry.get('level','').upper():<5} "
+                    f"{entry.get('source','')}: {entry.get('message','')}"
+                )
+            lines.append("```")
+            lines.append("")
+
+        try:
+            path.write_text("\n".join(lines), encoding="utf-8")
+        except OSError as e:
+            self._json_response({"error": f"failed to write issue: {e}"}, 500)
+            return
+        self._json_response({"ok": True, "path": str(path)})
+
 
 def start_server(port: int = 11435, profile_name: str | None = None):
     """Start the Local Smartz HTTP server.
@@ -1396,7 +1981,11 @@ def start_server(port: int = 11435, profile_name: str | None = None):
     """
     # Store profile_name on handler class so all requests use consistent profile
     LocalSmartzHandler._default_profile = profile_name
-    server = HTTPServer(("127.0.0.1", port), LocalSmartzHandler)
+    from localsmartz import __version__ as _version
+    from localsmartz import log_buffer as _log_buffer
+    _log_buffer.info("startup", f"local-smartz {_version} starting on port {port}")
+    server = ThreadingHTTPServer(("127.0.0.1", port), LocalSmartzHandler)
+    server.daemon_threads = True
     print(f"\n  Local Smartz running at http://localhost:{port}", file=sys.stderr)
     print(f"  Press Ctrl+C to stop.\n", file=sys.stderr)
     try:

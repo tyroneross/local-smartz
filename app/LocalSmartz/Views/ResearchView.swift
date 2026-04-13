@@ -13,6 +13,12 @@ struct ResearchView: View {
     @State private var currentTitle = ""
     @State private var durationMs: Int?
     @State private var errorMessage: String?
+    @State private var availableModels: [String] = []
+    @State private var currentModel: String = ""
+    @State private var isSwitchingModel = false
+    @State private var researchTask: Task<Void, Never>?
+    @State private var agents: [AgentInfo] = []
+    @State private var focusAgent: String?
 
     private let sseClient = SSEClient()
 
@@ -21,10 +27,12 @@ struct ResearchView: View {
             ThreadListView(
                 threads: threads,
                 selectedThread: $selectedThread,
-                onNewThread: newThread
+                onNewThread: newThread,
+                agents: agents,
+                focusAgent: $focusAgent
             )
-            .frame(minWidth: 180)
-            .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
+            .frame(minWidth: 220)
+            .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
         } detail: {
             VStack(spacing: 0) {
                 // L2: Toolbar
@@ -72,6 +80,8 @@ struct ResearchView: View {
             await backend.start()
             if backend.isRunning {
                 await refreshStatus()
+                await fetchModels()
+                await fetchAgents()
                 await fetchThreads()
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(30))
@@ -79,52 +89,140 @@ struct ResearchView: View {
                 }
             } else {
                 appState.ollamaStatus = .offline
-                errorMessage = backend.errorMessage
+                errorMessage = backend.errorMessage ?? "Backend failed to start."
             }
+        }
+    }
+
+    private func fetchAgents() async {
+        guard backend.isRunning,
+              let url = URL(string: "\(backend.baseURL)/api/agents") else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            struct Resp: Decodable { let agents: [AgentInfo] }
+            agents = try JSONDecoder().decode(Resp.self, from: data).agents
+        } catch {
+            agents = []
         }
     }
 
     // MARK: - Toolbar
 
     private var toolbar: some View {
-        HStack {
+        HStack(spacing: 12) {
+            // Title (left). Empty if no thread title — system window title bar
+            // already says "Local Smartz", no need to repeat it.
             if !currentTitle.isEmpty {
                 Text(currentTitle)
-                    .font(.headline)
+                    .font(.system(size: 14, weight: .semibold))
                     .lineLimit(1)
-            } else {
-                Text("Local Smartz")
-                    .font(.headline)
+                    .truncationMode(.tail)
             }
 
             Spacer()
 
-            // Profile badge
-            Text(appState.profile)
-                .font(.caption)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 2)
-                .background(.secondary.opacity(0.1), in: Capsule())
+            // Right cluster: model · profile · status · duration
+            // All status uses text + color, no individual badges/borders per Calm Precision.
+            HStack(spacing: 14) {
+                modelPicker
 
-            // Ollama status
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(ollamaColor)
-                    .frame(width: 8, height: 8)
-                Text(ollamaLabel)
-                    .font(.caption)
-                    .foregroundStyle(ollamaColor)
-            }
-
-            // Duration
-            if let ms = durationMs {
-                Text(formatDuration(ms))
-                    .font(.caption)
+                // Calm Precision Rule 9: status/profile is text only, no badge.
+                Text(appState.profile.uppercased())
+                    .font(.system(size: 10, weight: .medium))
+                    .tracking(0.5)
                     .foregroundStyle(.secondary)
+
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(ollamaColor)
+                        .frame(width: 7, height: 7)
+                    Text(ollamaLabel)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(ollamaColor)
+                }
+
+                if let ms = durationMs {
+                    Text(formatDuration(ms))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
             }
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private var modelPicker: some View {
+        Menu {
+            if availableModels.isEmpty {
+                Text("No models loaded")
+            } else {
+                Section("Switch active model") {
+                    ForEach(availableModels, id: \.self) { name in
+                        Button {
+                            Task { await switchModel(to: name) }
+                        } label: {
+                            HStack {
+                                Image(systemName: name == currentModel ? "checkmark.circle.fill" : "circle")
+                                Text(name)
+                            }
+                        }
+                        .disabled(isStreaming || isSwitchingModel)
+                    }
+                }
+                Divider()
+            }
+            Button("Refresh list") {
+                Task { await fetchModels() }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "cpu")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text("Model:")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text(modelPickerLabel)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
+            )
+            .foregroundStyle(.primary)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(isStreaming || isSwitchingModel)
+        .help(currentModel.isEmpty ? "Pick a model" : "Current: \(currentModel) — click to switch")
+    }
+
+    private var modelPickerLabel: String {
+        // Prefer the active model when it's in the loaded list. If the
+        // configured model isn't pulled in Ollama, `currentModel` can point
+        // to something not in `availableModels` — show "Pick a model" so
+        // the toolbar never renders a blank label.
+        if !currentModel.isEmpty, availableModels.contains(currentModel) {
+            return currentModel
+        }
+        if !currentModel.isEmpty, availableModels.isEmpty {
+            // Haven't loaded the list yet but backend reports a current
+            // model. Show it rather than "Loading…" so the label isn't
+            // empty once fetchModels() returns with an empty list.
+            return currentModel
+        }
+        if availableModels.isEmpty { return "Loading…" }
+        return "Pick a model"
     }
 
     // MARK: - Empty state
@@ -147,22 +245,44 @@ struct ResearchView: View {
 
     private var inputBar: some View {
         HStack(spacing: 8) {
-            TextField("Ask a research question...", text: $prompt)
+            TextField(inputPlaceholder, text: $prompt)
                 .textFieldStyle(.plain)
                 .font(.body)
-                .onSubmit { runResearch() }
+                .onSubmit { if canRun { runResearch() } }
+                .disabled(false)  // typeable while streaming so user can queue thoughts
 
-            Button(action: runResearch) {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.title2)
+            if isStreaming {
+                Button(action: cancelResearch) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.title3)
+                        Text("Stop")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(.red)
+                }
+                .buttonStyle(.borderless)
+                .keyboardShortcut(".", modifiers: .command)
+                .help("Stop the current research (⌘.)")
+            } else {
+                Button(action: runResearch) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.title2)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!canRun)
+                .opacity(canRun ? 1.0 : 0.3)
+                .keyboardShortcut(.return, modifiers: .command)
+                .help("Send (⌘↩)")
             }
-            .buttonStyle(.borderless)
-            .disabled(!canRun)
-            .opacity(canRun ? 1.0 : 0.3)
-            .keyboardShortcut(.return, modifiers: .command)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    private var inputPlaceholder: String {
+        if isStreaming { return "Type your next question — send when ready…" }
+        return "Ask a research question…"
     }
 
     // MARK: - Logic
@@ -247,6 +367,9 @@ struct ResearchView: View {
         if let threadId = selectedThread {
             payload["thread_id"] = threadId
         }
+        if let agent = focusAgent {
+            payload["agent"] = agent
+        }
 
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: payload)
@@ -257,9 +380,10 @@ struct ResearchView: View {
             return
         }
 
-        Task {
+        researchTask = Task {
             do {
                 for try await event in await sseClient.stream(request: request) {
+                    if Task.isCancelled { break }
                     handleEvent(event)
                 }
             } catch {
@@ -269,9 +393,18 @@ struct ResearchView: View {
             }
             isStreaming = false
             appState.isResearching = false
+            researchTask = nil
             await refreshStatus()
             await fetchThreads()
         }
+    }
+
+    private func cancelResearch() {
+        researchTask?.cancel()
+        researchTask = nil
+        isStreaming = false
+        appState.isResearching = false
+        toolCalls.append(ToolCallEntry(name: "cancelled", message: "Stopped by user", isError: false))
     }
 
     private func handleEvent(_ event: SSEEvent) {
@@ -284,8 +417,77 @@ struct ResearchView: View {
             toolCalls.append(ToolCallEntry(name: name, message: message, isError: true))
         case .done(let ms):
             durationMs = ms
+            // Stop the spinner immediately on done — don't wait for the SSE
+            // stream to close. Some servers keep the connection alive briefly
+            // after the final event, which leaves a stale "Thinking…".
+            isStreaming = false
+            appState.isResearching = false
+            researchTask?.cancel()
+            researchTask = nil
         case .error(let message):
             errorMessage = message
+            isStreaming = false
+            appState.isResearching = false
+            researchTask?.cancel()
+            researchTask = nil
+        }
+    }
+
+    private func fetchModels() async {
+        guard backend.isRunning,
+              let url = URL(string: "\(backend.baseURL)/api/models") else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoded = try JSONDecoder().decode(ModelsResponse.self, from: data)
+            availableModels = decoded.models.map(\.name)
+            // Guard against a stale/missing current model. If the backend
+            // reports a model that isn't actually installed, fall back to
+            // the largest available one and persist the switch so the
+            // toolbar never shows a blank label.
+            if !decoded.current.isEmpty, availableModels.contains(decoded.current) {
+                currentModel = decoded.current
+            } else if let fallback = pickFallback(from: decoded.models) {
+                currentModel = ""
+                await switchModel(to: fallback)
+            } else {
+                currentModel = ""
+            }
+        } catch {
+            // Non-fatal — picker shows "Loading models…" / "No models loaded"
+            availableModels = []
+        }
+    }
+
+    /// Pick the largest installed model as a safe fallback when the backend's
+    /// reported current model isn't actually in `availableModels`.
+    private func pickFallback(from models: [ModelsResponse.ModelInfo]) -> String? {
+        let sorted = models.sorted { (a, b) in
+            (a.sizeGB ?? 0) > (b.sizeGB ?? 0)
+        }
+        return sorted.first?.name
+    }
+
+    private func switchModel(to name: String) async {
+        guard !name.isEmpty, name != currentModel, backend.isRunning,
+              let url = URL(string: "\(backend.baseURL)/api/models/select") else { return }
+        isSwitchingModel = true
+        defer { isSwitchingModel = false }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["model": name])
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                currentModel = name
+                await refreshStatus()
+            } else {
+                errorMessage = "Could not switch to \(name)."
+            }
+        } catch {
+            errorMessage = "Model switch failed: \(error.localizedDescription)"
         }
     }
 
@@ -358,5 +560,21 @@ private struct BackendStatusResponse: Decodable {
         case ready
         case missingModels = "missing_models"
         case ollama
+    }
+}
+
+private struct ModelsResponse: Decodable {
+    let models: [ModelInfo]
+    let current: String
+    let profile: String?
+
+    struct ModelInfo: Decodable {
+        let name: String
+        let sizeGB: Double?
+
+        enum CodingKeys: String, CodingKey {
+            case name
+            case sizeGB = "size_gb"
+        }
     }
 }

@@ -15,6 +15,7 @@ from localsmartz.ollama import (
     get_version,
     list_models_with_size,
     model_available,
+    resolve_available_model,
 )
 from localsmartz.profiles import detect_profile
 
@@ -253,9 +254,14 @@ def resolve_model(cwd: Path, cli_model: str | None, profile_name: str | None) ->
         # Validate model still exists in Ollama
         if check_server() and model_available(model):
             return model
-        else:
-            print(f"\n  \033[33mSaved model '{model}' is no longer available.\033[0m",
-                  file=sys.stderr)
+        # Try a fallback before falling all the way back to the first-run picker
+        chosen, msg = resolve_available_model(model)
+        if chosen:
+            if msg:
+                print(f"\n  \033[33m{msg}\033[0m", file=sys.stderr)
+            return chosen
+        print(f"\n  \033[33mSaved model '{model}' is no longer available.\033[0m",
+              file=sys.stderr)
 
     # Priority 3: First-run picker
     return first_run_picker(cwd, profile_name)
