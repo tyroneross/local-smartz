@@ -24,6 +24,10 @@ SCHEMA_KEYS: dict[str, type] = {
     "active_model": str,
     "plugin_paths": list,
     "active_skills": list,
+    # Per-agent model overrides — dict[str, str] keyed by agent name.
+    # Values are Ollama model strings that take precedence over the
+    # profile default when focusing an agent.
+    "agent_models": dict,
 }
 
 
@@ -38,6 +42,7 @@ def _defaults() -> dict[str, Any]:
             str(Path.home() / "Desktop" / "git-folder" / "RossLabs-AI-Toolkit")
         ],
         "active_skills": [],
+        "agent_models": {},
     }
 
 

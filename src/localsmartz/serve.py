@@ -856,6 +856,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_models_catalog()
         elif path == "/api/agents":
             self._handle_agents()
+        elif path == "/api/agents/models":
+            self._handle_agents_models()
         elif path == "/api/skills":
             self._handle_list_skills()
         elif path == "/api/ollama/info":
@@ -897,6 +899,10 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_secrets_set()
         elif path == "/api/issues/report":
             self._handle_issues_report()
+        elif path.startswith("/api/agents/") and path.endswith("/model"):
+            # POST /api/agents/<name>/model — persist per-agent model override.
+            agent_name = path[len("/api/agents/"):-len("/model")]
+            self._handle_agent_model_set(agent_name)
         else:
             self._json_response({"error": "Not found"}, 404)
 
@@ -1116,8 +1122,16 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         focus_agent: str | None = None,
     ):
         """Run research agent and emit SSE events."""
-        from localsmartz.agent import create_agent, extract_final_response
-        from localsmartz.profiles import get_profile, agent_focus_prompt
+        from localsmartz.agent import (
+            create_agent,
+            extract_final_response,
+            fast_path_stream,
+        )
+        from localsmartz.profiles import (
+            agent_focus_prompt,
+            get_profile,
+            is_fast_path,
+        )
         from localsmartz.ollama import (
             check_server, model_available, list_models, resolve_available_model,
         )
@@ -1167,8 +1181,47 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         if thread_id:
             create_thread(thread_id, str(cwd), title=prompt[:60])
 
-        focus_suffix = agent_focus_prompt(focus_agent)
-        if focus_suffix:
+        # ── Fast path ─────────────────────────────────────────────────────
+        # Trivial prompts (short, no research verbs, <=2 sentences) skip the
+        # DeepAgents graph entirely — one direct ChatOllama stream. Not used
+        # when a focus_agent is pinned (caller asked for a specific role).
+        if focus_agent is None and is_fast_path(prompt):
+            start_time = time.time()
+            first_text = ""
+            for event in fast_path_stream(prompt, profile, model_override=model_override):
+                if event.get("type") == "done":
+                    # Rewrite thread_id + duration so the client sees our wall time.
+                    self._send_event({
+                        "type": "done",
+                        "duration_ms": int((time.time() - start_time) * 1000),
+                        "thread_id": thread_id or "",
+                    })
+                    continue
+                if event.get("type") == "text":
+                    content = event.get("content", "")
+                    if isinstance(content, str):
+                        first_text += content
+                self._send_event(event)
+
+            # Best-effort thread append — mirrors the full-path behavior.
+            if thread_id:
+                try:
+                    append_entry(
+                        thread_id=thread_id,
+                        cwd=str(cwd),
+                        query=prompt,
+                        summary=first_text[:500],
+                        artifacts=[],
+                        turns=1,
+                    )
+                except Exception:
+                    pass
+            return
+
+        # Note: create_agent applies agent_focus_prompt internally when
+        # focus_agent is set — we don't need to stuff it into extra_system_prompt
+        # again. Keep the user-visible note for UI feedback.
+        if focus_agent:
             self._send_event({"type": "text", "content": f"[focus] running as `{focus_agent}` agent only\n\n"})
 
         agent, profile, checkpointer, mcp_clients = create_agent(
@@ -1176,7 +1229,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             thread_id=thread_id,
             cwd=cwd,
             model_override=model_override,
-            extra_system_prompt=focus_suffix,
+            focus_agent=focus_agent,
         )
 
         config = {"configurable": {"thread_id": thread_id or "default"}}
@@ -1629,7 +1682,13 @@ Return ONLY the JSON, no prose, no code fences."""
         })
 
     def _handle_agents(self):
-        """Surface the conceptual agents in the active profile."""
+        """Surface the conceptual agents in the active profile.
+
+        Agents are returned in the new dict shape with a ``model`` field —
+        the effective per-agent model (profile default merged with any
+        per-user override from global_config["agent_models"]). Fields
+        ``name``, ``title``, ``summary`` are kept for backward compatibility.
+        """
         from localsmartz.profiles import get_profile, list_agents
 
         profile = get_profile(self._default_profile)
@@ -1637,6 +1696,59 @@ Return ONLY the JSON, no prose, no code fences."""
             "profile": profile["name"],
             "agents": list_agents(profile),
         })
+
+    def _handle_agents_models(self):
+        """Return the effective per-agent model map for the active profile."""
+        from localsmartz.profiles import effective_agent_models, get_profile
+
+        profile = get_profile(self._default_profile)
+        self._json_response({
+            "profile": profile["name"],
+            "models": effective_agent_models(profile),
+        })
+
+    def _handle_agent_model_set(self, agent_name: str):
+        """POST /api/agents/<name>/model body {"model": "..."} — persist override."""
+        from localsmartz import global_config
+        from localsmartz.profiles import get_profile
+
+        agent_name = (agent_name or "").strip()
+        if not agent_name:
+            self._json_response({"error": "agent name required"}, 400)
+            return
+
+        profile = get_profile(self._default_profile)
+        agents = profile.get("agents", {})
+        if not isinstance(agents, dict) or agent_name not in agents:
+            self._json_response({
+                "error": f"Unknown agent '{agent_name}' for profile '{profile['name']}'",
+            }, 404)
+            return
+
+        try:
+            body = self._read_json_body()
+        except ValueError as exc:
+            self._json_response({"error": str(exc)}, 400)
+            return
+
+        model = body.get("model")
+        if not isinstance(model, str) or not model.strip():
+            self._json_response({"error": "Request body must include string 'model'"}, 400)
+            return
+        model = model.strip()
+
+        # Read-modify-write the per-agent overrides dict.
+        current = global_config.get("agent_models")
+        if not isinstance(current, dict):
+            current = {}
+        current = dict(current)
+        current[agent_name] = model
+        try:
+            global_config.set("agent_models", current)
+        except ValueError as exc:
+            self._json_response({"error": f"Invalid value: {exc}"}, 400)
+            return
+        self._json_response({"ok": True, "agent": agent_name, "model": model})
 
     def _handle_list_skills(self):
         """Return installed skills (name + description + plugin)."""

@@ -65,6 +65,8 @@ struct SettingsView: View {
                     .tabItem { Label("General", systemImage: "gear") }
                 ModelsTab()
                     .tabItem { Label("Models", systemImage: "cpu") }
+                AgentRoutingTab()
+                    .tabItem { Label("Agent Routing", systemImage: "arrow.triangle.branch") }
                 ApiKeysTab()
                     .tabItem { Label("API Keys", systemImage: "key") }
                 TelemetryTab()

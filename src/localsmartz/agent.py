@@ -16,7 +16,13 @@ from deepagents.backends import FilesystemBackend
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.memory import MemorySaver
 
-from localsmartz.profiles import get_profile, get_model
+from localsmartz.profiles import (
+    agent_focus_prompt,
+    get_agent_model,
+    get_model,
+    get_profile,
+    is_fast_path,
+)
 from localsmartz.threads import load_context
 from localsmartz.tools.web import web_search, scrape_url
 from localsmartz.tools.documents import parse_pdf, read_spreadsheet, read_text_file
@@ -189,14 +195,98 @@ You are Local Smartz, a local-first research assistant. You answer questions usi
 """
 
 
-def _create_model(profile: dict, role: str) -> ChatOllama:
-    """Create a ChatOllama instance for the given profile and role."""
-    model_name = get_model(profile, role)
+def _create_model(profile: dict, role: str, *, model_name: str | None = None) -> ChatOllama:
+    """Create a ChatOllama instance for the given profile and role.
+
+    If ``model_name`` is passed, it overrides the role lookup — used when a
+    per-agent model has been resolved upstream.
+    """
+    name = model_name or get_model(profile, role)
     return ChatOllama(
-        model=model_name,
+        model=name,
         temperature=0,  # Deterministic for reliable tool calling
         num_ctx=4096,  # Conservative context window for memory
     )
+
+
+# Short system prompt for trivial prompts — keeps the fast-path tiny so
+# first-token latency is dominated by the model, not prompt ingestion.
+_FAST_PATH_SYSTEM_PROMPT = (
+    "You are a helpful assistant running locally. Answer concisely."
+)
+
+
+def fast_path_stream(
+    prompt: str,
+    profile: dict,
+    model_override: str | None = None,
+):
+    """Yield SSE event dicts for a trivial prompt, bypassing the agent graph.
+
+    Emits:
+      - ``{type: "text", content: "[fast-path] ..."}`` marker (first event)
+      - streamed ``{type: "text", content: "..."}`` token chunks
+      - final ``{type: "done", duration_ms, thread_id}``
+
+    Callers own thread_id bookkeeping — pass the thread_id through by wrapping
+    the final ``done`` event on the serve layer if needed.
+    """
+    import time as _time
+
+    # Pick model: explicit override wins, else profile planning model.
+    model_name = model_override or get_model(profile, "planning")
+
+    start = _time.time()
+    # Subtle marker so the user knows a fast-path was selected.
+    yield {
+        "type": "text",
+        "content": f"[fast-path] using {model_name} (no agent planning)\n\n",
+    }
+
+    llm = ChatOllama(
+        model=model_name,
+        temperature=0,
+        num_ctx=2048,  # Tight: fast-path prompts are always short.
+    )
+
+    messages = [
+        {"role": "system", "content": _FAST_PATH_SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        for chunk in llm.stream(messages):
+            content = getattr(chunk, "content", None)
+            if isinstance(content, str) and content:
+                yield {"type": "text", "content": content}
+            elif isinstance(content, list):
+                # Some LangChain adapters emit content as a list of segments.
+                for seg in content:
+                    text = seg.get("text") if isinstance(seg, dict) else None
+                    if isinstance(text, str) and text:
+                        yield {"type": "text", "content": text}
+    except Exception as exc:  # noqa: BLE001 — we surface, don't crash
+        yield {
+            "type": "tool_error",
+            "name": "fast_path",
+            "message": f"Fast-path LLM call failed: {exc}",
+        }
+
+    duration_ms = int((_time.time() - start) * 1000)
+    yield {"type": "done", "duration_ms": duration_ms, "thread_id": ""}
+
+
+# Re-export is_fast_path for callers that import from agent module (serve.py).
+__all__ = [
+    "ALL_TOOLS",
+    "LITE_TOOLS",
+    "create_agent",
+    "extract_final_response",
+    "fast_path_stream",
+    "is_fast_path",
+    "review_output",
+    "run_research",
+]
 
 
 def _build_system_prompt(
@@ -263,6 +353,7 @@ def create_agent(
     include_plugin_tools: bool | None = None,
     include_mcp: bool = False,
     extra_system_prompt: str = "",
+    focus_agent: str | None = None,
 ):
     """Create the Local Smartz research agent.
 
@@ -300,15 +391,32 @@ def create_agent(
     if include_plugin_tools is None:
         include_plugin_tools = not is_lite
 
+    # Per-agent model resolution — when the caller pins focus to a named agent,
+    # prefer that agent's configured model (profile default merged with any
+    # global_config override). An explicit ``model_override`` passed in still
+    # wins so CLI --model keeps working. Also inject the agent_focus_prompt so
+    # the LLM stays in role.
+    focus_suffix = ""
+    effective_planning_model: str | None = None
+    if focus_agent:
+        focus_suffix = agent_focus_prompt(focus_agent)
+        if not model_override:
+            agent_model = get_agent_model(profile, focus_agent)
+            if agent_model:
+                effective_planning_model = agent_model
+                profile["planning_model"] = agent_model
+
     # Use planning model for the main agent
-    model = _create_model(profile, "planning")
+    model = _create_model(profile, "planning", model_name=effective_planning_model)
+
+    combined_extra_prompt = extra_system_prompt + focus_suffix
 
     system_prompt = _build_system_prompt(
         profile,
         include_plugin_skills=include_plugin_skills,
         thread_id=thread_id,
         cwd=cwd,
-        extra_system_prompt=extra_system_prompt,
+        extra_system_prompt=combined_extra_prompt,
     )
 
     tools, mcp_clients = _build_tool_set(
