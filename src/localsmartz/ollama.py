@@ -1,5 +1,6 @@
 """Ollama health check, model validation, and setup helpers."""
 
+import json
 import os
 import platform
 import shutil
@@ -7,6 +8,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Iterator
 
 import httpx
 
@@ -322,6 +324,150 @@ def pull_model(model_name: str) -> bool:
     except FileNotFoundError:
         print("Error: ollama command not found", file=sys.stderr)
         return False
+
+
+def stream_pull(
+    model_name: str,
+    insecure: bool = False,
+    timeout: float = 7200.0,
+) -> Iterator[dict]:
+    """Yield NDJSON progress dicts from Ollama's ``/api/pull`` endpoint.
+
+    Docs: https://docs.ollama.com/api/pull
+
+    Each yielded dict may include:
+      - ``status``: "pulling manifest" / "downloading <digest>" / "verifying" /
+        "success" (a trailing ``{"status": "success"}`` marks completion — the
+        generator re-yields it and then exits; callers should treat it as
+        the terminal event rather than wait for StopIteration alone).
+      - ``digest``: layer digest (when streaming a blob).
+      - ``total``: bytes expected for the current layer (if known).
+      - ``completed``: bytes transferred so far (if streaming a blob).
+      - ``error``: non-empty when Ollama reports a pull failure mid-stream;
+        Ollama keeps HTTP 200 and encodes failures in-band, so callers must
+        inspect each chunk — a non-2xx status code only happens for
+        up-front failures like an unreachable daemon or malformed body.
+
+    Raises ``RuntimeError`` on HTTP error status; httpx exceptions propagate
+    (ConnectError when Ollama is down, TimeoutException on stalls). The
+    default 2-hour timeout covers pulls of the largest supported models on
+    slow links — callers should override for tighter bounds.
+
+    Safe to call for arbitrary names; Ollama returns 404 for unknown ones,
+    which surfaces here as ``RuntimeError``.
+    """
+    body = {"model": model_name, "stream": True, "insecure": insecure}
+    with httpx.Client(timeout=timeout) as client:
+        with client.stream("POST", f"{OLLAMA_BASE}/api/pull", json=body) as resp:
+            if resp.status_code >= 400:
+                # Drain enough of the body to put it in the error message
+                # without blocking on a huge response.
+                try:
+                    detail = resp.read().decode("utf-8", errors="replace")[:500]
+                except Exception:  # noqa: BLE001
+                    detail = ""
+                raise RuntimeError(
+                    f"Ollama /api/pull returned {resp.status_code}: {detail}"
+                )
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                # httpx's iter_lines() yields str by default; be defensive in
+                # case a future version flips to bytes.
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", errors="replace")
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    # Skip malformed lines rather than aborting the pull —
+                    # upstream has been known to emit stray whitespace.
+                    continue
+
+
+def list_running_models() -> list[dict]:
+    """List models currently loaded in Ollama VRAM via ``/api/ps``.
+
+    Docs: https://docs.ollama.com/api/ps
+
+    Returns a list of dicts with keys: ``name``, ``model``, ``size``,
+    ``size_vram``, ``expires_at`` (RFC3339), ``context_length`` (plus
+    ``digest`` and ``details`` when Ollama includes them). Empty list on
+    any error — never raises, since callers use this for opportunistic UI
+    (e.g. "show what's hot") and must not crash when the daemon is down.
+    """
+    try:
+        resp = httpx.get(f"{OLLAMA_BASE}/api/ps", timeout=5.0)
+        resp.raise_for_status()
+        data = resp.json()
+        models = data.get("models") or []
+        # Defensive: the API always wraps in {"models": [...]}, but return
+        # [] rather than raise if the shape is unexpected.
+        return list(models) if isinstance(models, list) else []
+    except Exception:  # noqa: BLE001 — soft failure is the contract
+        return []
+
+
+def show_model(model_name: str) -> dict | None:
+    """Fetch model metadata from ``/api/show``.
+
+    Docs: https://docs.ollama.com/api-reference/show-model-details
+
+    Returns a dict with the full response — ``modelfile``, ``parameters``,
+    ``template``, ``license``, ``modified_at``, ``details``
+    (``parameter_size``, ``quantization_level``, ``format``, ``family``,
+    ``families``, ``parent_model``), ``model_info``, and ``capabilities``.
+
+    Returns ``None`` if the model isn't pulled (Ollama returns 404) or if
+    Ollama errors for any other reason — this is a read-only metadata
+    lookup, so soft-fail is the right posture.
+    """
+    if not model_name:
+        return None
+    try:
+        resp = httpx.post(
+            f"{OLLAMA_BASE}/api/show",
+            json={"model": model_name},
+            timeout=10.0,
+        )
+        if resp.status_code != 200:
+            return None
+        return resp.json()
+    except Exception:  # noqa: BLE001 — soft failure is the contract
+        return None
+
+
+def delete_model(model_name: str) -> tuple[bool, str | None]:
+    """Delete a pulled model from Ollama via HTTP ``DELETE /api/delete``.
+
+    Docs: https://docs.ollama.com/api/delete
+
+    Preferred over ``subprocess.run(["ollama", "rm", ...])`` because it
+    works when the CLI isn't on PATH (e.g. the packaged .app on macOS) and
+    gives us structured error handling.
+
+    Returns ``(ok, error_message)``. Idempotent — a 404 is reported as a
+    soft success (nothing to delete), matching ``ollama rm``'s behavior
+    for already-gone models.
+    """
+    if not model_name:
+        return False, "no model name provided"
+    try:
+        resp = httpx.request(
+            "DELETE",
+            f"{OLLAMA_BASE}/api/delete",
+            json={"model": model_name},
+            timeout=30.0,
+        )
+        if resp.status_code == 200:
+            return True, None
+        if resp.status_code == 404:
+            # Idempotent: nothing to delete is success.
+            return True, None
+        return False, f"Ollama returned {resp.status_code}: {resp.text[:200]}"
+    except httpx.TimeoutException:
+        return False, "Delete timed out after 30s"
+    except Exception as exc:  # noqa: BLE001 — surface via return
+        return False, f"Delete failed: {exc}"
 
 
 def setup(profile: dict) -> bool:
