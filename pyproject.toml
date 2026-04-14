@@ -34,8 +34,6 @@ dependencies = [
     "openinference-instrumentation-langchain>=0.1.0",
     # Secret storage — Keychain on macOS, secret-tool on Linux, file fallback.
     "keyring>=24.0.0",
-    "uvicorn[standard]>=0.30",
-    "starlette>=0.40",
 ]
 
 [project.scripts]

@@ -99,15 +99,6 @@ def _legacy_main():
         help="Server port (default: 11435, used with --serve)",
     )
     parser.add_argument(
-        "--asgi",
-        action="store_true",
-        help=(
-            "Use the Starlette + uvicorn ASGI backend instead of the stdlib "
-            "ThreadingHTTPServer. Enables real stream cancellation on Stop "
-            "(request.is_disconnected) for /api/research. Paired with --serve."
-        ),
-    )
-    parser.add_argument(
         "--trace", action="store_true", help="Enable LangSmith tracing"
     )
     parser.add_argument(
@@ -170,12 +161,8 @@ def _legacy_main():
         from localsmartz import log_buffer as _log_buffer
         n = _secrets.export_to_env()
         _log_buffer.info("secrets", f"exported {n} preset keys to env")
-        if getattr(args, "asgi", False):
-            from localsmartz.asgi_app import run_asgi
-            run_asgi(port=args.port, profile_name=args.profile)
-        else:
-            from localsmartz.serve import start_server
-            start_server(port=args.port, profile_name=args.profile)
+        from localsmartz.serve import start_server
+        start_server(port=args.port, profile_name=args.profile)
         sys.exit(0)
 
     # Join positional args as prompt
