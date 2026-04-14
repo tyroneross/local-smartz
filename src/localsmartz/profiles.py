@@ -267,15 +267,6 @@ def get_agent_model(profile: dict, agent_name: str) -> str | None:
     return None
 
 
-def agent_focus_prompt(agent_name: str | None) -> str:
-    """Deprecated — retained as a shim so older callers (e.g. a cached
-    plugin) don't import-error. Focus mode is now implemented by scoping
-    the main agent's tools + replacing its system prompt directly in
-    ``agent.create_agent``. See the ``AGENT_ROLES[role]["system_focus"]``
-    field and ``_scope_tools`` for the new path. Returns empty string."""
-    return ""
-
-
 def detect_profile() -> str:
     """Detect hardware profile based on system RAM.
 
