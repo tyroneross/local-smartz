@@ -1009,6 +1009,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_models_ps()
         elif path == "/api/models/info":
             self._handle_model_info(parsed)
+        elif path == "/api/models/library":
+            self._handle_models_library(parsed)
         elif path == "/api/agents":
             self._handle_agents()
         elif path == "/api/agents/models":
@@ -1796,6 +1798,37 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             "profile": profile["name"],
             "previous_model": old_model or "",
         })
+
+    def _handle_models_library(self, parsed):
+        """GET /api/models/library?limit=10&capability=tools&refresh=1.
+
+        Refreshable list of popular Ollama models scraped from
+        ``ollama.com/search``. Result includes pull counts, sizes,
+        capabilities, and ``updated`` age so the UI can render a rich
+        "Popular on Ollama" section without a hand-curated list.
+
+        Cache: ``.localsmartz/library-cache.json`` (24h TTL). The UI can
+        force a fresh fetch with ``?refresh=1``.
+        """
+        from localsmartz import ollama_library
+
+        qs = parse_qs(parsed.query)
+        try:
+            limit = max(1, min(50, int((qs.get("limit") or ["10"])[0])))
+        except ValueError:
+            limit = 10
+        capability_raw = (qs.get("capability") or ["tools"])[0].strip()
+        capability = capability_raw or None  # empty string → no filter
+        refresh = (qs.get("refresh") or ["0"])[0] in ("1", "true", "yes")
+
+        cache_dir = Path.cwd() / ".localsmartz"
+        payload = ollama_library.get_popular(
+            cache_dir=cache_dir,
+            limit=limit,
+            capability=capability,
+            refresh=refresh,
+        )
+        self._json_response(payload)
 
     def _handle_models_ps(self):
         """GET /api/models/ps — list models currently loaded in Ollama VRAM.

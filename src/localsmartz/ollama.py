@@ -16,31 +16,23 @@ import httpx
 OLLAMA_BASE = "http://localhost:11434"
 
 
-# Curated catalog of suggested models. Shown to users alongside "installed"
-# so they can see what's available to pull without hunting on ollama.com.
-# Size is the approximate on-disk estimate; actual will be reported for installed.
+# Load-bearing models that the product directly references (see
+# ``profiles.PROFILES`` for planning + execution defaults). This short
+# list is the **fallback** the UI shows when the Ollama library scrape
+# is unreachable — the live "Popular on Ollama" list is fetched from
+# ``ollama.com/search`` by ``ollama_library.get_popular`` and cached to
+# ``.localsmartz/library-cache.json``.
+#
+# Why not a big hand-curated list? It ages. Gemma 4 launched, gemma3n
+# launched, qwen3.5 launched — none showed up in the old 19-model list
+# because no one remembered to edit it. The scraped list catches new
+# releases automatically, ranks by pull count, and de-dupes by family
+# so newer versions replace older ones.
 SUGGESTED_MODELS: list[dict] = [
-    # Lite-class (fast, ≤16 GB RAM) ------------------------------------------
-    {"name": "qwen3:8b-q4_K_M",                   "size_gb_estimate": 5.2, "ram_class": "lite",  "note": "Fast general model (lite profile default)"},
-    {"name": "llama3.2:3b",                       "size_gb_estimate": 2.0, "ram_class": "lite",  "note": "Small fast model, good for quick queries"},
-    {"name": "llama3.2:1b",                       "size_gb_estimate": 1.3, "ram_class": "lite",  "note": "Tiniest Llama — quick replies, limited reasoning"},
-    {"name": "phi3:mini",                         "size_gb_estimate": 2.3, "ram_class": "lite",  "note": "Microsoft Phi-3 mini"},
-    {"name": "gemma2:9b",                         "size_gb_estimate": 5.4, "ram_class": "lite",  "note": "Google Gemma 2 9B"},
-    {"name": "gemma3:4b",                         "size_gb_estimate": 3.3, "ram_class": "lite",  "note": "Google Gemma 3 4B — multimodal-ready"},
-    {"name": "mistral:7b",                        "size_gb_estimate": 4.1, "ram_class": "lite",  "note": "Mistral 7B — strong general baseline"},
-    # Full-class (16–32 GB RAM) ----------------------------------------------
-    {"name": "qwen2.5-coder:32b-instruct-q5_K_M", "size_gb_estimate": 23.0, "ram_class": "full", "note": "Strong code/agent model (default execution)"},
-    {"name": "qwen3:14b",                         "size_gb_estimate": 9.3, "ram_class": "full",  "note": "Qwen 3 14B — better tool calling than 8B"},
-    {"name": "gemma3:12b",                        "size_gb_estimate": 8.1, "ram_class": "full",  "note": "Google Gemma 3 12B"},
-    {"name": "llama3.3:70b",                      "size_gb_estimate": 42.0, "ram_class": "full", "note": "Meta Llama 3.3 70B (q4)"},
-    {"name": "gpt-oss:20b",                       "size_gb_estimate": 14.0, "ram_class": "full", "note": "OSS-tuned model"},
-    {"name": "nemotron-mini:4b",                  "size_gb_estimate": 2.7, "ram_class": "lite",  "note": "NVIDIA Nemotron Mini 4B"},
-    # Heavy (64 GB+ RAM) -----------------------------------------------------
-    {"name": "llama3.3:70b-instruct-q5_K_M",      "size_gb_estimate": 48.0, "ram_class": "heavy","note": "Llama 3.3 70B high-quality quant"},
-    {"name": "gemma3:27b",                        "size_gb_estimate": 17.0, "ram_class": "heavy","note": "Google Gemma 3 27B — heaviest Gemma"},
-    {"name": "nemotron:70b",                      "size_gb_estimate": 40.0, "ram_class": "heavy","note": "NVIDIA Llama-Nemotron 70B"},
-    {"name": "qwen3:32b",                         "size_gb_estimate": 20.0, "ram_class": "heavy","note": "Qwen 3 32B — strong tool calling"},
-    {"name": "gpt-oss:120b",                      "size_gb_estimate": 65.0, "ram_class": "heavy","note": "Largest OSS model"},
+    {"name": "qwen3:8b-q4_K_M",                   "size_gb_estimate": 5.2,  "ram_class": "lite",  "note": "Lite/full planning default"},
+    {"name": "qwen2.5-coder:32b-instruct-q5_K_M", "size_gb_estimate": 23.0, "ram_class": "full",  "note": "Full execution default"},
+    {"name": "llama3.3:70b-instruct-q5_K_M",      "size_gb_estimate": 48.0, "ram_class": "heavy", "note": "Heavy-tier alternative"},
+    {"name": "gpt-oss:120b",                      "size_gb_estimate": 65.0, "ram_class": "heavy", "note": "Largest OSS model supported"},
 ]
 
 
