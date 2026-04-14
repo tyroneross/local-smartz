@@ -13,7 +13,7 @@ except ImportError:
     pass  # Windows fallback — input() still works, just no history
 
 
-_NOUNS = ("plugins", "skills", "config", "secrets", "logs")
+_NOUNS = ("plugins", "skills", "config", "secrets", "logs", "doctor")
 
 
 def main():
@@ -680,6 +680,8 @@ def _handle_noun_command(noun: str, rest: list[str]) -> None:
             _cmd_secrets(rest)
         elif noun == "logs":
             _cmd_logs(rest)
+        elif noun == "doctor":
+            _cmd_doctor(rest)
     except SystemExit:
         raise
     except Exception as e:  # pragma: no cover — unexpected crashes
@@ -1172,6 +1174,40 @@ def _cmd_logs(argv: list[str]) -> None:
         log_buffer.clear()
         print("\u2713 Cleared log buffer")
         return
+
+
+# ---------------------------- doctor ----------------------------------------
+
+
+def _cmd_doctor(argv: list[str]) -> None:
+    parser = argparse.ArgumentParser(
+        prog="localsmartz doctor",
+        description="Run a pass/fail matrix of health checks",
+    )
+    parser.add_argument("--json", action="store_true", help="Machine-readable output")
+    args = parser.parse_args(argv)
+
+    from localsmartz.doctor import run_doctor
+
+    results = run_doctor()
+
+    if args.json:
+        _print_json(
+            [{"name": n, "status": s, "hint": h} for (n, s, h) in results]
+        )
+    else:
+        print("localsmartz doctor — health check matrix")
+        for name, status, hint in results:
+            if status == "ok":
+                print(f"\u2705 {name} \u2014 {hint}")
+            elif status == "fail":
+                print(f"\u274C {name} \u2014 {hint}")
+            else:  # skip
+                print(f"\u26A0\uFE0F  {name} \u2014 {hint}")
+
+    if any(s == "fail" for (_n, s, _h) in results):
+        sys.exit(1)
+    sys.exit(0)
 
 
 if __name__ == "__main__":
