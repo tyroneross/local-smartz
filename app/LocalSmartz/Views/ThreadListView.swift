@@ -4,6 +4,12 @@ struct AgentInfo: Decodable, Identifiable {
     let name: String
     let title: String
     let summary: String
+    /// Tool allow-list for this agent — surfaced in the sidebar so users
+    /// can see what each focused agent will actually call. Backend populates
+    /// it from ``AGENT_ROLES[role]["tools"]`` (see profiles.list_agents).
+    /// Optional in the decoder because older servers pre-e7b1baa don't
+    /// include the field.
+    let tools: [String]?
     var id: String { name }
 }
 
@@ -29,6 +35,7 @@ struct ThreadListView: View {
                     AgentRow(
                         title: "All agents",
                         summary: "Default multi-step flow",
+                        tools: nil,
                         isSelected: focusAgent == nil
                     ) {
                         focusAgent = nil
@@ -38,6 +45,11 @@ struct ThreadListView: View {
                         AgentRow(
                             title: agent.title,
                             summary: agent.summary,
+                            // Only render the tool list when this agent is
+                            // the currently focused one — keeps the sidebar
+                            // calm. Tool list is nil for "All agents" since
+                            // its tool surface is the union of everything.
+                            tools: focusAgent == agent.name ? agent.tools : nil,
                             isSelected: focusAgent == agent.name
                         ) {
                             focusAgent = (focusAgent == agent.name ? nil : agent.name)
@@ -82,27 +94,48 @@ struct ThreadListView: View {
     /// Tap-only row for the Agents section. Avoids `Button` so the system
     /// hover/pressed background that List applies to in-row buttons doesn't
     /// make non-selected rows look selected.
+    ///
+    /// When ``tools`` is non-nil (focused agent), renders a compact, indented
+    /// list of tool names below the summary. Calm Precision: monospaced,
+    /// 11pt, secondary color, no pills/badges.
     private struct AgentRow: View {
         let title: String
         let summary: String
+        let tools: [String]?
         let isSelected: Bool
         let onTap: () -> Void
 
         @State private var hovering = false
 
         var body: some View {
-            HStack(spacing: 8) {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title)
-                        .font(.system(size: 13, weight: .medium))
-                    Text(summary)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(title)
+                            .font(.system(size: 13, weight: .medium))
+                        Text(summary)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
+                // Per-agent tool list — only visible for the focused agent.
+                // Indented under the checkmark column so the hierarchy is
+                // obvious without needing a border or background.
+                if let tools, !tools.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(tools, id: \.self) { name in
+                            Text(name)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.leading, 24)  // align under the title column
+                    .padding(.top, 2)
+                }
             }
             .padding(.vertical, 4)
             .padding(.horizontal, 6)

@@ -11,6 +11,10 @@ struct GlobalSettings: Codable, Equatable {
     var activeModel: String = ""
     var pluginPaths: [String] = []
     var activeSkills: [String] = []
+    /// Show a confirmation dialog when the user launches a research run
+    /// with a model whose estimated size exceeds detected system RAM.
+    /// Default: true — prevents silent swap-thrashing on under-spec machines.
+    var warnBeforeLargeModels: Bool = true
 
     enum CodingKeys: String, CodingKey {
         case workspace
@@ -18,6 +22,7 @@ struct GlobalSettings: Codable, Equatable {
         case activeModel = "active_model"
         case pluginPaths = "plugin_paths"
         case activeSkills = "active_skills"
+        case warnBeforeLargeModels = "warn_before_large_models"
     }
 
     init(
@@ -25,13 +30,15 @@ struct GlobalSettings: Codable, Equatable {
         pythonPath: String = "",
         activeModel: String = "",
         pluginPaths: [String] = [],
-        activeSkills: [String] = []
+        activeSkills: [String] = [],
+        warnBeforeLargeModels: Bool = true
     ) {
         self.workspace = workspace
         self.pythonPath = pythonPath
         self.activeModel = activeModel
         self.pluginPaths = pluginPaths
         self.activeSkills = activeSkills
+        self.warnBeforeLargeModels = warnBeforeLargeModels
     }
 
     init(from decoder: Decoder) throws {
@@ -41,6 +48,7 @@ struct GlobalSettings: Codable, Equatable {
         self.activeModel = (try? c.decodeIfPresent(String.self, forKey: .activeModel)) ?? ""
         self.pluginPaths = (try? c.decodeIfPresent([String].self, forKey: .pluginPaths)) ?? []
         self.activeSkills = (try? c.decodeIfPresent([String].self, forKey: .activeSkills)) ?? []
+        self.warnBeforeLargeModels = (try? c.decodeIfPresent(Bool.self, forKey: .warnBeforeLargeModels)) ?? true
     }
 
     // MARK: - Paths
@@ -66,7 +74,8 @@ struct GlobalSettings: Codable, Equatable {
             pythonPath: "/usr/bin/env python3",
             activeModel: "",
             pluginPaths: [],
-            activeSkills: []
+            activeSkills: [],
+            warnBeforeLargeModels: true
         )
     }
 
@@ -133,7 +142,8 @@ struct GlobalSettings: Codable, Equatable {
             pythonPath: pythonPath.isEmpty ? d.pythonPath : pythonPath,
             activeModel: activeModel,
             pluginPaths: pluginPaths,
-            activeSkills: activeSkills
+            activeSkills: activeSkills,
+            warnBeforeLargeModels: warnBeforeLargeModels
         )
     }
 }

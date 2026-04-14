@@ -140,6 +140,18 @@ private struct GeneralTab: View {
                 TextField("e.g. qwen3:8b-q4_K_M", text: $vm.settings.activeModel)
                     .textFieldStyle(.roundedBorder)
             }
+            Divider().padding(.vertical, 2)
+            LabeledRow("Safety") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle(
+                        "Warn before running large models",
+                        isOn: $vm.settings.warnBeforeLargeModels
+                    )
+                    Text("Show a confirmation when the selected model's size exceeds detected system RAM.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 }

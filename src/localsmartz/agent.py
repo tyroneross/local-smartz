@@ -14,7 +14,7 @@ from pathlib import Path
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain_ollama import ChatOllama
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from localsmartz.profiles import (
     AGENT_ROLES,
@@ -465,7 +465,7 @@ def create_agent(
     - Built-in write_todos for planning
     - Built-in task tool for subagent delegation
     - Built-in filesystem for context offloading
-    - MemorySaver for checkpointing/resume
+    - SqliteSaver for durable checkpointing (threads survive restart)
 
     Args:
         profile_name: "full" or "lite", or None for auto-detect
@@ -522,11 +522,28 @@ def create_agent(
         include_mcp=include_mcp,
     )
 
-    checkpointer = MemorySaver()
-
     # Filesystem backend for persistent workspace
     storage_dir = cwd / ".localsmartz"
     storage_dir.mkdir(parents=True, exist_ok=True)
+
+    # Durable checkpointer. Threads resume across process restarts — a user
+    # reopening the app can continue a conversation instead of seeing
+    # context evaporate (fixes AP-3 in the deepagents anti-patterns doc).
+    # Constructed directly from a sqlite3.Connection so we manage lifetime
+    # ourselves; the ``SqliteSaver.from_conn_string`` helper returns a
+    # context manager that would close the DB when the ``with`` block
+    # exits — not what we want for a long-lived agent.
+    #
+    # ``check_same_thread=False`` is required because the HTTP server
+    # dispatches requests on worker threads distinct from the one that
+    # created the agent; the saver's read/write calls happen on whichever
+    # thread invokes ``agent.stream``. SQLite itself serializes access
+    # inside a single connection, so this is safe.
+    import sqlite3
+    checkpoint_db = storage_dir / "checkpoints.db"
+    checkpoint_conn = sqlite3.connect(str(checkpoint_db), check_same_thread=False)
+    checkpointer = SqliteSaver(checkpoint_conn)
+    checkpointer.setup()  # Idempotent — creates tables if missing.
 
     # Two modes:
     # 1. Focus mode (``focus_agent`` set): scope the MAIN agent's tools to just
@@ -632,7 +649,44 @@ def run_research(
     # Immediate feedback — show "Thinking..." before LLM responds
     print("  Thinking...", end="", flush=True, file=sys.stderr)
 
-    for chunk in agent.stream(input_msg, config=config, stream_mode="updates"):
+    # Multi-mode streaming: "updates" (tool events) + "messages" (token stream).
+    # Without the messages mode, the CLI shows "Thinking..." through a 10–60s
+    # silent gap while the model generates. We print tokens to stdout so users
+    # see the answer forming in real time (AP-4 in the deepagents skill).
+    for mode, payload in agent.stream(
+        input_msg, config=config, stream_mode=["updates", "messages"]
+    ):
+        if mode == "messages":
+            # payload is (AIMessageChunk, metadata) from LangGraph.
+            try:
+                msg_chunk, _meta = payload  # type: ignore[misc]
+            except (TypeError, ValueError):
+                continue
+            # Only stream chunks from the top-level AI node; ignore tool chunks.
+            chunk_type = getattr(msg_chunk, "__class__", type(msg_chunk)).__name__
+            if chunk_type != "AIMessageChunk" and getattr(msg_chunk, "type", None) != "ai":
+                continue
+            content = getattr(msg_chunk, "content", None)
+            if isinstance(content, str) and content:
+                if not showed_thinking:
+                    print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
+                    showed_thinking = True
+                # Stream tokens to stdout so the answer scrolls in real time.
+                print(content, end="", flush=True)
+            elif isinstance(content, list):
+                for seg in content:
+                    text = seg.get("text") if isinstance(seg, dict) else None
+                    if isinstance(text, str) and text:
+                        if not showed_thinking:
+                            print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
+                            showed_thinking = True
+                        print(text, end="", flush=True)
+            continue
+
+        # mode == "updates" — payload is the usual dict of node -> state_update.
+        chunk = payload
+        if not isinstance(chunk, dict):
+            continue
         for node_name, state_update in chunk.items():
             if state_update is None:
                 continue

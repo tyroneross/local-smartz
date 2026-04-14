@@ -160,6 +160,14 @@ def warmup_model(
     model stays resident. Idempotent — Ollama returns immediately when the
     model is already loaded.
 
+    ``keep_alive``:
+      - ``"30m"`` (default): keep the model resident for 30 minutes idle.
+      - ``"-1"``: keep resident forever — used for the active planning model
+        so the first query after launch is warm and subsequent idle
+        stretches never evict. Pair with ``evict_model()`` on model switch
+        to free VRAM.
+      - ``"0"``: immediately unload — see ``evict_model`` for the helper.
+
     Returns:
         (ok, duration_ms, error_message). On timeout or any HTTP/network
         error, ok is False and error_message describes the failure. Never
@@ -189,6 +197,45 @@ def warmup_model(
     except Exception as exc:  # noqa: BLE001 — broad catch, we surface via return
         elapsed_ms = int((time.time() - start) * 1000)
         return False, elapsed_ms, f"Warmup failed: {exc}"
+
+
+def evict_model(
+    model_name: str,
+    timeout: float = 30.0,
+) -> tuple[bool, str | None]:
+    """Force Ollama to unload ``model_name`` from VRAM.
+
+    POSTs ``/api/generate`` with ``keep_alive: 0`` and an empty prompt. Ollama
+    interprets zero keep-alive as "drop from memory immediately after this
+    request." Used when switching the active planning model so the new
+    model has VRAM to load into on smaller machines.
+
+    Returns ``(ok, error_message)``. Never raises.
+    """
+    if not model_name:
+        return False, "no model name provided"
+    try:
+        resp = httpx.post(
+            f"{OLLAMA_BASE}/api/generate",
+            json={
+                "model": model_name,
+                "prompt": "",
+                "keep_alive": 0,
+                "stream": False,
+            },
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            return True, None
+        # 404 usually means the model isn't pulled — treat as a soft success
+        # since there's nothing resident to evict.
+        if resp.status_code == 404:
+            return True, None
+        return False, f"Ollama returned {resp.status_code}: {resp.text[:200]}"
+    except httpx.TimeoutException:
+        return False, f"Evict timed out after {timeout:.0f}s"
+    except Exception as exc:  # noqa: BLE001 — surface via return
+        return False, f"Evict failed: {exc}"
 
 
 def resolve_available_model(

@@ -30,6 +30,16 @@ struct ResearchView: View {
     /// Set of model names currently mid-pull so we can disable the tap and
     /// show an inline spinner text without re-opening InstallModelSheet.
     @State private var pullingModels: Set<String> = []
+    /// Estimated on-disk size (GB) keyed by model name. Populated from
+    /// both `/api/models` (installed, authoritative size) and
+    /// `/api/models/catalog` (pre-install estimate). Used for the
+    /// pre-flight RAM-fit check in ``runResearch``.
+    @State private var modelSizeGB: [String: Double] = [:]
+    /// Pending RAM-warning confirmation state. When non-nil a modal is
+    /// shown; the user can continue anyway or cancel and pick a
+    /// smaller model.
+    @State private var pendingLargeModelQuery: String?
+    @State private var pendingLargeModelSize: Double = 0
 
     private let sseClient = SSEClient()
 
@@ -93,6 +103,33 @@ struct ResearchView: View {
                     warmupOverlay
                 }
             }
+            // Pre-flight RAM-fit confirmation. Fires when the current
+            // planning model's estimated size exceeds detected RAM and
+            // the user hasn't disabled the warning in Settings. Keeps
+            // users from silently swap-thrashing a 23 GB model on 16 GB.
+            .confirmationDialog(
+                ramWarningTitle,
+                isPresented: Binding(
+                    get: { pendingLargeModelQuery != nil },
+                    set: { if !$0 { pendingLargeModelQuery = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Continue anyway") {
+                    if let q = pendingLargeModelQuery {
+                        pendingLargeModelQuery = nil
+                        runResearch(query: q, bypassRAMCheck: true)
+                    }
+                }
+                Button("Switch model", role: .cancel) {
+                    pendingLargeModelQuery = nil
+                    // Leaves the prompt intact (restored below) so the
+                    // user can pick a smaller model from the toolbar
+                    // and re-submit without retyping.
+                }
+            } message: {
+                Text(ramWarningMessage)
+            }
             .sheet(isPresented: $showInstallSheet) {
                 InstallModelSheet(
                     backendBaseURL: backend.baseURL,
@@ -151,6 +188,9 @@ struct ResearchView: View {
 
     /// Fetch uninstalled rows from `/api/models/catalog`. Installed models
     /// are filtered out — they already appear in the "Active model" section.
+    /// Also populates ``modelSizeGB`` with the catalog's size estimate so
+    /// the pre-flight RAM check can still fire on freshly-pulled models
+    /// before `/api/models` reports their authoritative on-disk size.
     private func fetchCatalog() async {
         guard backend.isRunning,
               let url = URL(string: "\(backend.baseURL)/api/models/catalog") else { return }
@@ -159,6 +199,15 @@ struct ResearchView: View {
             let (data, _) = try await URLSession.shared.data(from: url)
             let decoded = try JSONDecoder().decode(Resp.self, from: data)
             installableCatalog = decoded.catalog.filter { !$0.installed }
+            // Record estimated sizes for every catalog entry so the RAM
+            // check has a number even before a model is installed.
+            for entry in decoded.catalog where entry.sizeGBEstimate > 0 {
+                // Prefer authoritative installed size (set in fetchModels)
+                // over the catalog estimate.
+                if modelSizeGB[entry.name] == nil {
+                    modelSizeGB[entry.name] = entry.sizeGBEstimate
+                }
+            }
         } catch {
             installableCatalog = []
         }
@@ -536,8 +585,24 @@ struct ResearchView: View {
 
     private func runResearch() {
         guard canRun else { return }
-
         let query = prompt.trimmingCharacters(in: .whitespaces)
+        runResearch(query: query, bypassRAMCheck: false)
+    }
+
+    /// Core research dispatch. The public zero-arg ``runResearch()`` calls
+    /// this with ``bypassRAMCheck: false`` so a too-large-model dialog can
+    /// gate the request; the "Continue anyway" branch of that dialog calls
+    /// back in with ``bypassRAMCheck: true`` and the same query.
+    private func runResearch(query: String, bypassRAMCheck: Bool) {
+        if !bypassRAMCheck, let warning = ramWarningForCurrentModel() {
+            // Stash state and surface the dialog. Preserve the prompt in
+            // the text field so the user can edit/retry after switching
+            // models — only clear once they actually commit.
+            pendingLargeModelQuery = query
+            pendingLargeModelSize = warning
+            return
+        }
+
         prompt = ""
         currentTitle = query
         outputText = ""
@@ -602,6 +667,36 @@ struct ResearchView: View {
         toolCalls.append(ToolCallEntry(name: "cancelled", message: "Stopped by user", isError: false))
     }
 
+    // MARK: - RAM fit pre-flight
+
+    /// Return the estimated model size (GB) if the current planning model
+    /// exceeds detected RAM and the user has the warning toggle on. Nil
+    /// means "proceed without confirmation".
+    ///
+    /// We treat an unknown size or unknown RAM as "proceed" — a warning
+    /// dialog with no numbers is worse than silence.
+    private func ramWarningForCurrentModel() -> Double? {
+        let settings = GlobalSettings.load()
+        guard settings.warnBeforeLargeModels else { return nil }
+        guard !currentModel.isEmpty else { return nil }
+        guard detectedRamGB > 0 else { return nil }
+        guard let size = modelSizeGB[currentModel], size > 0 else { return nil }
+        // Trigger when estimated model size exceeds detected RAM.
+        // Half-full (ratio <= 1.0) is fine — Ollama can still load.
+        return size > Double(detectedRamGB) ? size : nil
+    }
+
+    private var ramWarningTitle: String {
+        if currentModel.isEmpty { return "Model may exceed available RAM" }
+        return "\(currentModel) may exceed available RAM"
+    }
+
+    private var ramWarningMessage: String {
+        let sizeStr = String(format: "%.1f GB", pendingLargeModelSize)
+        let ramStr = "\(detectedRamGB) GB"
+        return "This model is about \(sizeStr); your machine reports \(ramStr) of RAM. Ollama can still load it but may swap heavily, making responses slow. Continue anyway?"
+    }
+
     private func handleEvent(_ event: SSEEvent) {
         switch event {
         case .text(let content):
@@ -652,6 +747,13 @@ struct ResearchView: View {
             let (data, _) = try await URLSession.shared.data(from: url)
             let decoded = try JSONDecoder().decode(ModelsResponse.self, from: data)
             availableModels = decoded.models.map(\.name)
+            // Record authoritative installed sizes for the RAM check.
+            // Overrides any catalog estimate previously stored.
+            for m in decoded.models {
+                if let gb = m.sizeGB, gb > 0 {
+                    modelSizeGB[m.name] = gb
+                }
+            }
             // Guard against a stale/missing current model. If the backend
             // reports a model that isn't actually installed, fall back to
             // the largest available one and persist the switch so the

@@ -1468,9 +1468,51 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         full_span.set_attribute("profile.name", profile.get("name", "unknown"))
 
         try:
-            # Stream agent execution
-            for chunk in agent.stream(input_msg, config=config, stream_mode="updates"):
+            # Multi-mode stream: "updates" emits node-boundary state (tool calls
+            # + tool results), "messages" emits per-token deltas from the LLM.
+            # Without messages mode, the UI shows "Thinking…" until the AI
+            # message completes — a 10–60 s silent gap on long answers. With
+            # both, users see tokens as they're produced (fixes AP-4 in the
+            # deepagents skill's anti-patterns doc).
+            #
+            # To avoid double-emission we only emit AI text content from the
+            # messages branch; the updates branch handles tool events only.
+            for mode, payload in agent.stream(
+                input_msg, config=config, stream_mode=["updates", "messages"]
+            ):
                 pulse.touch()
+
+                if mode == "messages":
+                    # payload is (AIMessageChunk, metadata_dict) from LangGraph.
+                    # Only emit text deltas from AI chunks; tool-call deltas are
+                    # handled by the updates branch at the node boundary.
+                    try:
+                        msg_chunk, _meta = payload  # type: ignore[misc]
+                    except (TypeError, ValueError):
+                        continue
+                    # Skip non-AI chunks (tool output messages flow through
+                    # updates; re-emitting here would duplicate).
+                    if getattr(msg_chunk, "type", None) not in ("ai", "AIMessageChunk"):
+                        # AIMessageChunk reports type via .type attribute which
+                        # may be "AIMessageChunk" depending on LangChain version.
+                        type_attr = getattr(msg_chunk, "__class__", type(msg_chunk)).__name__
+                        if type_attr != "AIMessageChunk":
+                            continue
+                    content = getattr(msg_chunk, "content", None)
+                    if isinstance(content, str) and content:
+                        self._send_event({"type": "text", "content": content})
+                    elif isinstance(content, list):
+                        # Some adapters emit content as a list of segments.
+                        for seg in content:
+                            text = seg.get("text") if isinstance(seg, dict) else None
+                            if isinstance(text, str) and text:
+                                self._send_event({"type": "text", "content": text})
+                    continue
+
+                # mode == "updates"
+                chunk = payload
+                if not isinstance(chunk, dict):
+                    continue
                 for node_name, state_update in chunk.items():
                     if state_update is None:
                         continue
@@ -1538,10 +1580,10 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                                     "message": f"{de.signal.value} [{de.severity.value}] {de.message}",
                                 })
 
-                        # AI text output
-                        if hasattr(msg, "type") and msg.type == "ai":
-                            if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content.strip():
-                                self._send_event({"type": "text", "content": msg.content})
+                        # NOTE: AI text content is no longer emitted here —
+                        # the "messages" branch above streams tokens as they
+                        # arrive. Re-enabling this would cause the full reply
+                        # to be appended a second time after the token stream.
 
                 # Enforce turn limit and loop break
                 if turn_count >= max_turns or loop_broken:
@@ -1601,9 +1643,15 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         })
 
     def _handle_model_select(self):
-        """Switch the active model."""
-        from localsmartz.ollama import model_available
-        from localsmartz.config import save_config
+        """Switch the active model.
+
+        Frees the old model from Ollama VRAM (``evict_model``) before
+        kicking off a background warmup for the new one with
+        ``keep_alive="-1"`` so it stays resident. The UI polls
+        ``/api/models/warmup`` to block input until the new model is ready.
+        """
+        from localsmartz.ollama import evict_model, model_available
+        from localsmartz.config import load_config, save_config
         from localsmartz.profiles import get_profile
 
         try:
@@ -1619,10 +1667,37 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._json_response({"error": f"Model '{model}' not available in Ollama"}, 400)
             return
         cwd = Path.cwd()
+
+        # Determine the currently-resident model so we can evict before
+        # pinning the new one. Priority: in-memory override > saved config.
+        old_model = LocalSmartzHandler._model_override
+        if not old_model:
+            saved = load_config(cwd) or {}
+            old_model = saved.get("planning_model")
+
         save_config(cwd, {"planning_model": model})
         LocalSmartzHandler._model_override = model
+
+        # Best-effort evict. No-op when old == new (model_select on same
+        # model is a cheap refresh) and silent on failure — the swap
+        # succeeded even if VRAM reclaim didn't.
+        if old_model and old_model != model:
+            evict_model(old_model)
+
+        # Pin the new model with keep_alive=-1 so it survives idle
+        # stretches — the UI stays responsive without waiting on a cold
+        # reload when the user comes back minutes later. Background thread
+        # so the POST returns immediately and the UI can show the loading
+        # overlay via warmup polling.
+        _warmup_in_background(model, keep_alive="-1")
+
         profile = get_profile(self._default_profile, model_override=model)
-        self._json_response({"ok": True, "model": model, "profile": profile["name"]})
+        self._json_response({
+            "ok": True,
+            "model": model,
+            "profile": profile["name"],
+            "previous_model": old_model or "",
+        })
 
     def _handle_models_catalog(self):
         """Return the curated catalog with installed/not-installed flags.
@@ -2458,8 +2533,12 @@ def start_server(port: int = 11435, profile_name: str | None = None):
         _profile = get_profile(profile_name, model_override=_saved or None)
         _boot_model = _profile.get("planning_model") if isinstance(_profile, dict) else None
         if _boot_model and check_server():
-            print(f"  Warming {_boot_model} (background)...", file=sys.stderr)
-            _warmup_in_background(_boot_model, keep_alive="30m")
+            print(f"  Warming {_boot_model} (background, keep_alive=-1)...", file=sys.stderr)
+            # Pin the active planning model resident indefinitely. Idle-time
+            # eviction is handled explicitly at model-switch — see
+            # ``_handle_model_select`` which calls evict_model on the old
+            # model before warming the new one.
+            _warmup_in_background(_boot_model, keep_alive="-1")
     except Exception as exc:  # noqa: BLE001 — don't let warmup crash startup
         _log_buffer.info("startup", f"boot warmup skipped: {exc}")
 

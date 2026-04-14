@@ -12,6 +12,8 @@ license = {file = "LICENSE"}
 dependencies = [
     "deepagents",
     "langchain-ollama",
+    # Durable checkpointer — SQLite-backed threads survive backend restart.
+    "langgraph-checkpoint-sqlite>=3.0.3",
     "langsmith>=0.3.0",
     # Document processing
     "pypdf>=4.3.0",
