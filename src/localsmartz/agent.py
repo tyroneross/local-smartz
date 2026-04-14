@@ -434,9 +434,19 @@ def _build_subagent_specs(
             "tools": scoped,
         }
         # Per-agent model override (profile default merged with user overrides).
+        #
+        # IMPORTANT: DeepAgents resolves bare string models via LangChain's
+        # ``init_chat_model`` path, which cannot infer a provider from a plain
+        # Ollama tag like ``qwen3:8b-q4_K_M`` and raises
+        # ``ValueError("model_provider")``. Fix: hand DeepAgents a prebuilt
+        # ``ChatOllama`` instance instead, matching how the main agent and
+        # pipeline._role_llm construct their models. ``_create_model`` returns
+        # a bare ChatOllama (no ``with_retry`` — RunnableRetry is unhashable
+        # and strips ``bind_tools``; see the contract in ``_create_model``'s
+        # docstring and ``pipeline.py::_role_llm``).
         role_model = get_agent_model(profile, role_name)
         if role_model:
-            spec["model"] = role_model
+            spec["model"] = _create_model(profile, role_name, model_name=role_model)
         specs.append(spec)
     return specs
 
