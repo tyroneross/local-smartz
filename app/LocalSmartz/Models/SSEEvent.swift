@@ -15,6 +15,13 @@ enum SSEEvent {
     /// been silent longer than ~15s. Used by the UI to keep the spinner
     /// alive without toggling visibility.
     case heartbeat(elapsedS: Int)
+    /// Orchestrator pipeline stage transition. Emitted when the main
+    /// agent delegates via DeepAgents' ``task`` tool — the ``name`` is
+    /// the specialist role being entered ("researcher", "analyzer",
+    /// "fact_checker", "writer"). The UI can render a breadcrumb
+    /// (Orchestrator → Researcher → Fact-checker → Writer) to show the
+    /// user what's happening during multi-step research.
+    case stage(String)
 
     static func parse(from jsonData: Data) -> SSEEvent? {
         guard let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
@@ -43,6 +50,8 @@ enum SSEEvent {
             )
         case "heartbeat":
             return .heartbeat(elapsedS: dict["elapsed_s"] as? Int ?? 0)
+        case "stage":
+            return .stage(dict["stage"] as? String ?? "")
         default:
             return nil
         }
