@@ -112,15 +112,20 @@ def _role_llm(role: str, profile: dict):
     ``get_agent_model``. Falls back to the profile planning model when the
     role has no explicit entry.
 
-    Config matches ``agent._create_model``:
-    - 600s read timeout (long report generation) with short connect/write
-      so transient network issues fail fast rather than hanging the SSE stream.
-    - ``with_retry`` on TransportError + TimeoutException — a hot-unloaded
-      model (common during model switches) re-dispatches once with jittered
-      backoff; second failure still bubbles to the SSE error path.
+    **Do NOT wrap in ``with_retry`` here.** ``create_agent`` calls
+    ``llm.bind_tools(...)`` on this return value; ``RunnableRetry`` doesn't
+    expose ``bind_tools``, which silently breaks tool registration for every
+    specialist. Transient-error retry for the graph path lives at the
+    node-loop level (the ReAct executor retries within its own message loop
+    on tool errors). If we need model-swap retry specifically, it belongs
+    after tool-binding, not before.
+
+    Config matches ``agent._create_model`` everywhere except the retry wrap:
+    - 600s read timeout so long report generation doesn't hang the SSE stream
+    - Short connect/write so transient network issues fail fast
     """
     model_name = get_agent_model(profile, role) or profile.get("planning_model")
-    llm = ChatOllama(
+    return ChatOllama(
         model=model_name,
         temperature=0,
         num_ctx=4096,
@@ -132,14 +137,6 @@ def _role_llm(role: str, profile: dict):
                 pool=5.0,
             ),
         },
-    )
-    return llm.with_retry(
-        stop_after_attempt=2,
-        wait_exponential_jitter=True,
-        retry_if_exception_type=(
-            httpx.TransportError,
-            httpx.TimeoutException,
-        ),
     )
 
 

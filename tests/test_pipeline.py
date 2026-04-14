@@ -392,9 +392,7 @@ def test_role_llm_uses_profile_model(monkeypatch):
         def __init__(self, **kwargs):
             seen_models.append(kwargs.get("model", ""))
 
-        def with_retry(self, **_kwargs):
-            # _role_llm now wraps in with_retry to match agent._create_model's
-            # timeout + retry discipline. Return self so the fake keeps working.
+        def bind_tools(self, tools, **_kwargs):
             return self
 
         def invoke(self, messages):
@@ -403,10 +401,95 @@ def test_role_llm_uses_profile_model(monkeypatch):
             return _Resp()
 
     monkeypatch.setattr("localsmartz.pipeline.ChatOllama", FakeChat)
-    from localsmartz.pipeline import _invoke_role
+    from localsmartz.pipeline import _role_llm
 
     profile = get_profile("full")
-    _invoke_role("writer", "hello", profile)
+    llm = _role_llm("writer", profile)
     assert seen_models, "ChatOllama was not instantiated"
     # Writer on full profile uses the execution model (32b coder).
     assert "32b" in seen_models[-1] or "coder" in seen_models[-1].lower()
+    # Regression guard: _role_llm must return an object that has
+    # ``bind_tools``. Earlier code wrapped the LLM in ``with_retry`` which
+    # strips that method and silently broke tool registration for every
+    # specialist — the exact cause of the "graph routes but doesn't call
+    # tools" bug. Asserting the method exists here catches any future
+    # regression before the live pipeline does.
+    assert hasattr(llm, "bind_tools"), (
+        "_role_llm return value must expose .bind_tools for create_agent"
+    )
+
+
+def test_role_llm_not_wrapped_in_runnable_retry():
+    """The real ChatOllama instance must not be wrapped in ``RunnableRetry``
+    before ``create_agent`` binds tools. A RunnableRetry lacks bind_tools,
+    which is how the graph pipeline silently failed to register any tools.
+    """
+    profile = get_profile("full")
+    # Use a throwaway fake to keep the test hermetic.
+    from unittest.mock import MagicMock
+
+    class FakeChat:
+        def __init__(self, **_kwargs):
+            pass
+
+        def bind_tools(self, tools, **_kwargs):
+            return self
+
+    with patch("localsmartz.pipeline.ChatOllama", FakeChat):
+        from localsmartz.pipeline import _role_llm
+        llm = _role_llm("writer", profile)
+
+    # Must NOT be a RunnableRetry (or any wrapper that would strip
+    # bind_tools). Cheapest check: confirm bind_tools is callable.
+    assert callable(getattr(llm, "bind_tools", None))
+    # Also verify the class name doesn't contain "Retry" — defensive
+    # guard against re-introducing a retry wrapper someone might add
+    # thinking it's harmless.
+    assert "Retry" not in type(llm).__name__
+
+
+def test_build_role_agent_binds_tools(monkeypatch):
+    """Regression guard for the full pipeline: _build_role_agent must
+    actually call ``create_agent`` with a tool-capable LLM."""
+    calls: list[dict] = []
+
+    class FakeChat:
+        def __init__(self, **_kwargs):
+            pass
+
+        def bind_tools(self, tools, **_kwargs):
+            return self
+
+        def invoke(self, _messages):
+            class _R:
+                content = "stub"
+            return _R()
+
+    def fake_create_agent(llm, tools, system_prompt, **_kwargs):
+        calls.append({
+            "llm_has_bind_tools": hasattr(llm, "bind_tools"),
+            "tool_count": len(list(tools) if tools else []),
+            "system_prompt_len": len(system_prompt) if system_prompt else 0,
+        })
+        # Return something .invoke-able so downstream code doesn't break.
+        class _Exec:
+            def invoke(self, _state, **_kw):
+                return {"messages": [type("M", (), {"content": "ok"})()]}
+        return _Exec()
+
+    monkeypatch.setattr("localsmartz.pipeline.ChatOllama", FakeChat)
+    # The real module imports this as ``create_react_agent`` per the
+    # alias in pipeline.py to avoid colliding with ``agent.create_agent``.
+    monkeypatch.setattr("localsmartz.pipeline.create_react_agent", fake_create_agent)
+
+    from localsmartz.pipeline import _build_role_agent
+
+    profile = get_profile("full")
+    # Build a minimal tool registry — empty is fine for the check.
+    _build_role_agent("writer", profile, all_tools=[])
+
+    assert calls, "create_agent was never invoked"
+    assert calls[0]["llm_has_bind_tools"], (
+        "create_agent received an LLM without bind_tools — "
+        "graph specialists would silently fail to register tools"
+    )
