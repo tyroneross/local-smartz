@@ -8,6 +8,10 @@ class BackendManager: ObservableObject {
     @Published var errorMessage: String?
 
     private var process: Process?
+    /// Absolute path the spawned backend's stdout/stderr are redirected to.
+    /// Exposed so the UI / crash reporter can surface recent lines if the
+    /// process dies unexpectedly. Kept stable across restarts by appending.
+    private(set) var logPath: String = BackendManager.defaultLogPath()
 
     var baseURL: String {
         "http://localhost:\(port)"
@@ -20,6 +24,18 @@ class BackendManager: ObservableObject {
             name: NSApplication.willTerminateNotification,
             object: nil
         )
+    }
+
+    /// `~/Library/Logs/LocalSmartz/backend.log`. Created lazily on first spawn.
+    /// Intentionally non-isolated so the Setup view's short-lived
+    /// TempBackend — which lives outside the MainActor — can point at the
+    /// same log file without ceremony.
+    nonisolated static func defaultLogPath() -> String {
+        let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent("Logs/LocalSmartz")
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Library/Logs/LocalSmartz")
+        return base.appendingPathComponent("backend.log").path
     }
 
     deinit {
@@ -110,50 +126,93 @@ class BackendManager: ObservableObject {
         } else {
             env.removeValue(forKey: "LOCALSMARTZ_OBSERVE")
         }
+        // Force line-buffered output so every crash message reaches the log
+        // file immediately — critical for post-mortem on silent child exits.
+        env["PYTHONUNBUFFERED"] = "1"
 
         process.environment = env
 
-        let errorPipe = Pipe()
-        process.standardError = errorPipe
+        // Route both stdout and stderr to a real file on disk. We used to
+        // attach a Pipe() and shuttle data via a Task — that has two
+        // well-known failure modes on macOS:
+        //   1. If the reader Task stalls (MainActor busy), the pipe's 64KB
+        //      buffer fills and the child blocks on write. Under SIGPIPE
+        //      defaults Python can then die silently when the parent later
+        //      releases the pipe.
+        //   2. Without a log file the crash trace is invisible — we were
+        //      reduced to guessing at causes.
+        // A file descriptor never back-pressures, never drops bytes, and is
+        // readable post-mortem. The server-side SIGPIPE=IGN we added in
+        // serve.py handles the companion failure mode for SSE clients.
+        let logDir = (logPath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(
+            atPath: logDir,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        let banner = "\n--- backend spawn @ \(Date()) port=\(testPort) ---\n"
+        // Open the log file in APPEND mode so the child's writes always land
+        // at EOF atomically — critical when a short-lived Setup TempBackend
+        // and the long-lived BackendManager momentarily share the same file.
+        // ``FileHandle(forWritingTo:)`` uses read-write mode without O_APPEND
+        // and tracks a per-fd offset; two writers end up clobbering each
+        // other's output. O_APPEND is POSIX-guaranteed against that.
+        let fd = open(logPath, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        if fd == -1 {
+            errorMessage = "Could not open backend log at \(logPath): errno=\(errno)"
+            return
+        }
+        let logHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        if let data = banner.data(using: .utf8) {
+            try? logHandle.write(contentsOf: data)
+        }
+        process.standardOutput = logHandle
+        process.standardError = logHandle
 
         do {
             try process.run()
             self.process = process
 
-            // Monitor stderr
-            Task.detached { [weak self] in
-                let handle = errorPipe.fileHandleForReading
-                while true {
-                    let data = handle.availableData
-                    guard !data.isEmpty else { break }
-                    if let errorStr = String(data: data, encoding: .utf8) {
-                        await MainActor.run { [weak self] in
-                            if let self, !self.isRunning {
-                                self.errorMessage = errorStr.trimmingCharacters(
-                                    in: .whitespacesAndNewlines
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Wait for backend readiness (up to 15s)
-            for _ in 0..<30 {
+            // Wait for backend readiness (up to 30s). Bundled Python has to
+            // import the full dependency tree (langgraph, httpx, opentelemetry)
+            // from disk on the first launch of each app version — that can
+            // legitimately take 10–20s on older Macs. Previous 15s budget was
+            // catching real startups as "failed".
+            for _ in 0..<60 {
                 try? await Task.sleep(for: .milliseconds(500))
                 if await healthCheck(port: testPort) {
                     self.isRunning = true
+                    return
+                }
+                // If the child exited during startup, surface the tail of the
+                // log immediately rather than waiting out the full budget.
+                if !process.isRunning {
+                    self.process = nil
+                    errorMessage = "Backend exited during startup. Tail of \(logPath):\n\(tailLog(lines: 20))"
                     return
                 }
             }
 
             process.terminate()
             self.process = nil
-            errorMessage = "Backend failed to start within 15 seconds"
+            errorMessage = "Backend failed to start within 30 seconds. See \(logPath)"
 
         } catch {
             errorMessage = "Failed to launch backend: \(error.localizedDescription)"
         }
+    }
+
+    /// Return the last `lines` of the backend log. Best-effort — if the file
+    /// is missing or unreadable, returns an empty string. Used to seed the
+    /// error banner when the spawned process exits unexpectedly.
+    func tailLog(lines: Int = 20) -> String {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: logPath)),
+              let text = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        let all = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let slice = all.suffix(lines)
+        return slice.joined(separator: "\n")
     }
 
     func stop() {

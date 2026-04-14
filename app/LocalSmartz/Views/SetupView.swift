@@ -655,8 +655,41 @@ private final class TempBackend {
         proc.executableURL = URL(fileURLWithPath: pythonPath)
         proc.arguments = ["-m", "localsmartz", "--serve", "--port", "\(port)"]
         proc.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
-        proc.standardOutput = Pipe()
-        proc.standardError = Pipe()
+
+        // Force unbuffered output so the log file fills in real time.
+        var env = ProcessInfo.processInfo.environment
+        env["PYTHONUNBUFFERED"] = "1"
+        proc.environment = env
+
+        // Route stdout+stderr to the shared backend log file (same path as
+        // BackendManager). Using an O_APPEND file descriptor instead of
+        // Pipe() eliminates the pipe-buffer-fill deadlock that can silently
+        // kill the child on busy stderr output, and gives us a durable crash
+        // trace. O_APPEND is required to avoid clobbering the main
+        // BackendManager's writes if both live briefly.
+        let logPath = BackendManager.defaultLogPath()
+        let logDir = (logPath as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(
+            atPath: logDir,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        let fd = open(logPath, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        if fd == -1 {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "open(\(logPath)) failed: errno=\(errno)"]
+            )
+        }
+        let logHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        let banner = "\n--- TempBackend spawn @ \(Date()) port=\(port) ---\n"
+        if let data = banner.data(using: .utf8) {
+            try? logHandle.write(contentsOf: data)
+        }
+        proc.standardOutput = logHandle
+        proc.standardError = logHandle
+
         try proc.run()
         process = proc
     }

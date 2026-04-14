@@ -20,6 +20,16 @@ struct ResearchView: View {
     @State private var agents: [AgentInfo] = []
     @State private var focusAgent: String?
     @State private var showInstallSheet = false
+    /// Uninstalled catalog models surfaced directly in the toolbar Model menu.
+    /// Fetched from `/api/models/catalog` alongside `availableModels` so the
+    /// user can install from one click without opening the sheet first.
+    @State private var installableCatalog: [InstallCatalogModel] = []
+    /// Detected system RAM (GB) — used for the fit chip next to each
+    /// uninstalled catalog entry. 0 means "unknown → hide the chip".
+    @State private var detectedRamGB: Int = 0
+    /// Set of model names currently mid-pull so we can disable the tap and
+    /// show an inline spinner text without re-opening InstallModelSheet.
+    @State private var pullingModels: Set<String> = []
 
     private let sseClient = SSEClient()
 
@@ -89,6 +99,7 @@ struct ResearchView: View {
                     onInstalled: { name in
                         Task {
                             await fetchModels()
+                            await fetchCatalog()
                             // Optionally auto-switch to the freshly installed model.
                             await switchModel(to: name)
                         }
@@ -104,6 +115,8 @@ struct ResearchView: View {
                 await fetchModels()
                 await fetchAgents()
                 await fetchThreads()
+                await fetchCatalog()
+                await fetchRam()
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(30))
                     await refreshStatus()
@@ -112,6 +125,103 @@ struct ResearchView: View {
                 appState.ollamaStatus = .offline
                 errorMessage = backend.errorMessage ?? "Backend failed to start."
             }
+        }
+    }
+
+    // MARK: - Catalog menu helpers
+
+    /// Render one uninstalled catalog row as plain text for a native Menu.
+    /// Format:  "• gemma3:27b   16.3 GB  ✓ Fits"
+    /// The prefix chip makes RAM fit visible without relying on SwiftUI
+    /// custom-content support (macOS Menu strips most rich content).
+    private func menuRowLabel(for model: InstallCatalogModel) -> String {
+        let size = String(format: "%.1f GB", model.sizeGBEstimate)
+        let fit: String
+        if detectedRamGB > 0 {
+            let ratio = model.sizeGBEstimate / Double(detectedRamGB)
+            if ratio <= 0.5 { fit = "  ✓ Fits" }
+            else if ratio <= 1.0 { fit = "  ⚠ Tight" }
+            else { fit = "  ✗ Too large" }
+        } else {
+            fit = ""
+        }
+        let busy = pullingModels.contains(model.name) ? "  (installing…)" : ""
+        return "\(model.name)   \(size)\(fit)\(busy)"
+    }
+
+    /// Fetch uninstalled rows from `/api/models/catalog`. Installed models
+    /// are filtered out — they already appear in the "Active model" section.
+    private func fetchCatalog() async {
+        guard backend.isRunning,
+              let url = URL(string: "\(backend.baseURL)/api/models/catalog") else { return }
+        struct Resp: Decodable { let catalog: [InstallCatalogModel] }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoded = try JSONDecoder().decode(Resp.self, from: data)
+            installableCatalog = decoded.catalog.filter { !$0.installed }
+        } catch {
+            installableCatalog = []
+        }
+    }
+
+    /// Read detected RAM via /api/status so the menu fit chip matches
+    /// what ModelsTab and InstallModelSheet show.
+    private func fetchRam() async {
+        struct StatusResp: Decodable {
+            let ramGB: Int?
+            enum CodingKeys: String, CodingKey { case ramGB = "ram_gb" }
+        }
+        guard backend.isRunning,
+              let url = URL(string: "\(backend.baseURL)/api/status") else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoded = try JSONDecoder().decode(StatusResp.self, from: data)
+            if let gb = decoded.ramGB, gb > 0 {
+                detectedRamGB = gb
+            }
+        } catch {
+            // non-fatal — chips just hide
+        }
+    }
+
+    /// Kick off a pull from the menu. Streams progress into
+    /// `pullingModels` so the row shows "(installing…)" until the server
+    /// emits `done`, then refreshes the installed + catalog lists and
+    /// auto-switches to the new model so the user can use it immediately.
+    private func installFromMenu(_ model: InstallCatalogModel) async {
+        guard backend.isRunning,
+              let url = URL(string: "\(backend.baseURL)/api/models/pull") else { return }
+        pullingModels.insert(model.name)
+        defer { pullingModels.remove(model.name) }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model.name])
+
+        do {
+            let (stream, _) = try await URLSession.shared.bytes(for: req)
+            var succeeded = false
+            for try await line in stream.lines {
+                guard line.hasPrefix("data: ") else { continue }
+                let payload = String(line.dropFirst(6))
+                if let data = payload.data(using: .utf8),
+                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let kind = obj["type"] as? String {
+                    if kind == "done" {
+                        succeeded = true
+                    } else if kind == "error", let msg = obj["message"] as? String {
+                        errorMessage = "Install \(model.name) failed: \(msg)"
+                    }
+                }
+            }
+            if succeeded {
+                await fetchModels()
+                await fetchCatalog()
+                await switchModel(to: model.name)
+            }
+        } catch {
+            errorMessage = "Install \(model.name) failed: \(error.localizedDescription)"
         }
     }
 
@@ -179,7 +289,7 @@ struct ResearchView: View {
             if availableModels.isEmpty {
                 Text("No models loaded")
             } else {
-                Section("Switch active model") {
+                Section("Active model") {
                     ForEach(availableModels, id: \.self) { name in
                         Button {
                             Task { await switchModel(to: name) }
@@ -192,16 +302,36 @@ struct ResearchView: View {
                         .disabled(isStreaming || isSwitchingModel)
                     }
                 }
-                Divider()
+            }
+            if !installableCatalog.isEmpty {
+                Section("Available to install") {
+                    ForEach(installableCatalog) { model in
+                        // Native macOS Menu items render plain text from
+                        // Button labels (Image/HStack work but are clipped).
+                        // Encode the fit chip and size into the label string
+                        // itself so every row is one tappable unit.
+                        Button {
+                            Task { await installFromMenu(model) }
+                        } label: {
+                            Text(menuRowLabel(for: model))
+                        }
+                        .disabled(pullingModels.contains(model.name)
+                                  || isStreaming
+                                  || isSwitchingModel)
+                    }
+                }
             }
             Divider()
             Button {
                 showInstallSheet = true
             } label: {
-                Label("Install new model…", systemImage: "plus.circle")
+                Label("Install by name…", systemImage: "plus.circle")
             }
             Button("Refresh list") {
-                Task { await fetchModels() }
+                Task {
+                    await fetchModels()
+                    await fetchCatalog()
+                }
             }
         } label: {
             HStack(spacing: 6) {

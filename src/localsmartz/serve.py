@@ -14,6 +14,7 @@ Same pattern as stratagem/ui.py.
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -951,6 +952,17 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
     _default_profile: str | None = None
     _model_override: str | None = None
 
+    def setup(self):
+        # Pre-create the per-request SSE write lock here instead of
+        # lazy-initializing inside ``_send_event``. The old lazy pattern had a
+        # TOCTOU race: the main handler thread and the heartbeat pulse thread
+        # could both observe ``_sse_lock is None`` concurrently, each create
+        # their own ``threading.Lock``, and end up interleaving bytes on the
+        # SSE wire. Creating it here — before any method can see the
+        # instance — is race-free.
+        super().setup()
+        self._sse_lock = threading.Lock()
+
     # Suppress default logging to stderr
     def log_message(self, format, *args):
         pass
@@ -1070,15 +1082,11 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _send_event(self, data: dict):
-        """Serialized SSE write. A per-request lock lets a heartbeat
-        sidecar thread coexist with the main stream loop without
-        interleaving bytes on the wire.
+        """Serialized SSE write. The per-request lock is created in
+        ``setup()`` so the main stream loop and the heartbeat pulse can race
+        for it without a TOCTOU double-initialization.
         """
-        lock = getattr(self, "_sse_lock", None)
-        if lock is None:
-            lock = threading.Lock()
-            self._sse_lock = lock
-        with lock:
+        with self._sse_lock:
             try:
                 line = f"data: {json.dumps(data)}\n\n"
                 self.wfile.write(line.encode("utf-8"))
@@ -2361,6 +2369,66 @@ Return ONLY the JSON, no prose, no code fences."""
         self._json_response({"ok": True, "path": str(path)})
 
 
+def _install_crash_diagnostics() -> None:
+    """Make silent child-process deaths impossible.
+
+    Three problems we address here, in order of severity:
+
+    1. **SIGPIPE=SIG_DFL kills the process.** Python inherits the default
+       SIGPIPE handler on macOS which *terminates* the process when a write
+       lands on a closed pipe. SSE clients (the Swift app) routinely close
+       connections mid-stream — on cancel, on window close, on navigation.
+       Every one of those writes was a chance to silently kill the backend.
+       We ignore the signal so writes just raise ``BrokenPipeError`` (which
+       ``_send_event`` already catches and re-raises cleanly).
+
+    2. **Unhandled exceptions in daemon threads are invisible.** Our
+       warmup + heartbeat workers run as ``daemon=True``. If one raises,
+       Python prints to ``sys.stderr`` and the thread dies — but because
+       the process stays alive, no one notices until a later request
+       deadlocks on state that worker was supposed to update. Install a
+       ``threading.excepthook`` that routes to our ``log_buffer`` so the
+       trace shows up in `/api/logs` and in the spawned-process log file.
+
+    3. **Top-level crashes must flush before the process exits.** Install a
+       ``sys.excepthook`` that logs and flushes before the default hook runs.
+    """
+    from localsmartz import log_buffer as _log_buffer
+
+    try:
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    except (AttributeError, ValueError):
+        # Not POSIX or called from non-main thread — harmless.
+        pass
+
+    def _thread_hook(args: threading.ExceptHookArgs) -> None:
+        # Mirror stderr output so it lands in the app's spawned log file
+        # in addition to the in-memory log buffer.
+        msg = "".join(
+            traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)
+        )
+        try:
+            _log_buffer.error("thread", f"[{args.thread.name if args.thread else 'unknown'}] {msg}")
+        except Exception:
+            pass
+        print(f"[thread {args.thread.name if args.thread else '?'}] {msg}", file=sys.stderr, flush=True)
+
+    threading.excepthook = _thread_hook
+
+    _prev_hook = sys.excepthook
+
+    def _sys_hook(exc_type, exc, tb) -> None:
+        msg = "".join(traceback.format_exception(exc_type, exc, tb))
+        try:
+            _log_buffer.error("unhandled", msg)
+        except Exception:
+            pass
+        print(f"[unhandled] {msg}", file=sys.stderr, flush=True)
+        _prev_hook(exc_type, exc, tb)
+
+    sys.excepthook = _sys_hook
+
+
 def start_server(port: int = 11435, profile_name: str | None = None):
     """Start the Local Smartz HTTP server.
 
@@ -2368,6 +2436,8 @@ def start_server(port: int = 11435, profile_name: str | None = None):
         port: Port to listen on
         profile_name: Profile override ("full" or "lite"). Auto-detect if None.
     """
+    _install_crash_diagnostics()
+
     # Store profile_name on handler class so all requests use consistent profile
     LocalSmartzHandler._default_profile = profile_name
     from localsmartz import __version__ as _version
@@ -2396,10 +2466,18 @@ def start_server(port: int = 11435, profile_name: str | None = None):
 
     server = ThreadingHTTPServer(("127.0.0.1", port), LocalSmartzHandler)
     server.daemon_threads = True
-    print(f"\n  Local Smartz running at http://localhost:{port}", file=sys.stderr)
-    print(f"  Press Ctrl+C to stop.\n", file=sys.stderr)
+    print(f"\n  Local Smartz running at http://localhost:{port}", file=sys.stderr, flush=True)
+    print(f"  Press Ctrl+C to stop.\n", file=sys.stderr, flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down.", file=sys.stderr)
+        print("\nShutting down.", file=sys.stderr, flush=True)
         server.shutdown()
+    except Exception as exc:  # noqa: BLE001 — want the trace in the log
+        tb = traceback.format_exc()
+        try:
+            _log_buffer.error("fatal", f"serve_forever crashed: {exc}\n{tb}")
+        except Exception:
+            pass
+        print(f"[fatal] serve_forever crashed: {exc}\n{tb}", file=sys.stderr, flush=True)
+        raise
