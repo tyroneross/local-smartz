@@ -419,7 +419,7 @@ def _build_subagent_specs(
     overrides via ``global_config.agent_models`` + profile defaults). The
     main agent uses ``task()`` to delegate; each subagent sees only its
     scoped tools — a cleaner replacement for the pre-migration
-    ``agent_focus_prompt`` prompt-injection hack.
+    prompt-injection hack that broadcast role focus via the system prompt.
     """
     specs: list[dict] = []
     for role_name, meta in AGENT_ROLES.items():
@@ -549,8 +549,8 @@ def create_agent(
     # 1. Focus mode (``focus_agent`` set): scope the MAIN agent's tools to just
     #    the role's whitelist + replace the system prompt with the role's
     #    system_focus. No subagents — the role IS the main agent. This blocks
-    #    tool-name hallucinations (the old ``agent_focus_prompt`` hack left
-    #    the full flat tool set accessible, which is how we got
+    #    tool-name hallucinations (the old prompt-injection hack left the
+    #    full flat tool set accessible, which is how we got
     #    ``repo_browser.write_todos`` bugs in qwen3:8b).
     # 2. Multi-agent mode (default): main agent keeps its full tool set and
     #    ``task()`` delegation. Subagents are built from AGENT_ROLES with
