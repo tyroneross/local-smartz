@@ -1,9 +1,17 @@
 import SwiftUI
 
 /// Sheet launched from the toolbar Model picker so the user can install a
-/// new Ollama model without leaving the Research view. Lists curated models
-/// with RAM-fit chips and a free-text field for any ``model:tag`` that
-/// Ollama accepts (e.g. new Gemma, Mistral, or NVIDIA Nemotron releases).
+/// new Ollama model without leaving the Research view.
+///
+/// Sections:
+/// 1. **Popular on Ollama** — live top-10 from `ollama.com/search`, fetched
+///    via `/api/models/library`. Deduped by family so newer releases
+///    (gemma4, gemma3n) replace their predecessors. Refresh button forces
+///    a live fetch bypassing the 24h cache.
+/// 2. **Recommended for Local Smartz** — the 4 load-bearing models
+///    (profile planning + execution defaults + heavy-tier alternatives).
+///    Fetched from `/api/models/catalog`.
+/// 3. **Pull any model by name** — free-text for the long tail.
 struct InstallModelSheet: View {
     let backendBaseURL: String
     /// Called after a successful install so the caller can refresh its
@@ -32,23 +40,43 @@ struct InstallModelSheet: View {
                     .padding(.top, 10)
             }
 
-            // Curated list
             List {
+                // ── Popular on Ollama ────────────────────────────────
                 Section {
-                    if filteredModels.isEmpty && !vm.loading {
-                        Text("No matches — try the custom name field below.")
+                    if vm.popular.isEmpty && vm.libraryLoading {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Fetching from ollama.com…")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if vm.popular.isEmpty {
+                        Text("Couldn't reach ollama.com — use the curated list below or type a name.")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
-                    }
-                    ForEach(filteredModels) { model in
-                        row(model)
+                    } else {
+                        ForEach(filteredPopular) { model in
+                            libraryRow(model)
+                        }
                     }
                 } header: {
-                    Text("Curated Ollama models")
-                        .font(.system(size: 11).smallCaps())
-                        .foregroundStyle(.secondary)
+                    popularHeader
                 }
 
+                // ── Recommended for Local Smartz ────────────────────
+                if !vm.curated.isEmpty {
+                    Section {
+                        ForEach(filteredCurated) { model in
+                            curatedRow(model)
+                        }
+                    } header: {
+                        Text("Recommended for Local Smartz profiles")
+                            .font(.system(size: 11).smallCaps())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                // ── Pull any model by name ─────────────────────────
                 Section {
                     customPullRow
                 } header: {
@@ -62,7 +90,7 @@ struct InstallModelSheet: View {
             Divider()
             footer
         }
-        .frame(width: 620, height: 560)
+        .frame(width: 680, height: 620)
         .task {
             await vm.refresh(base: backendBaseURL)
             await loadRAM()
@@ -84,13 +112,34 @@ struct InstallModelSheet: View {
             TextField("Filter…", text: $filter)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 180)
-            Button("Refresh") {
-                Task { await vm.refresh(base: backendBaseURL) }
-            }
-            .disabled(vm.loading)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
+    }
+
+    private var popularHeader: some View {
+        HStack(spacing: 8) {
+            Text("Popular on Ollama")
+                .font(.system(size: 11).smallCaps())
+                .foregroundStyle(.secondary)
+            if let fetched = vm.libraryFetchedAt {
+                Text("·")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Text(formatFetched(fetched, source: vm.librarySource))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                Task { await vm.refreshLibrary(base: backendBaseURL, forceFresh: true) }
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .disabled(vm.libraryLoading)
+        }
     }
 
     // MARK: - Footer
@@ -124,7 +173,7 @@ struct InstallModelSheet: View {
     private var customPullRow: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                TextField("e.g. gemma3:27b, nemotron:70b, mistral:7b", text: $customName)
+                TextField("e.g. gemma4:e4b, qwen3.5:14b, mistral:7b", text: $customName)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12, design: .monospaced))
                     .disableAutocorrection(true)
@@ -132,7 +181,7 @@ struct InstallModelSheet: View {
                 Button("Install") { submitCustom() }
                     .disabled(customTrimmed.isEmpty || vm.busyModel == customTrimmed)
             }
-            Text("Any Ollama model name works. Find more at ollama.com/library.")
+            Text("Any Ollama model name works. Size tags default to :latest if omitted.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             if let progress = vm.pullProgress[customTrimmed],
@@ -164,20 +213,116 @@ struct InstallModelSheet: View {
 
     // MARK: - Filter
 
-    private var filteredModels: [InstallCatalogModel] {
+    private var filteredPopular: [LibraryModel] {
         let q = filter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if q.isEmpty { return vm.catalog }
-        return vm.catalog.filter { m in
+        if q.isEmpty { return vm.popular }
+        return vm.popular.filter { m in
+            m.name.lowercased().contains(q)
+                || m.capabilities.contains(where: { $0.lowercased().contains(q) })
+                || m.sizes.contains(where: { $0.lowercased().contains(q) })
+        }
+    }
+
+    private var filteredCurated: [InstallCatalogModel] {
+        let q = filter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if q.isEmpty { return vm.curated }
+        return vm.curated.filter { m in
             m.name.lowercased().contains(q)
                 || (m.note ?? "").lowercased().contains(q)
                 || (m.ramClass ?? "").lowercased().contains(q)
         }
     }
 
-    // MARK: - Row
+    // MARK: - Popular row
 
     @ViewBuilder
-    private func row(_ model: InstallCatalogModel) -> some View {
+    private func libraryRow(_ model: LibraryModel) -> some View {
+        let targetName = model.name  // pulls default tag
+        let isInstalling = vm.busyModel == targetName || vm.pullProgress[targetName] != nil
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(model.name)
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                // Newer-than-30-days gets a subtle NEW badge.
+                if (model.updatedDays ?? 999) <= 30 {
+                    Text("NEW")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.green)
+                }
+                Spacer()
+                if !model.pullsRaw.isEmpty {
+                    Text(model.pullsRaw + " pulls")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                if isInstalling {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Install") {
+                        Task {
+                            await vm.pull(base: backendBaseURL, model: targetName)
+                            if vm.pullProgress[targetName] == "Downloaded ✓" {
+                                onInstalled(targetName)
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+
+            // Capabilities + sizes — text-only per Calm Precision rule 9
+            // (no badge pills, color encodes meaning).
+            HStack(spacing: 6) {
+                ForEach(model.capabilities, id: \.self) { cap in
+                    Text(cap)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(capabilityColor(cap))
+                }
+                if !model.capabilities.isEmpty && !model.sizes.isEmpty {
+                    Text("·")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                if !model.sizes.isEmpty {
+                    Text(model.sizes.prefix(5).joined(separator: ", "))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if !model.updated.isEmpty {
+                    Text(model.updated)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let progress = vm.pullProgress[targetName],
+               vm.busyModel == targetName {
+                Text(progress)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func capabilityColor(_ cap: String) -> Color {
+        switch cap.lowercased() {
+        case "tools": return .indigo
+        case "vision": return .purple
+        case "thinking": return .blue
+        case "audio": return .teal
+        case "embedding": return .gray
+        default: return .secondary
+        }
+    }
+
+    // MARK: - Curated row
+
+    @ViewBuilder
+    private func curatedRow(_ model: InstallCatalogModel) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Text(model.name)
@@ -255,6 +400,21 @@ struct InstallModelSheet: View {
             .foregroundStyle(color)
     }
 
+    // MARK: - "Fetched X ago" label
+
+    private func formatFetched(_ unix: Double, source: String) -> String {
+        let age = Date().timeIntervalSince(Date(timeIntervalSince1970: unix))
+        let phrase: String
+        if age < 60 { phrase = "just now" }
+        else if age < 3600 { phrase = "\(Int(age / 60))m ago" }
+        else if age < 86400 { phrase = "\(Int(age / 3600))h ago" }
+        else { phrase = "\(Int(age / 86400))d ago" }
+        if source == "stale-fallback" {
+            return "cached (offline) \(phrase)"
+        }
+        return phrase
+    }
+
     // MARK: - RAM
 
     private func loadRAM() async {
@@ -275,8 +435,34 @@ struct InstallModelSheet: View {
     }
 }
 
-// MARK: - Model
+// MARK: - Models
 
+/// Live popular-on-Ollama entry from ``/api/models/library``. Dedup'd by
+/// family on the server, so a single row represents the most-recent
+/// gemma4 / qwen3.5 / llama3.3 family head rather than multiple versions.
+struct LibraryModel: Decodable, Identifiable {
+    let name: String
+    let family: String?
+    let pulls: Int?
+    let pullsRaw: String
+    let sizes: [String]
+    let capabilities: [String]
+    let updated: String
+    let updatedDays: Int?
+    let quantizationHint: String?
+
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name, family, pulls, sizes, capabilities, updated
+        case pullsRaw = "pulls_raw"
+        case updatedDays = "updated_days"
+        case quantizationHint = "quantization_hint"
+    }
+}
+
+/// Curated fallback entry from ``/api/models/catalog``. Four load-bearing
+/// models (the actual profile defaults) — not a hand-maintained Top-N.
 struct InstallCatalogModel: Decodable, Identifiable {
     let name: String
     let sizeGBEstimate: Double
@@ -299,34 +485,74 @@ struct InstallCatalogModel: Decodable, Identifiable {
 
 @MainActor
 final class InstallModelViewModel: ObservableObject {
-    @Published var catalog: [InstallCatalogModel] = []
+    @Published var popular: [LibraryModel] = []
+    @Published var librarySource: String = ""
+    @Published var libraryFetchedAt: Double?
+    @Published var libraryLoading = false
+
+    @Published var curated: [InstallCatalogModel] = []
     @Published var loading = false
     @Published var error: String?
     @Published var busyModel: String?
     @Published var pullProgress: [String: String] = [:]
 
+    /// Both lists in parallel so the sheet renders at once.
     func refresh(base: String) async {
-        loading = true
-        defer { loading = false }
-        error = nil
-        guard let url = URL(string: "\(base)/api/models/catalog") else {
-            error = "Bad backend URL"
-            return
-        }
+        async let live: Void = refreshLibrary(base: base, forceFresh: false)
+        async let curatedLoad: Void = refreshCurated(base: base)
+        _ = await (live, curatedLoad)
+    }
+
+    func refreshLibrary(base: String, forceFresh: Bool) async {
+        libraryLoading = true
+        defer { libraryLoading = false }
+
+        var comps = URLComponents(string: "\(base)/api/models/library")
+        var items: [URLQueryItem] = [
+            URLQueryItem(name: "limit", value: "10"),
+            URLQueryItem(name: "capability", value: "tools"),
+        ]
+        if forceFresh { items.append(URLQueryItem(name: "refresh", value: "1")) }
+        comps?.queryItems = items
+        guard let url = comps?.url else { return }
+
         struct Resp: Decodable {
-            let catalog: [InstallCatalogModel]
+            let source: String
+            let fetched_at: Double?
+            let entries: [LibraryModel]
         }
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             let decoded = try JSONDecoder().decode(Resp.self, from: data)
-            catalog = decoded.catalog
+            popular = decoded.entries
+            librarySource = decoded.source
+            libraryFetchedAt = decoded.fetched_at
+        } catch {
+            // Non-fatal — the curated fallback section will still render.
+            popular = []
+        }
+    }
+
+    private func refreshCurated(base: String) async {
+        loading = true
+        defer { loading = false }
+        guard let url = URL(string: "\(base)/api/models/catalog") else {
+            error = "Bad backend URL"
+            return
+        }
+        struct Resp: Decodable { let catalog: [InstallCatalogModel] }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoded = try JSONDecoder().decode(Resp.self, from: data)
+            curated = decoded.catalog
         } catch {
             self.error = "Could not load catalog: \(error.localizedDescription)"
         }
     }
 
-    /// Streams `ollama pull` progress via /api/models/pull (SSE). Updates
-    /// `pullProgress[model]` per emitted line.
+    /// Streams Ollama pull progress via /api/models/pull (SSE). The backend
+    /// now emits structured `{status, digest, total, completed, percent}`
+    /// chunks — use percent when present, else the status string.
     func pull(base: String, model: String) async {
         guard let url = URL(string: "\(base)/api/models/pull") else { return }
         busyModel = model
@@ -343,19 +569,29 @@ final class InstallModelViewModel: ObservableObject {
             for try await line in stream.lines {
                 guard line.hasPrefix("data: ") else { continue }
                 let payload = String(line.dropFirst(6))
-                if let data = payload.data(using: .utf8),
-                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    if let ln = obj["line"] as? String {
-                        pullProgress[model] = ln
-                    } else if let kind = obj["type"] as? String, kind == "done" {
+                guard let data = payload.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    continue
+                }
+                if let kind = obj["type"] as? String {
+                    switch kind {
+                    case "progress":
+                        let status = obj["status"] as? String ?? ""
+                        if let percent = obj["percent"] as? Double {
+                            pullProgress[model] = "\(status) \(String(format: "%.0f", percent))%"
+                        } else {
+                            pullProgress[model] = status
+                        }
+                    case "done":
                         pullProgress[model] = "Downloaded ✓"
-                    } else if let kind = obj["type"] as? String, kind == "error",
-                              let msg = obj["message"] as? String {
-                        pullProgress[model] = "Error: \(msg)"
+                    case "error":
+                        pullProgress[model] = "Error: \(obj["message"] as? String ?? "")"
+                    default:
+                        break
                     }
                 }
             }
-            await refresh(base: base)
+            await refreshCurated(base: base)
         } catch {
             pullProgress[model] = "Error: \(error.localizedDescription)"
         }
