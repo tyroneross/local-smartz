@@ -23,21 +23,23 @@ from localsmartz.profiles import get_profile
 
 # ── Feature flag ────────────────────────────────────────────────────────
 
-def test_is_enabled_false_by_default(monkeypatch):
+def test_is_enabled_true_by_default(monkeypatch):
+    """Graph is the NEW DEFAULT. Unset env var → is_enabled() is True."""
     monkeypatch.delenv("LOCALSMARTZ_PIPELINE", raising=False)
-    assert is_enabled() is False
+    assert is_enabled() is True
 
 
 def test_is_enabled_accepts_graph_and_truthy(monkeypatch):
-    for val in ("graph", "1", "true", "yes", "on", "GRAPH", "True"):
+    for val in ("graph", "1", "true", "yes", "on", "GRAPH", "True", "", " "):
         monkeypatch.setenv("LOCALSMARTZ_PIPELINE", val)
         assert is_enabled() is True, f"expected {val!r} to enable"
 
 
-def test_is_enabled_rejects_unrelated(monkeypatch):
-    for val in ("0", "false", "deepagents", "", " "):
+def test_is_enabled_opt_out_values(monkeypatch):
+    """Legacy DeepAgents orchestrator is opt-in via explicit value."""
+    for val in ("orchestrator", "deepagents", "0", "false", "off", "no", "OFF"):
         monkeypatch.setenv("LOCALSMARTZ_PIPELINE", val)
-        assert is_enabled() is False, f"expected {val!r} to be disabled"
+        assert is_enabled() is False, f"expected {val!r} to disable"
 
 
 # ── Verdict parsing ─────────────────────────────────────────────────────
@@ -212,6 +214,173 @@ def test_hard_cap_terminates_at_max_iterations():
     assert result["final_answer"] == "best-effort answer with known gaps."
 
 
+# ── Tool-execution wiring (new in 2026-04-13 rewire) ────────────────────
+
+def test_researcher_actually_calls_web_search(monkeypatch):
+    """The researcher node, when given a real ReAct executor, must invoke
+    the bound web_search tool rather than describing what it would search.
+
+    Strategy: stub ``web_search`` to record its calls. Stub the per-role
+    LLM with a fake that emits a ``web_search`` tool call on turn 1 and a
+    final text response on turn 2 (the standard ReAct termination shape).
+    Run one researcher-node invocation through the real ``_run_role_agent``
+    path by supplying an ``agents`` dict to the graph.
+    """
+    web_search_calls: list[dict] = []
+
+    from langchain_core.tools import StructuredTool
+
+    def _ws_impl(query: str) -> str:
+        web_search_calls.append({"query": query})
+        return "Mount Everest is 8848 m. K2 is 8611 m."
+
+    fake_web_search = StructuredTool.from_function(
+        _ws_impl,
+        name="web_search",
+        description="Stub web_search — records call args and returns canned result.",
+    )
+
+    # Fake model that emits a tool call on first invocation and a text reply
+    # on the second — the minimal shape that drives a ReAct loop to termination.
+    from langchain_core.messages import AIMessage
+
+    class FakeReactModel:
+        def __init__(self) -> None:
+            self._calls = 0
+
+        def bind_tools(self, *_args, **_kwargs):
+            return self
+
+        def with_config(self, *_args, **_kwargs):
+            return self
+
+        def invoke(self, messages, *_args, **_kwargs):
+            self._calls += 1
+            if self._calls == 1:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "web_search",
+                        "args": {"query": "tallest mountains on Earth"},
+                        "id": "call_1",
+                        "type": "tool_call",
+                    }],
+                )
+            return AIMessage(content="Everest (8848m) and K2 (8611m) are the two tallest.")
+
+    # Build the role agent with stubbed tool + stubbed model. We call
+    # create_agent directly with our fake model/tools so we don't depend
+    # on the full ``_build_tool_registry`` path (which imports MCP + plugins).
+    from langchain.agents import create_agent
+    researcher_exec = create_agent(
+        FakeReactModel(),
+        tools=[fake_web_search],
+        system_prompt="researcher test",
+    )
+
+    from localsmartz.pipeline import _make_researcher_node
+    from localsmartz.profiles import get_profile
+    profile = get_profile("lite")
+    node = _make_researcher_node(profile, agents={"researcher": researcher_exec})
+
+    result = node({
+        "prompt": "what are the tallest mountains",
+        "messages": [],
+        "researcher_output": "",
+        "analyzer_output": "",
+        "fact_verdict": "",
+        "missing_facts": [],
+        "fact_check_iterations": 0,
+        "final_answer": "",
+    })
+
+    assert len(web_search_calls) >= 1, (
+        "web_search must actually be invoked by the researcher node — "
+        "describing what it would search is the exact bug we're fixing."
+    )
+    assert "Everest" in result["researcher_output"]
+
+
+def test_fact_checker_can_use_web_search(monkeypatch):
+    """Fact-checker must also have a tool-calling path. Same shape as
+    the researcher test but routed through the fact_checker role. The
+    ``_parse_fact_verdict`` step still runs on the final AI message.
+    """
+    ws_calls: list[dict] = []
+
+    from langchain_core.tools import StructuredTool
+
+    def _ws_impl(query: str) -> str:
+        ws_calls.append({"query": query})
+        return "Confirmed: Everest 8848m, K2 8611m."
+
+    fake_web_search = StructuredTool.from_function(
+        _ws_impl,
+        name="web_search",
+        description="Fact-check stub of web_search — records calls.",
+    )
+
+    from langchain_core.messages import AIMessage
+
+    class FakeFactCheckerModel:
+        def __init__(self) -> None:
+            self._calls = 0
+
+        def bind_tools(self, *_args, **_kwargs):
+            return self
+
+        def with_config(self, *_args, **_kwargs):
+            return self
+
+        def invoke(self, messages, *_args, **_kwargs):
+            self._calls += 1
+            if self._calls == 1:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "web_search",
+                        "args": {"query": "verify Everest height"},
+                        "id": "call_1",
+                        "type": "tool_call",
+                    }],
+                )
+            return AIMessage(
+                content='{"verdict": "ok", "missing_facts": []}'
+            )
+
+    from langchain.agents import create_agent
+    fact_checker_exec = create_agent(
+        FakeFactCheckerModel(),
+        tools=[fake_web_search],
+        system_prompt="fact_checker test",
+    )
+
+    from localsmartz.pipeline import _make_fact_checker_node
+    from localsmartz.profiles import get_profile
+    profile = get_profile("lite")
+    node = _make_fact_checker_node(profile, agents={"fact_checker": fact_checker_exec})
+
+    result = node({
+        "prompt": "tallest mountains",
+        "messages": [],
+        "researcher_output": "Everest 8848m",
+        "analyzer_output": "summed",
+        "fact_verdict": "",
+        "missing_facts": [],
+        "fact_check_iterations": 0,
+        "final_answer": "",
+    })
+
+    assert len(ws_calls) >= 1, (
+        "fact_checker must actually call web_search to spot-verify — "
+        "otherwise it's rubber-stamping the researcher's output."
+    )
+    # Verdict parsed correctly from the final AI message text.
+    assert result["fact_verdict"] == "ok"
+    assert result["missing_facts"] == []
+    assert result["fact_check_iterations"] == 1
+
+
 # ── Profile wiring ──────────────────────────────────────────────────────
 
 def test_role_llm_uses_profile_model(monkeypatch):
@@ -222,6 +391,11 @@ def test_role_llm_uses_profile_model(monkeypatch):
     class FakeChat:
         def __init__(self, **kwargs):
             seen_models.append(kwargs.get("model", ""))
+
+        def with_retry(self, **_kwargs):
+            # _role_llm now wraps in with_retry to match agent._create_model's
+            # timeout + retry discipline. Return self so the fake keeps working.
+            return self
 
         def invoke(self, messages):
             class _Resp:

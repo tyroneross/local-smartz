@@ -1,13 +1,12 @@
 """Deterministic LangGraph pipeline for the orchestrator-routed research flow.
 
-**Enabled only when** ``LOCALSMARTZ_PIPELINE=graph`` is set in the environment.
-The default path remains the DeepAgents ``create_deep_agent(subagents=[...])``
-pipeline in ``agent.py`` — this module is an alternate execution backend for
-users hitting unreliable re-dispatch on small local models.
+**Default backend as of 2026-04-13.** Set ``LOCALSMARTZ_PIPELINE=orchestrator``
+(or ``deepagents``) in the environment to opt out and fall back to the legacy
+prompt-driven DeepAgents path in ``agent.py``.
 
 ## What this fixes that the prompt-driven path can't
 
-The prompt-driven orchestrator (default) relies on the main-agent LLM to:
+The prompt-driven orchestrator relies on the main-agent LLM to:
 1. Emit multiple ``task()`` calls in one turn for parallel fan-out.
 2. Inspect the ``fact_checker`` return and decide to re-call ``researcher``
    with the ``missing_facts``.
@@ -24,9 +23,14 @@ all three as deterministic edges:
     ``state.missing_facts``
   - ``verdict == "needs_more"`` and iterations >= 2 → ``writer`` (cut loss)
 
-The writer always terminates the graph. Role prompts, tool lists, and
-models come from ``AGENT_ROLES`` and ``get_agent_model`` — no prompt
-duplication with the default path.
+## Tool execution
+
+Each specialist node is a real ReAct executor — ``langchain.agents.create_agent``
+(the same entry point deepagents wraps internally) bound to the role's scoped
+tool subset. Researcher actually calls ``web_search``; analyzer actually runs
+``python_exec``; fact_checker spot-verifies via ``web_search``. Tool registry
+and scoping reuse ``agent._build_tool_set`` and ``agent._scope_tools`` — no
+duplication with the DeepAgents path.
 """
 from __future__ import annotations
 
@@ -34,8 +38,10 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Callable, Literal, Optional, TypedDict
 
+import httpx
+from langchain.agents import create_agent as create_react_agent
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -56,10 +62,19 @@ MAX_FACT_CHECK_ITERATIONS = 2
 
 
 def is_enabled() -> bool:
-    """True when the env flag is set. Read each call (not cached) so tests
-    can toggle via monkeypatch without reloading the module."""
+    """True when the graph pipeline is active (NEW DEFAULT).
+
+    Semantics (read each call, not cached, so tests can toggle via monkeypatch):
+      - unset or empty → True (default is graph)
+      - "graph", "1", "true", "yes", "on" → True
+      - "orchestrator", "deepagents", "0", "false", "off", "no" → False
+
+    Anything else defaults to True to avoid silently dropping users into the
+    legacy path when a config typo happens."""
     val = os.environ.get("LOCALSMARTZ_PIPELINE", "").strip().lower()
-    return val in ("graph", "1", "true", "yes", "on")
+    if val in ("orchestrator", "deepagents", "0", "false", "off", "no"):
+        return False
+    return True
 
 
 # ── State shape ─────────────────────────────────────────────────────────
@@ -90,18 +105,41 @@ class PipelineState(TypedDict):
 
 # ── Node builders ───────────────────────────────────────────────────────
 
-def _role_llm(role: str, profile: dict) -> ChatOllama:
+def _role_llm(role: str, profile: dict):
     """Construct a ChatOllama bound to the role's configured model.
 
-    Honors per-role overrides (profile + ``global_config.agent_models``)
-    via ``get_agent_model``. Falls back to the profile planning model when
-    the role has no explicit entry.
+    Honors per-role overrides (profile + ``global_config.agent_models``) via
+    ``get_agent_model``. Falls back to the profile planning model when the
+    role has no explicit entry.
+
+    Config matches ``agent._create_model``:
+    - 600s read timeout (long report generation) with short connect/write
+      so transient network issues fail fast rather than hanging the SSE stream.
+    - ``with_retry`` on TransportError + TimeoutException — a hot-unloaded
+      model (common during model switches) re-dispatches once with jittered
+      backoff; second failure still bubbles to the SSE error path.
     """
     model_name = get_agent_model(profile, role) or profile.get("planning_model")
-    return ChatOllama(
+    llm = ChatOllama(
         model=model_name,
         temperature=0,
         num_ctx=4096,
+        client_kwargs={
+            "timeout": httpx.Timeout(
+                connect=5.0,
+                read=600.0,
+                write=30.0,
+                pool=5.0,
+            ),
+        },
+    )
+    return llm.with_retry(
+        stop_after_attempt=2,
+        wait_exponential_jitter=True,
+        retry_if_exception_type=(
+            httpx.TransportError,
+            httpx.TimeoutException,
+        ),
     )
 
 
@@ -112,15 +150,104 @@ def _role_system_prompt(role: str) -> str:
     return meta.get("system_focus", "")
 
 
+# ── Tool registry + per-role ReAct executors ────────────────────────────
+
+def _build_tool_registry(profile: dict) -> list:
+    """Assemble the flat tool list shared across all specialists.
+
+    Delegates to ``agent._build_tool_set`` to avoid duplicating the
+    profile-aware tool selection logic (lite vs full, plugin tools, MCP).
+    Plugin tools and MCP are OFF here — the graph is a tighter surface by
+    design, and MCP lifecycle (close_mcp_clients) doesn't mesh with
+    LangGraph's lifetime model yet.
+    """
+    from localsmartz.agent import _build_tool_set
+    tools, _mcp_clients = _build_tool_set(
+        profile,
+        include_plugin_tools=False,
+        include_mcp=False,
+    )
+    return tools
+
+
+def _scope_tools_for_role(all_tools: list, role: str) -> list:
+    """Return the subset of ``all_tools`` whose names appear in the role's
+    ``AGENT_ROLES[role]["tools"]`` allow-list. Reuses ``agent._scope_tools``
+    so both backends use the same filter."""
+    from localsmartz.agent import _scope_tools
+    wanted = agent_tool_names(role)
+    return _scope_tools(all_tools, wanted)
+
+
+def _build_role_agent(role: str, profile: dict, all_tools: list):
+    """Compile a ReAct executor for one role.
+
+    Uses ``langchain.agents.create_agent`` — the canonical pattern deepagents
+    wraps internally (``deepagents/graph.py`` line 12). Each specialist gets:
+
+    - Its own ChatOllama (per-role model via ``get_agent_model``)
+    - Its role-specific tool subset (no tool-name hallucination surface)
+    - Its ``system_focus`` from ``AGENT_ROLES``
+
+    Returns a CompiledStateGraph that accepts ``{"messages": [...]}`` and
+    runs the full tool-call loop until the model stops calling tools.
+    """
+    llm = _role_llm(role, profile)
+    tools = _scope_tools_for_role(all_tools, role)
+    system_prompt = _role_system_prompt(role)
+    return create_react_agent(
+        llm,
+        tools=tools,
+        system_prompt=system_prompt,
+    )
+
+
+def _extract_final_text(result: dict) -> str:
+    """Pull the last AI message's text content from a ReAct executor result.
+
+    Handles both string content and list-of-segments content (some adapters).
+    Returns empty string if no AI message is found."""
+    messages = result.get("messages", []) if isinstance(result, dict) else []
+    for msg in reversed(messages):
+        if getattr(msg, "type", None) == "ai":
+            content = getattr(msg, "content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "".join(
+                    seg.get("text", "") if isinstance(seg, dict) else str(seg)
+                    for seg in content
+                )
+    return ""
+
+
+def _run_role_agent(
+    role: str,
+    user_content: str,
+    agent_exec,
+) -> str:
+    """Invoke the compiled ReAct executor and return the assistant's final text.
+
+    This is what replaced the old tool-less ``_invoke_role`` at runtime. The
+    executor runs the full tool-call loop (researcher actually hits web_search,
+    analyzer actually runs python_exec) and returns once the LLM produces a
+    plain text response with no further tool calls.
+    """
+    result = agent_exec.invoke(
+        {"messages": [{"role": "user", "content": user_content}]}
+    )
+    return _extract_final_text(result)
+
+
 def _invoke_role(
     role: str,
     user_content: str,
     profile: dict,
 ) -> str:
-    """Single-turn LLM call for a role, bypassing DeepAgents. Returns the
-    assistant's text content. Tool calls are NOT executed here — this is a
-    minimal harness sized for deterministic routing tests and small-model
-    stability. Tool-bound specialist nodes are a future extension.
+    """Back-compat tool-less single-turn harness. Retained ONLY so the unit
+    tests in ``tests/test_pipeline.py`` that monkeypatch
+    ``pipeline._invoke_role`` continue to work. Runtime paths go through
+    ``_run_role_agent``.
     """
     llm = _role_llm(role, profile)
     messages = [
@@ -132,7 +259,6 @@ def _invoke_role(
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        # Some LangChain adapters return content as list-of-segments.
         return "".join(
             seg.get("text", "") if isinstance(seg, dict) else str(seg)
             for seg in content
@@ -186,8 +312,47 @@ def _orchestrator_entry(state: PipelineState) -> dict:
     }
 
 
-def _make_researcher_node(profile: dict):
+def _dispatch_role(
+    role: str,
+    user_content: str,
+    profile: dict,
+    agents: dict | None,
+) -> str:
+    """Unified dispatch: if a compiled ReAct executor exists in ``agents``,
+    run it (real tool-calling path). Otherwise fall back to the tool-less
+    ``_invoke_role`` — tests patch that symbol directly.
+
+    Tests that pre-date the tool-execution rewire monkeypatch
+    ``pipeline._invoke_role``; those stay green because we route through it
+    when ``agents`` is None. Runtime ``build_graph`` always supplies a
+    non-empty ``agents`` dict, so production goes through the real ReAct
+    executor every time.
+    """
+    if agents and role in agents:
+        return _run_role_agent(role, user_content, agents[role])
+    return _invoke_role(role, user_content, profile)
+
+
+def _emit_stage(sink: Optional[Callable[[dict], None]], role: str) -> None:
+    """Best-effort SSE stage event. The sink is optional — unit tests and
+    the synchronous ``run()`` helper pass None."""
+    if sink is None:
+        return
+    try:
+        sink({"type": "stage", "stage": role})
+    except Exception:
+        # Never let a broken sink take down a node. The heartbeat pulse in
+        # serve.py will still fire; the UI loses one stage label.
+        pass
+
+
+def _make_researcher_node(
+    profile: dict,
+    agents: dict | None = None,
+    sink: Optional[Callable[[dict], None]] = None,
+):
     def node(state: PipelineState) -> dict:
+        _emit_stage(sink, "researcher")
         prompt = state["prompt"]
         missing = state.get("missing_facts") or []
         if missing:
@@ -200,32 +365,43 @@ def _make_researcher_node(profile: dict):
             )
         else:
             user = prompt
-        output = _invoke_role("researcher", user, profile)
+        output = _dispatch_role("researcher", user, profile, agents)
         return {"researcher_output": output}
     return node
 
 
-def _make_analyzer_node(profile: dict):
+def _make_analyzer_node(
+    profile: dict,
+    agents: dict | None = None,
+    sink: Optional[Callable[[dict], None]] = None,
+):
     def node(state: PipelineState) -> dict:
+        _emit_stage(sink, "analyzer")
         user = (
             f"Original query: {state['prompt']}\n\n"
             "Plan the computation or aggregation needed to answer this. "
-            "Describe the steps you would run in python_exec."
+            "Run python_exec to compute actual numbers — do NOT describe "
+            "what you would compute. Return the real values."
         )
-        output = _invoke_role("analyzer", user, profile)
+        output = _dispatch_role("analyzer", user, profile, agents)
         return {"analyzer_output": output}
     return node
 
 
-def _make_fact_checker_node(profile: dict):
+def _make_fact_checker_node(
+    profile: dict,
+    agents: dict | None = None,
+    sink: Optional[Callable[[dict], None]] = None,
+):
     def node(state: PipelineState) -> dict:
+        _emit_stage(sink, "fact_checker")
         user = (
             f"Query: {state['prompt']}\n\n"
             f"Researcher findings:\n{state.get('researcher_output', '(none)')}\n\n"
             f"Analyzer plan:\n{state.get('analyzer_output', '(none)')}\n\n"
             "Return ONLY the JSON verdict specified in your instructions."
         )
-        output = _invoke_role("fact_checker", user, profile)
+        output = _dispatch_role("fact_checker", user, profile, agents)
         verdict, missing = _parse_fact_verdict(output)
         return {
             "fact_verdict": verdict,
@@ -235,8 +411,13 @@ def _make_fact_checker_node(profile: dict):
     return node
 
 
-def _make_writer_node(profile: dict):
+def _make_writer_node(
+    profile: dict,
+    agents: dict | None = None,
+    sink: Optional[Callable[[dict], None]] = None,
+):
     def node(state: PipelineState) -> dict:
+        _emit_stage(sink, "writer")
         user = (
             f"Query: {state['prompt']}\n\n"
             f"Research:\n{state.get('researcher_output', '(none)')}\n\n"
@@ -244,7 +425,7 @@ def _make_writer_node(profile: dict):
             "Synthesize the final answer following your pyramid-principle "
             "guidance (governing thought first, then key lines, then support)."
         )
-        output = _invoke_role("writer", user, profile)
+        output = _dispatch_role("writer", user, profile, agents)
         return {"final_answer": output}
     return node
 
@@ -276,10 +457,48 @@ def _after_fact_check(state: PipelineState) -> str:
 
 # ── Graph builder ───────────────────────────────────────────────────────
 
-def build_graph(profile: dict | None = None, cwd: Path | None = None):
-    """Compile the orchestrator graph. ``cwd`` accepted for parity with
-    ``agent.create_agent`` — currently unused, reserved for a future
-    checkpointer integration.
+_SPECIALIST_ROLES: tuple[str, ...] = (
+    "researcher",
+    "analyzer",
+    "fact_checker",
+    "writer",
+)
+
+
+def _build_agents_for_roles(profile: dict) -> dict:
+    """Compile one ReAct executor per specialist role, sharing a single
+    tool registry. Returns a dict ``{role: agent_executor}``. Roles whose
+    scoping returns zero tools are still compiled — the LLM can still
+    reason, it just won't have tool access (writer in particular, for
+    instance, only produces text).
+    """
+    all_tools = _build_tool_registry(profile)
+    return {
+        role: _build_role_agent(role, profile, all_tools)
+        for role in _SPECIALIST_ROLES
+    }
+
+
+def build_graph(
+    profile: dict | None = None,
+    cwd: Path | None = None,
+    *,
+    sink: Optional[Callable[[dict], None]] = None,
+    agents: dict | None = None,
+):
+    """Compile the orchestrator graph.
+
+    Args:
+        profile: Profile dict (auto-detected when None).
+        cwd: Reserved for future checkpointer integration. Unused today.
+        sink: Optional SSE event sink. When serve.py supplies one, each node
+            emits a ``{"type":"stage","stage":<role>}`` event as it enters.
+            Unit tests and the synchronous ``run()`` helper pass None.
+        agents: Pre-compiled role executors. When None, the graph is
+            tool-less and dispatches through ``_invoke_role`` — that path is
+            only used by unit tests that patch ``pipeline._invoke_role``.
+            Real runtime callers (``pipeline.run`` and ``serve._run_graph_pipeline``)
+            get a populated dict via ``_build_agents_for_roles``.
     """
     profile = profile or get_profile()
     _ = cwd  # reserved
@@ -287,10 +506,10 @@ def build_graph(profile: dict | None = None, cwd: Path | None = None):
     builder: StateGraph = StateGraph(PipelineState)
 
     builder.add_node("entry", _orchestrator_entry)
-    builder.add_node("researcher", _make_researcher_node(profile))
-    builder.add_node("analyzer", _make_analyzer_node(profile))
-    builder.add_node("fact_checker", _make_fact_checker_node(profile))
-    builder.add_node("writer", _make_writer_node(profile))
+    builder.add_node("researcher", _make_researcher_node(profile, agents, sink))
+    builder.add_node("analyzer", _make_analyzer_node(profile, agents, sink))
+    builder.add_node("fact_checker", _make_fact_checker_node(profile, agents, sink))
+    builder.add_node("writer", _make_writer_node(profile, agents, sink))
 
     builder.add_edge(START, "entry")
     # Parallel fan-out from entry.
@@ -314,11 +533,28 @@ def build_graph(profile: dict | None = None, cwd: Path | None = None):
     return builder.compile()
 
 
-def run(prompt: str, profile: dict | None = None) -> dict:
-    """Synchronous one-shot run — used by the CLI flag path. Returns the
-    final state dict. SSE-bridged invocations go through ``astream`` in
-    ``serve.py`` so stage events can fire as each node finishes."""
-    graph = build_graph(profile=profile)
+def run(
+    prompt: str,
+    profile: dict | None = None,
+    *,
+    sink: Optional[Callable[[dict], None]] = None,
+    with_agents: bool = False,
+) -> dict:
+    """Synchronous one-shot run — used by the CLI flag path and by tests.
+
+    Args:
+        prompt: The user query.
+        profile: Profile dict (auto-detected when None).
+        sink: Optional SSE sink for stage events.
+        with_agents: Default False to keep existing graph-topology tests
+            green (they monkeypatch ``_invoke_role`` directly). Set True
+            when you want the real tool-calling behavior — production code
+            paths go through ``serve._run_graph_pipeline`` which compiles
+            agents explicitly.
+    """
+    profile = profile or get_profile()
+    agents = _build_agents_for_roles(profile) if with_agents else None
+    graph = build_graph(profile=profile, sink=sink, agents=agents)
     initial: PipelineState = {
         "prompt": prompt,
         "messages": [],
@@ -348,6 +584,11 @@ __all__ = [
     "MAX_FACT_CHECK_ITERATIONS",
     "NODE_NAMES",
     "PipelineState",
+    "_build_agents_for_roles",
+    "_build_role_agent",
+    "_build_tool_registry",
+    "_run_role_agent",
+    "_scope_tools_for_role",
     "build_graph",
     "is_enabled",
     "run",
