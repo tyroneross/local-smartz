@@ -150,7 +150,7 @@ def test_web_search_mocked():
     mock_results = [
         {"title": "Test Result", "href": "https://example.com", "body": "A test result"},
     ]
-    with patch("duckduckgo_search.DDGS") as MockDDGS:
+    with patch("ddgs.DDGS") as MockDDGS:
         mock_instance = MagicMock()
         mock_instance.__enter__ = MagicMock(return_value=mock_instance)
         mock_instance.__exit__ = MagicMock(return_value=False)

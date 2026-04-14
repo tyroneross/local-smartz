@@ -24,8 +24,9 @@ dependencies = [
     "beautifulsoup4>=4.12.0",
     "lxml>=5.0.0",
     "httpx>=0.28.0",
-    # Web search
-    "duckduckgo-search>=7.0.0",
+    # Web search — `duckduckgo-search` was renamed to `ddgs` upstream (2025).
+    # Same DDGS class, same .text(query, max_results=N) surface.
+    "ddgs>=9.0",
     # OpenTelemetry — opt-in via --observe flag, but always installed so the
     # bundled DMG works without an extra pip step.
     "opentelemetry-api>=1.27.0",
