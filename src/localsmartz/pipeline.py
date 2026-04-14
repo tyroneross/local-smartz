@@ -376,9 +376,11 @@ def _make_analyzer_node(
         _emit_stage(sink, "analyzer")
         user = (
             f"Original query: {state['prompt']}\n\n"
-            "Plan the computation or aggregation needed to answer this. "
-            "Run python_exec to compute actual numbers — do NOT describe "
-            "what you would compute. Return the real values."
+            "Run python_exec to compute actual numbers driven by the query "
+            "(math, dates, unit conversions, local-file parsing). Do NOT "
+            "describe what you would compute — return the real values. "
+            "You are running in parallel with the researcher, so no prior "
+            "research is available on disk yet."
         )
         output = _dispatch_role("analyzer", user, profile, agents)
         return {"analyzer_output": output}
@@ -395,7 +397,7 @@ def _make_fact_checker_node(
         user = (
             f"Query: {state['prompt']}\n\n"
             f"Researcher findings:\n{state.get('researcher_output', '(none)')}\n\n"
-            f"Analyzer plan:\n{state.get('analyzer_output', '(none)')}\n\n"
+            f"Analyzer findings:\n{state.get('analyzer_output', '(none)')}\n\n"
             "Return ONLY the JSON verdict specified in your instructions."
         )
         output = _dispatch_role("fact_checker", user, profile, agents)
@@ -418,7 +420,7 @@ def _make_writer_node(
         user = (
             f"Query: {state['prompt']}\n\n"
             f"Research:\n{state.get('researcher_output', '(none)')}\n\n"
-            f"Analysis plan:\n{state.get('analyzer_output', '(none)')}\n\n"
+            f"Analysis:\n{state.get('analyzer_output', '(none)')}\n\n"
             "Synthesize the final answer following your pyramid-principle "
             "guidance (governing thought first, then key lines, then support)."
         )

@@ -1,6 +1,13 @@
 """Tests for hardware profile detection."""
 
-from localsmartz.profiles import get_profile, get_model, detect_profile, PROFILES
+from localsmartz.profiles import (
+    AGENT_ROLES,
+    PROFILES,
+    agent_tool_names,
+    detect_profile,
+    get_model,
+    get_profile,
+)
 
 
 def test_get_profile_full():
@@ -98,3 +105,40 @@ def test_model_override_does_not_affect_execution():
 def test_model_override_empty_string_keeps_default():
     profile = get_profile("lite", model_override="")
     assert profile["planning_model"] == PROFILES["lite"]["planning_model"]
+
+
+# ── Evidence contract (Codex finding 4) ──
+
+def test_fact_checker_can_scrape_url():
+    """Fact-checker must be able to read full pages, not just search snippets."""
+    tools = agent_tool_names("fact_checker")
+    assert "scrape_url" in tools
+    assert "web_search" in tools  # search still needed to find URLs
+
+
+def test_researcher_prompt_requires_scrape_before_cite():
+    """Researcher must scrape at least one URL before treating a finding as
+    confirmed — blocks the 'cite from search snippet' failure mode."""
+    prompt = AGENT_ROLES["researcher"]["system_focus"].lower()
+    assert "scrape" in prompt
+    assert "snippet" in prompt
+
+
+def test_fact_checker_prompt_mentions_scrape_url():
+    """Fact-checker prompt must direct the model to use scrape_url on uncertain
+    claims — otherwise the new tool just sits there unused."""
+    prompt = AGENT_ROLES["fact_checker"]["system_focus"].lower()
+    assert "scrape_url" in prompt
+
+
+# ── Analyzer contract (Codex finding 3) ──
+
+def test_analyzer_prompt_does_not_claim_prior_research_on_disk():
+    """Analyzer runs in parallel with the researcher, so the prompt must not
+    tell it to 'read prior research from disk' — that directive misled the
+    model into hallucinating missing files."""
+    prompt = AGENT_ROLES["analyzer"]["system_focus"].lower()
+    assert "prior research" not in prompt or "do not assume" in prompt or "parallel" in prompt
+    # Positive assertion: the prompt should mention the parallel-with-researcher
+    # constraint so the model knows why no research is on disk yet.
+    assert "parallel" in prompt

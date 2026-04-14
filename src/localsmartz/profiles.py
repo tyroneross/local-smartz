@@ -43,7 +43,9 @@ AGENT_ROLES = {
             "You are the RESEARCHER agent. Use web_search, scrape_url, parse_pdf, "
             "read_text_file, and read_spreadsheet to gather raw information. "
             "Do not analyze or write a report — collect sources and key findings, "
-            "save them with write_file, and stop."
+            "save them with write_file, and stop. "
+            "Do not cite a claim from a search snippet alone — scrape at least "
+            "one URL before treating a finding as confirmed."
         ),
     },
     "analyzer": {
@@ -51,9 +53,12 @@ AGENT_ROLES = {
         "summary": "Computes, calculates, and reasons over data.",
         "tools": ["python_exec", "read_file", "write_file", "ls"],
         "system_focus": (
-            "You are the ANALYZER agent. Use python_exec for ALL computation, "
-            "statistics, and data manipulation. Read prior research from disk with "
-            "read_file. Output structured findings — no narrative writing."
+            "You are the ANALYZER agent. You run in PARALLEL with the researcher, "
+            "so do NOT assume any prior research is available on disk. Use "
+            "python_exec for computations driven directly by the user's question: "
+            "math, date arithmetic, unit conversions, statistics, and parsing "
+            "local data files the user has pointed at. Output structured findings "
+            "(numbers + brief labels) — no narrative writing."
         ),
     },
     "writer": {
@@ -83,11 +88,14 @@ AGENT_ROLES = {
     "fact_checker": {
         "title": "Fact-checker",
         "summary": "Validates mid-pipeline findings; returns JSON verdict.",
-        "tools": ["read_file", "ls", "web_search"],
+        "tools": ["read_file", "ls", "web_search", "scrape_url"],
         "system_focus": (
             "You are the FACT-CHECKER agent. Read the latest researcher/analyzer "
             "output and validate it. Spot-verify any claim that looks uncertain "
-            "with web_search. Return a single JSON object with exactly this shape:\n"
+            "with web_search. When a claim still looks uncertain after a search, "
+            "use scrape_url on the most credible URL from prior research before "
+            "issuing a verdict — search snippets are not enough on their own. "
+            "Return a single JSON object with exactly this shape:\n"
             '  {"verdict": "ok" | "needs_more", "missing_facts": [string, ...]}\n'
             "Use \"needs_more\" only when there are specific, nameable gaps. "
             "Do NOT rewrite or summarize — your job is the verdict, nothing else."
