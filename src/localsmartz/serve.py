@@ -12,6 +12,7 @@ Uses stdlib http.server — no new dependencies.
 Same pattern as stratagem/ui.py.
 """
 
+import functools
 import json
 import os
 import signal
@@ -945,6 +946,25 @@ textarea::placeholder { color: var(--fg-muted); }
 </html>"""
 
 
+def _json_body(handler):
+    """Decorator: parse JSON body into a ``body`` kwarg, emit 400 on failure.
+
+    Replaces the repeated ``try: body = self._read_json_body() except
+    ValueError as e: self._json_response({"error": str(e)}, 400); return``
+    boilerplate in every POST handler.
+    """
+    @functools.wraps(handler)
+    def wrapped(self, *args, **kwargs):
+        try:
+            body = self._read_json_body()
+        except ValueError as exc:
+            self._json_response({"error": str(exc)}, 400)
+            return None
+        return handler(self, *args, body=body, **kwargs)
+
+    return wrapped
+
+
 class LocalSmartzHandler(BaseHTTPRequestHandler):
     """HTTP request handler with SSE support."""
 
@@ -1210,18 +1230,13 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         agent = params.get("agent", [None])[0]
         self._handle_research_request(prompt, thread_id, profile_name, agent)
 
-    def _handle_research_post(self):
+    @_json_body
+    def _handle_research_post(self, *, body):
         """Accept research requests as JSON for app clients."""
-        try:
-            payload = self._read_json_body()
-        except ValueError as exc:
-            self._json_response({"error": str(exc)}, 400)
-            return
-
-        prompt = payload.get("prompt")
-        thread_id = payload.get("thread_id")
-        profile_name = payload.get("profile") or self._default_profile
-        agent = payload.get("agent")  # Optional: pin to a single agent
+        prompt = body.get("prompt")
+        thread_id = body.get("thread_id")
+        profile_name = body.get("profile") or self._default_profile
+        agent = body.get("agent")  # Optional: pin to a single agent
         self._handle_research_request(prompt, thread_id, profile_name, agent)
 
     def _handle_research_request(
@@ -1725,7 +1740,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             "profile": profile["name"] if profile else "unknown",
         })
 
-    def _handle_model_select(self):
+    @_json_body
+    def _handle_model_select(self, *, body):
         """Switch the active model.
 
         Frees the old model from Ollama VRAM (``evict_model``) before
@@ -1737,11 +1753,6 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         from localsmartz.config import load_config, save_config
         from localsmartz.profiles import get_profile
 
-        try:
-            body = self._read_json_body()
-        except ValueError:
-            self._json_response({"error": "Invalid request body"}, 400)
-            return
         if not body.get("model"):
             self._json_response({"error": "No model specified"}, 400)
             return
@@ -1835,7 +1846,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             "profile": profile["name"] if profile else "unknown",
         })
 
-    def _handle_warmup_start(self):
+    @_json_body
+    def _handle_warmup_start(self, *, body):
         """POST /api/models/warmup {"model": "...", "keep_alive"?: "30m"}.
 
         Preloads a model into Ollama VRAM. Fires a background warmup so the
@@ -1843,11 +1855,6 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         Idempotent — if the model is already resident, the background call
         returns fast and state flips to 'ready'.
         """
-        try:
-            body = self._read_json_body()
-        except ValueError:
-            self._json_response({"error": "Invalid request body"}, 400)
-            return
         model = body.get("model", "").strip() if isinstance(body.get("model"), str) else ""
         if not model:
             self._json_response({"error": "No model specified"}, 400)
@@ -1878,13 +1885,9 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             snapshot = {k: dict(v) for k, v in _WARMUP_STATE.items()}
         self._json_response({"warmup": snapshot})
 
-    def _handle_model_pull(self):
+    @_json_body
+    def _handle_model_pull(self, *, body):
         """Stream SSE progress for `ollama pull <model>`."""
-        try:
-            body = self._read_json_body()
-        except ValueError:
-            self._json_response({"error": "Invalid request body"}, 400)
-            return
         model = body.get("model", "").strip() if isinstance(body.get("model"), str) else ""
         if not model:
             self._json_response({"error": "No model specified"}, 400)
@@ -2003,12 +2006,8 @@ Return ONLY the SKILL.md file content. No prose, no code fences, no explanation.
   { "name": "<kebab>", "version": "0.1.0", "description": "<>", "author": {"name": "Local Smartz user"} }
 Return ONLY the JSON, no prose, no code fences."""
 
-    def _handle_skill_refactor(self):
-        try:
-            body = self._read_json_body()
-        except ValueError:
-            self._json_response({"error": "Invalid JSON body"}, 400)
-            return
+    @_json_body
+    def _handle_skill_refactor(self, *, body):
         skill_name = (body.get("name") or "").strip()
         guidance = (body.get("guidance") or "").strip()
         if not skill_name or not guidance:
@@ -2039,12 +2038,8 @@ Return ONLY the JSON, no prose, no code fences."""
             "proposed": content.strip(),
         })
 
-    def _handle_skill_new(self):
-        try:
-            body = self._read_json_body()
-        except ValueError:
-            self._json_response({"error": "Invalid JSON body"}, 400)
-            return
+    @_json_body
+    def _handle_skill_new(self, *, body):
         name = (body.get("name") or "").strip()
         description = (body.get("description") or "").strip()
         if not name or not description:
@@ -2071,12 +2066,8 @@ Return ONLY the JSON, no prose, no code fences."""
             "plugin_json": plugin_json.strip(),
         })
 
-    def _handle_plugin_save(self):
-        try:
-            body = self._read_json_body()
-        except ValueError:
-            self._json_response({"error": "Invalid JSON body"}, 400)
-            return
+    @_json_body
+    def _handle_plugin_save(self, *, body):
         target = body.get("target_path")
         plugin_name = (body.get("plugin_name") or "").strip()
         files = body.get("files") or {}
@@ -2149,7 +2140,8 @@ Return ONLY the JSON, no prose, no code fences."""
             "models": effective_agent_models(profile),
         })
 
-    def _handle_agent_model_set(self, agent_name: str):
+    @_json_body
+    def _handle_agent_model_set(self, agent_name: str, *, body):
         """POST /api/agents/<name>/model body {"model": "..."} — persist override."""
         from localsmartz import global_config
         from localsmartz.profiles import get_profile
@@ -2165,12 +2157,6 @@ Return ONLY the JSON, no prose, no code fences."""
             self._json_response({
                 "error": f"Unknown agent '{agent_name}' for profile '{profile['name']}'",
             }, 404)
-            return
-
-        try:
-            body = self._read_json_body()
-        except ValueError as exc:
-            self._json_response({"error": str(exc)}, 400)
             return
 
         model = body.get("model")
@@ -2252,14 +2238,10 @@ Return ONLY the JSON, no prose, no code fences."""
             "folders": get_folders(cwd),
         })
 
-    def _handle_folder_add(self):
+    @_json_body
+    def _handle_folder_add(self, *, body):
         """Add a research folder."""
         from localsmartz.config import add_folder
-        try:
-            body = self._read_json_body()
-        except ValueError:
-            self._json_response({"error": "Invalid request body"}, 400)
-            return
         if not body.get("path"):
             self._json_response({"error": "No path specified"}, 400)
             return
@@ -2391,14 +2373,10 @@ Return ONLY the JSON, no prose, no code fences."""
         except Exception as e:  # noqa: BLE001
             self._json_response({"error": str(e)}, 500)
 
-    def _handle_secrets_set(self):
+    @_json_body
+    def _handle_secrets_set(self, *, body):
         from localsmartz import secrets as _secrets
         from localsmartz import log_buffer
-        try:
-            body = self._read_json_body()
-        except ValueError as e:
-            self._json_response({"error": str(e)}, 400)
-            return
         provider = body.get("provider")
         value = body.get("value")
         if not provider or not isinstance(provider, str):
@@ -2463,13 +2441,9 @@ Return ONLY the JSON, no prose, no code fences."""
 
     # ── Issue report ──
 
-    def _handle_issues_report(self):
+    @_json_body
+    def _handle_issues_report(self, *, body):
         from localsmartz import log_buffer
-        try:
-            body = self._read_json_body()
-        except ValueError as e:
-            self._json_response({"error": str(e)}, 400)
-            return
         title = (body.get("title") or "").strip()
         description = (body.get("description") or "").strip()
         include_logs = bool(body.get("include_logs"))
