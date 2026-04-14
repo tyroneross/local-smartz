@@ -150,7 +150,12 @@ PROFILES = {
                 "summary": AGENT_ROLES["planner"]["summary"],
             },
             "researcher": {
-                "model": "qwen3:8b-q4_K_M",
+                # Pinned to the 32B coder model to match analyzer/fact_checker/writer.
+                # The graph pipeline goes researcher → analyzer → fact_checker → writer;
+                # when researcher was 8B, every round paid a full 32B VRAM load on the
+                # next hop. All four roles sharing one model = zero mid-round swaps on
+                # machines that meet the full-profile RAM bar (>=64 GB).
+                "model": "qwen2.5-coder:32b-instruct-q5_K_M",
                 "summary": AGENT_ROLES["researcher"]["summary"],
             },
             "analyzer": {
