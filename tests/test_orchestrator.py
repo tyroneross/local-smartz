@@ -105,10 +105,15 @@ def test_writer_still_has_report_tools():
 
 # ── list_agents / PROFILES integration ───────────────────────────────────
 
-def test_full_profile_lists_six_agents_including_orchestrator(fake_home):
-    """list_agents should surface all 6 roles in the full profile: the old
-    5 (planner, researcher, analyzer, writer — plus reshaped fact_checker)
-    plus orchestrator. The UI uses this list to render the agent sidebar."""
+def test_full_profile_lists_five_pickable_agents_without_orchestrator(fake_home):
+    """list_agents FILTERS OUT main-agent-only roles like orchestrator.
+    The UI sidebar only shows specialists the user can reasonably focus
+    on — pinning the orchestrator would scope the main agent's tools to
+    its empty allow-list and lock out delegation.
+
+    Regression guard for the bug we hit in live UI validation where the
+    sidebar rendered 'Orchestrator' as a clickable row and picking it
+    produced an infinite 'Thinking…' with no output."""
     profile = get_profile("full")
     agents = list_agents(profile)
     names = {a["name"] for a in agents}
@@ -118,8 +123,37 @@ def test_full_profile_lists_six_agents_including_orchestrator(fake_home):
         "analyzer",
         "writer",
         "fact_checker",
-        "orchestrator",
     }
+    assert "orchestrator" not in names
+
+
+def test_focus_agent_orchestrator_is_coerced_to_none(fake_home, tmp_path, monkeypatch):
+    """If a client does pass focus_agent='orchestrator' (old UI cache,
+    stale config), create_agent must coerce it to None so the main agent
+    keeps its full tool set + subagent delegation — NOT land in focus
+    mode with an empty allow-list."""
+    from unittest.mock import MagicMock, patch
+    with patch("localsmartz.agent.ChatOllama") as mock_chat, \
+         patch("localsmartz.agent.create_deep_agent") as mock_create:
+        mock_chat.return_value = MagicMock()
+        mock_create.return_value = MagicMock()
+        from localsmartz.agent import create_agent
+        create_agent(
+            profile_name="full",
+            cwd=tmp_path,
+            focus_agent="orchestrator",  # should be coerced to None
+            include_plugin_skills=False,
+            include_plugin_tools=False,
+        )
+
+    # The multi-agent branch passes subagents=[...]; focus mode passes
+    # subagents=[]. Orchestrator should land in multi-agent.
+    call_kwargs = mock_create.call_args.kwargs
+    subagents = call_kwargs.get("subagents")
+    assert subagents is not None and len(subagents) > 0, (
+        "focus_agent='orchestrator' must coerce to multi-agent mode, "
+        "not focus mode with empty subagents"
+    )
 
 
 # ── Subagent spec exclusion ──────────────────────────────────────────────

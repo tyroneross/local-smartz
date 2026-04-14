@@ -553,6 +553,14 @@ def create_agent(
     checkpointer = SqliteSaver(checkpoint_conn)
     checkpointer.setup()  # Idempotent — creates tables if missing.
 
+    # Belt-and-braces: ignore focus_agent="orchestrator" — it's not a
+    # pickable specialist, it's the default routing behavior. A caller
+    # (old UI client, stale config) passing this value would otherwise
+    # land in focus mode with an empty tool allow-list and lock out
+    # delegation, producing infinite "Thinking…" with no output.
+    if focus_agent == "orchestrator":
+        focus_agent = None
+
     # Two modes:
     # 1. Focus mode (``focus_agent`` set): scope the MAIN agent's tools to just
     #    the role's whitelist + replace the system prompt with the role's

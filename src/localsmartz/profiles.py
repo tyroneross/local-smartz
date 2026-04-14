@@ -252,11 +252,25 @@ def list_agents(profile: dict) -> list[dict]:
     Merges per-user overrides from global_config["agent_models"] so the
     returned model field is the *effective* model used at run time.
 
-    Shape: ``[{"name", "title", "summary", "model"}, ...]``
+    Shape: ``[{"name", "title", "summary", "model", "tools"}, ...]``
+
+    **Filters out main-agent-only roles** (the orchestrator) so the UI
+    doesn't surface them as pickable focus agents. Orchestrator is the
+    default multi-agent path, not a specialist the user can pin — if it
+    appeared in the sidebar and the user clicked it, ``focus_agent="orchestrator"``
+    would reach ``create_agent``, which scopes the main agent to the
+    orchestrator's empty tool list — locking out delegation entirely and
+    producing an infinite "Thinking…" with no output.
     """
+    # Mirror of agent._MAIN_AGENT_ONLY. Duplicated here instead of imported
+    # to avoid a circular import with the agent module.
+    _MAIN_AGENT_ONLY = {"orchestrator"}
+
     overrides = _get_agent_overrides()
     out: list[dict] = []
     for name, spec in _agents_dict(profile).items():
+        if name in _MAIN_AGENT_ONLY:
+            continue
         meta = AGENT_ROLES.get(name, {})
         default_model = spec.get("model", "") if isinstance(spec, dict) else ""
         summary = ""

@@ -38,9 +38,11 @@ def fake_home(tmp_path, monkeypatch):
 def test_list_agents_full_returns_dict_with_model(fake_home):
     profile = get_profile("full")
     agents = list_agents(profile)
-    # After the orchestrator migration: planner, researcher, analyzer, writer,
-    # fact_checker (reshaped from reviewer), orchestrator (new).
-    assert len(agents) == 6
+    # list_agents filters out main-agent-only roles (orchestrator) so the UI
+    # sidebar only surfaces pickable specialists. Orchestrator runs as the
+    # main agent by default; exposing it as focus would scope the main
+    # agent's tools to [] and lock out delegation.
+    assert len(agents) == 5
     names = {a["name"] for a in agents}
     assert names == {
         "planner",
@@ -48,8 +50,8 @@ def test_list_agents_full_returns_dict_with_model(fake_home):
         "analyzer",
         "writer",
         "fact_checker",
-        "orchestrator",
     }
+    assert "orchestrator" not in names
     for a in agents:
         assert "name" in a
         assert "title" in a
