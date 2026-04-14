@@ -40,6 +40,12 @@ struct ResearchView: View {
     /// smaller model.
     @State private var pendingLargeModelQuery: String?
     @State private var pendingLargeModelSize: Double = 0
+    /// Most-recent pipeline phase label rendered by the slim
+    /// ``StatusBanner`` under the toolbar. Sourced from SSE
+    /// `stage`, `status(loading_model)`, and `tool` events;
+    /// cleared on `.done`/`.error`. Additive to the existing
+    /// ToolCallEntry breadcrumbs — OutputView is unchanged.
+    @State private var currentPhase: String? = nil
 
     private let sseClient = SSEClient()
 
@@ -60,6 +66,14 @@ struct ResearchView: View {
                 toolbar
 
                 Divider()
+
+                // Non-blocking phase indicator. Collapses to zero-height
+                // when nil so the VStack spacing is unchanged while idle.
+                StatusBanner(
+                    phase: currentPhase,
+                    model: currentModel,
+                    isStreaming: isStreaming
+                )
 
                 // L3: Content
                 if outputText.isEmpty && toolCalls.isEmpty && !isStreaming {
@@ -709,6 +723,12 @@ struct ResearchView: View {
             outputText += content
         case .tool(let name):
             toolCalls.append(ToolCallEntry(name: name, message: "", isError: false))
+            // If no phase has been set yet (no stage event has arrived),
+            // derive a provisional phase from the tool name so the banner
+            // isn't empty during the prelude.
+            if currentPhase == nil {
+                currentPhase = phaseLabel(forTool: name)
+            }
         case .toolError(let name, let message):
             toolCalls.append(ToolCallEntry(name: name, message: message, isError: true))
         case .done(let ms):
@@ -718,12 +738,14 @@ struct ResearchView: View {
             // after the final event, which leaves a stale "Thinking…".
             isStreaming = false
             appState.isResearching = false
+            currentPhase = nil
             researchTask?.cancel()
             researchTask = nil
         case .error(let message):
             errorMessage = message
             isStreaming = false
             appState.isResearching = false
+            currentPhase = nil
             researchTask?.cancel()
             researchTask = nil
         case .status(let stage, let model, _):
@@ -736,11 +758,14 @@ struct ResearchView: View {
             }
             if stage == "loading_model" {
                 appState.modelWarmup = .loading
+                let modelLabel = (model?.isEmpty == false) ? model! : "model"
+                // Surface the swap in the StatusBanner so the user sees why
+                // the stream paused without having to watch the tool list.
+                currentPhase = "⏳ Loading \(modelLabel)"
                 // Mid-stream the overlay is suppressed (would hide OutputView);
                 // drop a breadcrumb into the tool list so the user can see
                 // that the specialist swap is what the pause is about.
                 if isStreaming {
-                    let modelLabel = (model?.isEmpty == false) ? model! : "model"
                     toolCalls.append(
                         ToolCallEntry(
                             name: "loading model: \(modelLabel)",
@@ -751,6 +776,9 @@ struct ResearchView: View {
                 }
             } else if stage == "ready" {
                 appState.modelWarmup = .ready
+                // Intentionally do NOT clear currentPhase here — keep the
+                // last non-loading phase visible so the banner doesn't
+                // flicker to empty between specialist swaps.
             }
         case .heartbeat:
             // Idle keep-alive — no UI state change. The URLSession idle
@@ -768,6 +796,37 @@ struct ResearchView: View {
                     isError: false
                 )
             )
+            currentPhase = phaseLabel(forStage: name)
+        }
+    }
+
+    /// Map an orchestrator stage name to a short, human-readable phase
+    /// label for the ``StatusBanner``. Unknown stages are capitalized
+    /// rather than swallowed so new backend stages surface automatically.
+    private func phaseLabel(forStage name: String) -> String {
+        switch name {
+        case "researcher": return "🔍 Searching"
+        case "analyzer": return "🧠 Analyzing"
+        case "fact_checker": return "✅ Fact-checking"
+        case "writer": return "✍ Writing"
+        case "planner": return "📋 Planning"
+        default: return name.prefix(1).uppercased() + name.dropFirst()
+        }
+    }
+
+    /// Provisional phase label derived from a tool name — used only when
+    /// no `stage` event has arrived yet so the banner isn't empty during
+    /// the prelude of a query.
+    private func phaseLabel(forTool name: String) -> String {
+        switch name {
+        case "web_search", "scrape_url", "fetch_url":
+            return "🔍 Searching"
+        case "python_exec":
+            return "🧠 Analyzing"
+        case "create_report", "write_file":
+            return "✍ Writing"
+        default:
+            return "⏳ Working"
         }
     }
 
