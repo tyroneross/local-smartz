@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct LocalSmartzApp: App {
     @StateObject private var appState = AppState()
+    @StateObject private var projectIndex = ProjectIndex()
 
     var body: some Scene {
         WindowGroup {
@@ -14,6 +15,7 @@ struct LocalSmartzApp: App {
                 }
             }
             .environmentObject(appState)
+            .environmentObject(projectIndex)
             .frame(minWidth: 640, minHeight: 480)
         }
         .windowResizability(.contentMinSize)

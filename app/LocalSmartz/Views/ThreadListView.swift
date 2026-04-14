@@ -37,6 +37,15 @@ struct ThreadListView: View {
     let onNewThread: () -> Void
     let agents: [AgentInfo]
     @Binding var focusAgent: String?
+    let onSelectSavedQuery: (Project, SavedQuery) -> Void
+    let onDeleteProject: (Project) -> Void
+
+    @EnvironmentObject var projectIndex: ProjectIndex
+    /// Per-project lazy cache of queries.json contents. Loaded once when a
+    /// DisclosureGroup is first expanded; not live-reloaded as new queries
+    /// are appended to the current project during this session.
+    @State private var projectQueriesCache: [String: [SavedQuery]] = [:]
+    @State private var expandedProjects: Set<String> = []
 
     var body: some View {
         List(selection: $selectedThread) {
@@ -46,6 +55,18 @@ struct ThreadListView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.accentColor)
+            }
+
+            Section("Projects") {
+                if projectIndex.projects.isEmpty {
+                    Text("No projects yet")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    ForEach(projectIndex.projects) { project in
+                        projectRow(project)
+                    }
+                }
             }
 
             if !agents.isEmpty {
@@ -167,6 +188,94 @@ struct ThreadListView: View {
             .onHover { hovering = $0 }
             .onTapGesture(perform: onTap)
         }
+    }
+
+    // MARK: - Project rows
+
+    @ViewBuilder
+    private func projectRow(_ project: Project) -> some View {
+        let binding = Binding<Bool>(
+            get: { expandedProjects.contains(project.path) },
+            set: { newValue in
+                if newValue {
+                    expandedProjects.insert(project.path)
+                    if projectQueriesCache[project.path] == nil {
+                        projectQueriesCache[project.path] = Self.loadQueries(from: project.path)
+                    }
+                } else {
+                    expandedProjects.remove(project.path)
+                }
+            }
+        )
+
+        DisclosureGroup(isExpanded: binding) {
+            let queries = projectQueriesCache[project.path] ?? []
+            if queries.isEmpty {
+                Text("No queries yet")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 4)
+            } else {
+                ForEach(queries.reversed()) { saved in
+                    Button {
+                        onSelectSavedQuery(project, saved)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(Self.truncate(saved.query, max: 80))
+                                .font(.system(size: 12))
+                                .lineLimit(1)
+                                .foregroundStyle(.primary)
+                            Text(saved.timestamp, style: .relative)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 1)
+                }
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(project.name)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                Text(project.createdAt, style: .relative)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .contextMenu {
+                Button("Open in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting(
+                        [URL(fileURLWithPath: project.path)]
+                    )
+                }
+                Divider()
+                Button("Delete project", role: .destructive) {
+                    onDeleteProject(project)
+                }
+            }
+        }
+    }
+
+    private static func truncate(_ s: String, max: Int) -> String {
+        if s.count <= max { return s }
+        return String(s.prefix(max)) + "\u{2026}"
+    }
+
+    private static func loadQueries(from path: String) -> [SavedQuery] {
+        let file = URL(fileURLWithPath: path).appendingPathComponent("queries.json")
+        guard let data = try? Data(contentsOf: file) else { return [] }
+        // queries.json uses ISO8601 timestamps written by ResearchView; the
+        // top-level key is "queries".
+        struct Wrapper: Decodable { let queries: [SavedQuery] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let wrapped = try? decoder.decode(Wrapper.self, from: data) {
+            return wrapped.queries
+        }
+        return []
     }
 
     private var groupedByDate: [String: [ResearchThread]] {

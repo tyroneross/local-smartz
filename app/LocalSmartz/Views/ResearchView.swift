@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ResearchView: View {
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var projectIndex: ProjectIndex
     @StateObject private var backend = BackendManager()
 
     @State private var prompt = ""
@@ -58,6 +59,14 @@ struct ResearchView: View {
     @State private var showExistingProjectAlert = false
     @State private var lastQuery: String = ""
 
+    /// Banner shown when the main view is rendering a saved query in
+    /// read-only mode. Non-nil disables the input bar; cleared by
+    /// starting a new thread or creating a new project.
+    @State private var savedQueryBanner: String? = nil
+
+    /// Pending deletion confirmation — set by the sidebar context menu.
+    @State private var projectPendingDeletion: Project? = nil
+
     private let sseClient = SSEClient()
 
     var body: some View {
@@ -70,7 +79,13 @@ struct ResearchView: View {
                     showNewProjectSheet = true
                 },
                 agents: agents,
-                focusAgent: $focusAgent
+                focusAgent: $focusAgent,
+                onSelectSavedQuery: { project, saved in
+                    loadSavedQuery(project: project, saved: saved)
+                },
+                onDeleteProject: { project in
+                    projectPendingDeletion = project
+                }
             )
             .frame(minWidth: 220)
             .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
@@ -88,6 +103,30 @@ struct ResearchView: View {
                     model: currentModel,
                     isStreaming: isStreaming
                 )
+
+                // Read-only saved-query banner. Appears only when the
+                // sidebar loaded a past query into the main view.
+                if let banner = savedQueryBanner {
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        Text(banner)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Close") {
+                            newThread()
+                            savedQueryBanner = nil
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+                    .background(Color.secondary.opacity(0.06))
+                }
 
                 // L3: Content
                 if outputText.isEmpty && toolCalls.isEmpty && !isStreaming {
@@ -187,6 +226,7 @@ struct ResearchView: View {
             ) { url in
                 Button("Open") {
                     projectDir = url
+                    projectIndex.add(name: url.lastPathComponent, path: url)
                     newThread()
                     showNewProjectSheet = false
                     existingProjectURL = nil
@@ -197,6 +237,24 @@ struct ResearchView: View {
                 }
             } message: { _ in
                 Text("Existing queries.json and artifacts will be reused.")
+            }
+            .alert(
+                "Delete \u{0022}\(projectPendingDeletion?.name ?? "")\u{0022}?",
+                isPresented: Binding(
+                    get: { projectPendingDeletion != nil },
+                    set: { if !$0 { projectPendingDeletion = nil } }
+                ),
+                presenting: projectPendingDeletion
+            ) { project in
+                Button("Delete", role: .destructive) {
+                    confirmDeleteProject(project)
+                    projectPendingDeletion = nil
+                }
+                Button("Cancel", role: .cancel) {
+                    projectPendingDeletion = nil
+                }
+            } message: { _ in
+                Text("This removes the folder from Desktop \u{2014} saved queries will be lost.")
             }
         }
         .task {
@@ -619,6 +677,7 @@ struct ResearchView: View {
             && backend.isRunning
             && appState.ollamaStatus == .ready
             && appState.modelWarmup != .loading
+            && savedQueryBanner == nil
     }
 
     // MARK: - Warmup overlay
@@ -698,6 +757,45 @@ struct ResearchView: View {
         durationMs = nil
         errorMessage = nil
         prompt = ""
+        savedQueryBanner = nil
+    }
+
+    // MARK: - Saved query + project delete
+
+    /// Load a past query's preview into the main view in read-only mode.
+    /// Cancels any active stream so UI state is consistent.
+    private func loadSavedQuery(project: Project, saved: SavedQuery) {
+        researchTask?.cancel()
+        researchTask = nil
+        isStreaming = false
+        appState.isResearching = false
+
+        currentTitle = saved.query
+        outputText = saved.answerPreview
+        toolCalls = []
+        durationMs = nil
+        errorMessage = nil
+        prompt = ""
+        currentPhase = nil
+
+        let df = DateFormatter()
+        df.dateStyle = .short
+        df.timeStyle = .short
+        let when = df.string(from: saved.timestamp)
+        savedQueryBanner = "Viewing saved query from \(project.name) \u{00B7} \(when)"
+    }
+
+    /// Confirmed delete of a project: remove the Desktop folder, remove
+    /// the index entry, and clear active project state if needed.
+    private func confirmDeleteProject(_ project: Project) {
+        let url = URL(fileURLWithPath: project.path)
+        try? FileManager.default.removeItem(at: url)
+        projectIndex.remove(project)
+        if projectDir?.path == project.path {
+            projectDir = nil
+            savedQueryBanner = nil
+            newThread()
+        }
     }
 
     private func runResearch() {
@@ -1167,6 +1265,7 @@ struct ResearchView: View {
         }
 
         projectDir = dir
+        projectIndex.add(name: sanitized, path: dir)
         newThread()
         showNewProjectSheet = false
     }
