@@ -1,93 +1,101 @@
-# Goal: Five-item local-smartz polish (parallel)
+# Goal: Codex-audit triage (B) + Project sidebar (C) — parallel
 
 Date: 2026-04-14 (supersedes prior goal)
 Branch: main
+Base state: 3 commits ahead of origin. 442/442 pytest. Swift build clean.
 
-## Items
+## Track B — Codex audit triage (Python)
 
-### 1. Faster queries
+### B1. Normalize subagent model strings (BLOCKER — fixes CLI crash)
 
-**1a. Writer streaming audit + fix gaps.** The deepagents CLI path at `agent.py:673-700` already streams AIMessageChunk tokens via `stream_mode=["updates","messages"]`. The HTTP graph path at `serve.py:1648` also streams via `["updates","messages"]`. Verify both actually flush tokens at the writer step and close any gap where an intermediate node swallows the stream.
+**Root cause** (Codex): `_build_subagent_specs()` in `src/localsmartz/agent.py:398` passes bare Ollama model strings (`qwen3:8b-q4_K_M`) into DeepAgents, which resolves them via LangChain's `chat_models.base.py` — LangChain can't infer a provider from a bare name and raises `ValueError`.
 
-**1b. Expand `is_fast_path()` in `profiles.py`.** Current rules (≤400 chars, no research keywords, ≤2 sentence terminators) miss short factual questions like "what's the capital of Peru" when they accidentally contain a terminator or bump against the keyword list. Tighten: keep 400 char + 2 terminator caps, but positively match single-clause factual patterns ("what is", "what's", "who is", "when did", "where is", "define", "capital of", "name of") and short-circuit to true even if one research keyword appears.
+**Fix**: for every model handed to DeepAgents, either
+- (a) wrap in a prebuilt `ChatOllama` via `_create_model()` and pass the instance, OR
+- (b) prefix with `ollama:<model>` string
 
-### 2. Unified status/notifications
+Prefer (a) for consistency with the RunnableRetry rule we already enforce (no wrap before `bind_tools`). Regression test that reproduces the `ValueError` without the fix.
 
-Both CLI and Swift app already consume the SSE event taxonomy (`status`, `stage`, `tool`, `text`, `heartbeat`, `done`, `error`). Two small gaps:
+### B3. Analyzer prompt/topology fix (IMPORTANT)
 
-- **CLI**: deepagents path prints tool breadcrumbs but sits silent during writer generation. Add a 1-2 word phase label that updates in place when tokens aren't yet streaming (`⏳ Thinking` → `🔍 Searching` → `🧠 Analyzing` → `✍ Writing`). Drives off the same tool_calls + stage data the loop already sees.
-- **Swift**: mid-stream `loading_model` breadcrumb landed today but surfaces via `ToolCallEntry`. Make a lightweight `StatusBanner` view that shows the most recent phase as a non-blocking top-of-output banner, leaving OutputView untouched.
+**Mismatch**: Prompt (`profiles.py:53`) says "read prior research from disk and compute real values," but the graph runs researcher+analyzer in parallel (`pipeline.py:433`); analyzer gets only the original query. Output then labeled "plan" downstream (`pipeline.py:398`, `421`) — contradicts the prompt.
 
-### 3. New Research → project folder
+**Fix**: narrow the analyzer contract to prompt-only + local-file computation. Remove the "read prior research" directive. Rename downstream state key from "plan" / "analyzer plan" to "analysis" / "computed values." Don't reorder the graph — keeping parallel execution is the speed win.
 
-`ResearchView.swift::newThread()` currently resets in-memory state only. Extend to:
-- Open a sheet asking for project name + location (default `~/Desktop/<sanitized-name>/`)
-- Create folder with `queries.json` (history) + `artifacts/` subdir
-- Set the Swift-side `projectDir` state; pass `cwd` in the `/api/research` request body so backend uses that folder as the thread's working directory
-- Backend: `serve.py::_handle_research_request` already accepts `cwd` from body. Verify and wire.
+### B4. Evidence contract tightening (IMPORTANT)
 
-### 4. `localsmartz doctor`
+Current: `web_search` returns only snippets (`tools/web.py:227`). Researcher has `scrape_url` but no guard forces scrape before synthesis. `fact_checker` lacks `scrape_url` entirely (`profiles.py:86`), so spot verification only reads snippets.
 
-New subcommand (alternative to `--check`): runs a pass/fail matrix
-- Ollama daemon reachable
-- Required model(s) installed
-- Backend `/api/research` responds
-- SSE stream well-formed (one heartbeat arrives)
-- Fast-path query round-trips
-- Graph-mode query round-trips (full profile only)
+**Fix**:
+- Add `scrape_url` to `fact_checker` tools allow-list
+- Update researcher prompt: "Do not cite a claim based on a search snippet alone — scrape at least one URL before treating a finding as confirmed."
+- Update fact_checker prompt: "When a claim is doubtful, scrape the best URL from prior research before issuing a verdict."
 
-Each row: ✅/❌ + one-line hint on fail.
+## Track C — Project folders sidebar (Swift + minimal backend)
 
-### 5. Agent roles viewer (read-only)
+### C1. Project index persistence
 
-In the Swift Settings view, add a new `AgentsTab` that hits `GET /api/agents` (already exists, returns title/summary/model/tools) and renders each role with an expandable "System prompt" section. Read-only. Edit deferred to follow-up.
+**Schema**: `~/.localsmartz/projects.json`:
+```json
+{ "projects": [ { "name": "Peru facts", "path": "/Users/t/Desktop/peru-facts", "createdAt": "2026-04-14T19:00:00Z" } ] }
+```
+
+**Operations**:
+- Read on app launch; silently skip entries whose path no longer exists
+- Append on "Create" in the New Research sheet
+- Remove on delete
+
+### C2. Sidebar UI
+
+Extend `ThreadListView.swift`:
+- New "Projects" section above "Agents", above threads
+- Each project = `DisclosureGroup` with name header
+- Expanded: list of queries from that project's `queries.json` (compact — one line each: truncated question + timestamp)
+- Click a query → emits a callback with the query payload (delegated via closure to `ResearchView`)
+- Context menu on project: "Delete project" → confirm alert → `FileManager.removeItem` + index update
+
+### C3. Load query into OutputView
+
+When user clicks a saved query, load its question + answer into the main content area, read-only. No tool-call reconstruction (those aren't persisted in queries.json). Shows:
+- Title row: the question
+- Content: the answer text
+- Muted banner: "Viewing saved query from <project> · <timestamp>"
+- Standard input bar reappears for new queries; clicking New Research or another project resets.
+
+### C4. (deferred) Re-run button on saved queries — explicitly out of scope
 
 ## Scoring Criteria
 
 | # | Criterion | Method | Pass | Evidence |
 |---|-----------|--------|------|----------|
-| 1 | Writer streaming measurable on CLI | manual: run verbose query, watch stdout | tokens appear before full answer assembled | terminal capture |
-| 2 | `is_fast_path` expanded + tested | code: new unit tests for positive matches | `"what's the capital of Peru"` / `"who is marie curie"` → True | pytest |
-| 3 | CLI phase label updates in place | manual: CLI verbose query shows phase | updates as stages progress | terminal capture |
-| 4 | Swift `StatusBanner` renders mid-stream phase | xcodebuild succeeds + visual scan | banner visible above OutputView | IBR screenshot |
-| 5 | New Research dialog creates folder | manual: click + inspect Desktop | `~/Desktop/<name>/queries.json` exists | ls output |
-| 6 | Doctor command all-green | `localsmartz doctor` exit 0 | green matrix | terminal |
-| 7 | Agents Settings tab lists all roles | xcodebuild + visual | 5-6 AGENT_ROLES listed with prompts | IBR screenshot |
-| 8 | Full pytest suite green | `uv run pytest -q` | 430+ passed (new tests added) | pytest output |
-| 9 | Swift build | xcodebuild | BUILD SUCCEEDED | build log |
-
-## Out of scope
-
-- Edit mode for agent roles (explicit follow-up, #14 deferred)
-- Writer-streaming overhaul (already works per code; only audit needed)
-- Agent observability/tracing wiring (separate topic)
-- Full mid-stream overlay runtime test (deferred, code-correct)
-
-## Risks
-
-- CLI phase label with ANSI in-place update can glitch on terminals that lack cursor control. Fallback: plain line per phase. Detect via `sys.stdout.isatty()`.
-- `is_fast_path` over-match: a borderline multi-part question classified fast-path would miss the research loop. Mitigation: the positive pattern matching is narrow (regex anchored on first 20 chars) and still honors char/terminator caps.
-- Swift folder creation needs sandbox/file-access considerations. Using `URL(fileURLWithPath:)` under `~/Desktop/` should work with standard app permissions; if Full Disk Access is required, surface a clear error.
-- `/api/agents` response shape may need extending to include `system_focus` (today it returns tools list only) — small backend change.
+| 1 | CLI crash fixed | pytest regression | `test_build_subagent_specs_normalizes_model` passes; without fix it fails with `ValueError` | pytest output |
+| 2 | Full pytest green | `uv run pytest -q` | 442+ (new tests added) | pytest output |
+| 3 | Analyzer prompt updated; downstream labels renamed | grep | new prompt present; "plan" → "analysis"/"computed values" in pipeline.py | diff |
+| 4 | fact_checker has scrape_url | code | `profiles.py:86` entry contains scrape_url; smoke import works | diff |
+| 5 | Project index file round-trips | Swift or Python unit | new project appended + reloaded correctly | unit test OR runtime scan |
+| 6 | Sidebar Projects section renders | xcodebuild + IBR scan | new section visible with expandable row after creating project | screenshot |
+| 7 | Click saved query loads into OutputView | IBR scan or manual | question + answer render; "Viewing saved query" banner visible | screenshot |
+| 8 | Delete project removes folder + index | manual | confirm dialog → folder gone from Desktop + gone from sidebar | shell + UI check |
+| 9 | xcodebuild green | xcodebuild | BUILD SUCCEEDED | build log |
 
 ## Parallelization
 
-Four independent tracks:
+- **Track B**: pure Python (`agent.py`, `profiles.py`, pipeline.py rename, test files)
+- **Track C**: pure Swift (`ResearchView.swift`, `ThreadListView.swift`, new `ProjectIndex.swift`) + tiny backend read if needed
 
-| Track | Files | Depends on |
-|-------|-------|------------|
-| A — Python status + speed | `profiles.py`, `agent.py`, `tests/test_profiles.py`, `tests/test_agent.py` | — |
-| B — Swift status banner | `ResearchView.swift`, new `StatusBanner.swift` | — |
-| C — Project folder | `ResearchView.swift`, `ThreadListView.swift`, `BackendManager.swift`, `serve.py` (verify cwd acceptance) | — |
-| D — Doctor + agents viewer | `__main__.py` (doctor), `SettingsTabs.swift` + new `AgentsTab.swift`, `serve.py` (extend /api/agents with system_focus) | — |
+Zero file overlap. Fully parallel — dispatch as two subagents simultaneously.
 
-Tracks B and C both touch `ResearchView.swift` — that's the single coordination point. Mitigation: track B adds a top-level banner insert site, track C modifies `newThread()` and adds sheet presentation; edit sites are non-overlapping. Coordinate by landing B first, then C rebases.
+## Constraints
 
-## Commit plan
+- Zero new deps
+- Simplicity first — simple > clever if perf+reliability equal
+- Preserve today's RunnableRetry discipline (no `.with_retry()` before `create_agent` / `create_deep_agent`)
+- Small reversible commits
 
-1. Python: fast-path expand + CLI phase label (track A, one commit)
-2. Swift: StatusBanner + OutputView integration (track B)
-3. Swift: New Research project folder dialog + backend wire (track C)
-4. Python: `localsmartz doctor` (track D part 1)
-5. Swift: AgentsTab (track D part 2)
-6. Backend: extend /api/agents with system_focus (sub-commit of 5)
+## Out of scope (deferred)
+
+- Codex Finding 2 (writer streaming in graph mode) — separate cycle
+- Codex Finding 5 (file-handoff prompt cleanup) — nice-to-have, fold into B later
+- The secondary Codex finding about server preflight warmup — surface area unclear, revisit after re-running rescue with tighter scope
+- Re-run button on saved queries (C4 out of scope)
+- Pre-existing smoke harness Get Started AX-path regression (fixable with 1-line coord-click change; do after these commits)
