@@ -11,13 +11,17 @@ import pytest
 from localsmartz import serve
 
 
-class _FakeHandler:
-    """Bare minimum surface to drive _stream_research without a real socket."""
+class _FakeHandler(serve.LocalSmartzHandler):
+    """Bare minimum surface to drive _stream_research without a real socket.
+
+    Subclasses the real handler so phase helpers like ``_preflight_model``
+    resolve through inheritance, but skips the socket-bound constructor.
+    """
 
     _model_override = None
     _default_profile = "lite"
 
-    def __init__(self):
+    def __init__(self):  # noqa: D401 — intentional override
         self.events: list[dict] = []
 
     def _send_event(self, data: dict):

@@ -1252,24 +1252,18 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-    def _stream_research(
+    def _preflight_model(
         self,
-        prompt: str,
         profile_name: str | None,
-        thread_id: str | None,
-        focus_agent: str | None = None,
+        model_override: str | None,
     ):
-        """Run research agent and emit SSE events."""
-        from localsmartz.agent import (
-            create_agent,
-            extract_final_response,
-            fast_path_stream,
-        )
-        from localsmartz.observability import get_tracer
-        from localsmartz.profiles import (
-            get_profile,
-            is_fast_path,
-        )
+        """Validate Ollama is up and the configured model is available.
+
+        Returns ``(profile, model, model_override, cwd)`` on success, or
+        ``None`` if an error event was emitted and the caller must stop.
+        Emits [note] + [warmup] status events as a side effect.
+        """
+        from localsmartz.profiles import get_profile
         from localsmartz.ollama import (
             check_server,
             list_models,
@@ -1277,23 +1271,16 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             resolve_available_model,
             warmup_model,
         )
-        from localsmartz.threads import create_thread, append_entry
 
-        # Preflight: Ollama must be running
         if not check_server():
             self._send_event({
                 "type": "error",
                 "message": "Ollama not running \u2192 Start it with: ollama serve",
             })
-            return
+            return None
 
         cwd = Path.cwd()
-        model_override = LocalSmartzHandler._model_override or _saved_model_override(cwd)
 
-        # Preflight: required model must be available — fall back to the largest
-        # installed substitute if the configured model isn't pulled. Mirrors the
-        # behavior of the CLI _preflight() and /api/status. If no substitute
-        # exists either, surface the original error.
         profile = get_profile(profile_name, model_override=model_override)
         model = profile["planning_model"]
         if not model_available(model):
@@ -1307,7 +1294,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                         f"Available models: {available}"
                     ),
                 })
-                return
+                return None
             # Substitute found — switch to it for this run, surface the warning
             # as an info-style text event so the user sees what happened.
             model_override = chosen
@@ -1340,75 +1327,98 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             "warmup_ms": warm_ms,
         })
 
-        # Ensure storage
-        storage = cwd / ".localsmartz"
-        for subdir in ["threads", "artifacts", "memory", "scripts", "reports"]:
-            (storage / subdir).mkdir(parents=True, exist_ok=True)
+        return profile, model, model_override, cwd
 
-        # Create thread if specified
-        if thread_id:
-            create_thread(thread_id, str(cwd), title=prompt[:60])
+    def _run_fast_path(
+        self,
+        prompt: str,
+        profile: dict,
+        model: str,
+        model_override: str | None,
+        thread_id: str | None,
+        focus_agent: str | None,
+        cwd: Path,
+    ) -> None:
+        """Fast-path streaming: direct ChatOllama, no DeepAgents graph.
 
-        # ── Fast path ─────────────────────────────────────────────────────
-        # Trivial prompts (short, no research verbs, <=2 sentences) skip the
-        # DeepAgents graph entirely — one direct ChatOllama stream.
-        # Also taken when the user pinned the Planner agent for a trivial
-        # prompt: Planner's whole job is decomposition, and forcing a small
-        # model to emit write_todos for a one-liner triggers tool-call
-        # hallucinations like `repo_browser.write_todos`. Answer directly.
-        allow_fast_path = (
-            focus_agent is None or focus_agent == "planner"
-        )
-        if allow_fast_path and is_fast_path(prompt):
-            start_time = time.time()
-            first_text = ""
-            pulse = _HeartbeatPulse(self._send_event, interval_s=15.0)
-            pulse.start()
-            tracer = get_tracer("local-smartz.research")
-            fast_path_span_cm = tracer.start_as_current_span("research.fast_path")
-            fast_path_span = fast_path_span_cm.__enter__()
-            fast_path_span.set_attribute("routing.path", "fast_path")
-            fast_path_span.set_attribute("routing.reason", "trivial_prompt")
-            fast_path_span.set_attribute("agent.focus", focus_agent or "none")
-            fast_path_span.set_attribute("model.name", model)
-            try:
-                for event in fast_path_stream(prompt, profile, model_override=model_override):
-                    pulse.touch()
-                    try:
-                        if event.get("type") == "done":
-                            # Rewrite thread_id + duration so the client sees our wall time.
-                            self._send_event({
-                                "type": "done",
-                                "duration_ms": int((time.time() - start_time) * 1000),
-                                "thread_id": thread_id or "",
-                            })
-                            continue
-                        if event.get("type") == "text":
-                            content = event.get("content", "")
-                            if isinstance(content, str):
-                                first_text += content
-                        self._send_event(event)
-                    except (BrokenPipeError, ConnectionResetError):
-                        # Client disconnected — stop pulling tokens immediately.
-                        break
-            finally:
-                pulse.stop()
-                fast_path_span_cm.__exit__(None, None, None)
+        Owns its heartbeat pulse + OTel span. Exits cleanly on
+        BrokenPipeError without draining remaining tokens.
+        """
+        from localsmartz.agent import fast_path_stream
+        from localsmartz.observability import get_tracer
+        from localsmartz.threads import append_entry
 
-            # Best-effort thread append — mirrors the full-path behavior.
-            if thread_id:
+        start_time = time.time()
+        first_text = ""
+        pulse = _HeartbeatPulse(self._send_event, interval_s=15.0)
+        pulse.start()
+        tracer = get_tracer("local-smartz.research")
+        fast_path_span_cm = tracer.start_as_current_span("research.fast_path")
+        fast_path_span = fast_path_span_cm.__enter__()
+        fast_path_span.set_attribute("routing.path", "fast_path")
+        fast_path_span.set_attribute("routing.reason", "trivial_prompt")
+        fast_path_span.set_attribute("agent.focus", focus_agent or "none")
+        fast_path_span.set_attribute("model.name", model)
+        try:
+            for event in fast_path_stream(prompt, profile, model_override=model_override):
+                pulse.touch()
                 try:
-                    append_entry(
-                        thread_id=thread_id,
-                        cwd=str(cwd),
-                        query=prompt,
-                        summary=first_text[:500],
-                        artifacts=[],
-                        turns=1,
-                    )
-                except Exception:
-                    pass
-            return
+                    if event.get("type") == "done":
+                        # Rewrite thread_id + duration so the client sees our wall time.
+                        self._send_event({
+                            "type": "done",
+                            "duration_ms": int((time.time() - start_time) * 1000),
+                            "thread_id": thread_id or "",
+                        })
+                        continue
+                    if event.get("type") == "text":
+                        content = event.get("content", "")
+                        if isinstance(content, str):
+                            first_text += content
+                    self._send_event(event)
+                except (BrokenPipeError, ConnectionResetError):
+                    # Client disconnected — stop pulling tokens immediately.
+                    break
+        finally:
+            pulse.stop()
+            fast_path_span_cm.__exit__(None, None, None)
+
+        # Best-effort thread append — mirrors the full-path behavior.
+        if thread_id:
+            try:
+                append_entry(
+                    thread_id=thread_id,
+                    cwd=str(cwd),
+                    query=prompt,
+                    summary=first_text[:500],
+                    artifacts=[],
+                    turns=1,
+                )
+            except Exception:
+                pass
+
+    def _run_full_agent(
+        self,
+        prompt: str,
+        profile_name: str | None,
+        model: str,
+        model_override: str | None,
+        thread_id: str | None,
+        focus_agent: str | None,
+        cwd: Path,
+    ) -> None:
+        """Full DeepAgents graph streaming.
+
+        Owns its heartbeat pulse + OTel span, drift + loop detectors,
+        turn-count enforcement, tool-name validator, and MCP client
+        cleanup. Exits cleanly on BrokenPipeError and skips the
+        post-stream ``invoke`` + ``done`` event when the client is gone.
+        """
+        from localsmartz.agent import create_agent, extract_final_response
+        from localsmartz.observability import get_tracer
+        from localsmartz.threads import append_entry
+        from localsmartz.validation import LoopDetector
+        from localsmartz.drift import create_drift_detector
 
         # Focus mode: create_agent now scopes the main agent's tools + swaps
         # system prompt (see agent.create_agent focus-mode branch). The
@@ -1428,11 +1438,9 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         input_msg = {"messages": [{"role": "user", "content": prompt}]}
 
         start_time = time.time()
-        tools_used = set()
+        tools_used: set[str] = set()
 
         # Lite profile: loop detection and turn limits
-        from localsmartz.validation import LoopDetector
-        from localsmartz.drift import create_drift_detector
         is_lite = profile["name"] == "lite"
         max_turns = profile.get("max_turns", 20)
         loop_detector = LoopDetector(max_repeats=3)
@@ -1636,6 +1644,69 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             if mcp_clients:
                 from localsmartz.plugins.agent_integration import close_mcp_clients
                 close_mcp_clients(mcp_clients)
+
+    def _stream_research(
+        self,
+        prompt: str,
+        profile_name: str | None,
+        thread_id: str | None,
+        focus_agent: str | None = None,
+    ):
+        """Run research agent and emit SSE events.
+
+        Orchestrates three phases:
+        1. ``_preflight_model`` — Ollama + model availability + warmup.
+        2. ``_run_fast_path`` — trivial prompts, direct ChatOllama stream.
+        3. ``_run_full_agent`` — DeepAgents graph with multi-mode streaming.
+        """
+        from localsmartz.profiles import is_fast_path
+        from localsmartz.threads import create_thread
+
+        model_override = LocalSmartzHandler._model_override or _saved_model_override(Path.cwd())
+
+        preflight = self._preflight_model(profile_name, model_override)
+        if preflight is None:
+            return
+        profile, model, model_override, cwd = preflight
+
+        # Ensure storage
+        storage = cwd / ".localsmartz"
+        for subdir in ["threads", "artifacts", "memory", "scripts", "reports"]:
+            (storage / subdir).mkdir(parents=True, exist_ok=True)
+
+        # Create thread if specified
+        if thread_id:
+            create_thread(thread_id, str(cwd), title=prompt[:60])
+
+        # ── Fast path ─────────────────────────────────────────────────────
+        # Trivial prompts (short, no research verbs, <=2 sentences) skip the
+        # DeepAgents graph entirely — one direct ChatOllama stream.
+        # Also taken when the user pinned the Planner agent for a trivial
+        # prompt: Planner's whole job is decomposition, and forcing a small
+        # model to emit write_todos for a one-liner triggers tool-call
+        # hallucinations like `repo_browser.write_todos`. Answer directly.
+        allow_fast_path = focus_agent is None or focus_agent == "planner"
+        if allow_fast_path and is_fast_path(prompt):
+            self._run_fast_path(
+                prompt=prompt,
+                profile=profile,
+                model=model,
+                model_override=model_override,
+                thread_id=thread_id,
+                focus_agent=focus_agent,
+                cwd=cwd,
+            )
+            return
+
+        self._run_full_agent(
+            prompt=prompt,
+            profile_name=profile_name,
+            model=model,
+            model_override=model_override,
+            thread_id=thread_id,
+            focus_agent=focus_agent,
+            cwd=cwd,
+        )
 
     def _handle_models(self):
         """Return available Ollama models with current selection."""
