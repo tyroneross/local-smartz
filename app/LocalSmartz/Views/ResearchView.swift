@@ -491,15 +491,77 @@ struct ResearchView: View {
     private var emptyState: some View {
         VStack(spacing: 12) {
             Spacer()
-            Image(systemName: "text.magnifyingglass")
+            Image(systemName: emptyStateIcon)
                 .font(.system(size: 32))
                 .foregroundStyle(.secondary)
             Text(emptyStateMessage)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 380)
+            // Actionable affordance when Ollama isn't ready — beats a static
+            // "Start Ollama" message with no way to act on it.
+            if let action = emptyStateAction {
+                Button(action: action.handler) {
+                    Label(action.title, systemImage: action.icon)
+                        .font(.system(size: 13, weight: .medium))
+                        .padding(.horizontal, 8)
+                }
+                .controlSize(.regular)
+                .buttonStyle(.borderedProminent)
+                .padding(.top, 4)
+                if let hint = action.hint {
+                    Text(hint)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 380)
+                }
+            }
             Spacer()
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var emptyStateIcon: String {
+        switch appState.ollamaStatus {
+        case .ready: return "text.magnifyingglass"
+        case .offline: return "exclamationmark.triangle"
+        case .needsSetup: return "arrow.down.circle"
+        case .loading, .unknown: return "hourglass"
+        }
+    }
+
+    private struct EmptyStateAction {
+        let title: String
+        let icon: String
+        let hint: String?
+        let handler: () -> Void
+    }
+
+    private var emptyStateAction: EmptyStateAction? {
+        switch appState.ollamaStatus {
+        case .offline:
+            return EmptyStateAction(
+                title: "Open Ollama install instructions",
+                icon: "arrow.up.right.square",
+                hint: "Install Ollama from ollama.com, then run `ollama serve` (or open the Ollama app).",
+                handler: {
+                    if let url = URL(string: "https://ollama.com/download") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            )
+        case .needsSetup:
+            return EmptyStateAction(
+                title: "Install a model",
+                icon: "arrow.down.circle",
+                hint: "Pull a model so the agents can run. The default is qwen3:8b-q4_K_M.",
+                handler: { showInstallSheet = true }
+            )
+        case .loading, .unknown, .ready:
+            return nil
+        }
     }
 
     // MARK: - Input bar
