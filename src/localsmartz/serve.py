@@ -1005,6 +1005,10 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_models_catalog()
         elif path == "/api/models/warmup":
             self._handle_warmup_status()
+        elif path == "/api/models/ps":
+            self._handle_models_ps()
+        elif path == "/api/models/info":
+            self._handle_model_info(parsed)
         elif path == "/api/agents":
             self._handle_agents()
         elif path == "/api/agents/models":
@@ -1793,6 +1797,36 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             "previous_model": old_model or "",
         })
 
+    def _handle_models_ps(self):
+        """GET /api/models/ps — list models currently loaded in Ollama VRAM.
+
+        Proxies Ollama's ``/api/ps`` response. The Swift app uses this to
+        show an "Active in memory" indicator separate from "pulled to disk".
+        """
+        from localsmartz.ollama import list_running_models
+
+        self._json_response({"models": list_running_models()})
+
+    def _handle_model_info(self, parsed):
+        """GET /api/models/info?name=<model> — fetch detailed metadata.
+
+        Proxies Ollama's ``/api/show`` (parameter size, quantization,
+        capabilities, template). The Models tab uses this to surface the
+        quant/tradeoff choice and to filter tool-call-capable models.
+        """
+        from localsmartz.ollama import show_model
+
+        qs = parse_qs(parsed.query)
+        model = (qs.get("name") or [""])[0].strip()
+        if not model:
+            self._json_response({"error": "missing ?name= query"}, 400)
+            return
+        info = show_model(model)
+        if info is None:
+            self._json_response({"error": f"model '{model}' not found"}, 404)
+            return
+        self._json_response(info)
+
     def _handle_models_catalog(self):
         """Return the curated catalog with installed/not-installed flags.
 
@@ -1887,7 +1921,22 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
 
     @_json_body
     def _handle_model_pull(self, *, body):
-        """Stream SSE progress for `ollama pull <model>`."""
+        """Stream SSE progress for an Ollama model pull.
+
+        Uses the HTTP ``/api/pull`` NDJSON endpoint instead of shelling out
+        to ``ollama pull``. Benefits:
+
+        - Structured progress dicts (``status``, ``digest``, ``total``,
+          ``completed``) instead of parsed stdout lines. The Swift app can
+          render a real percent bar per layer.
+        - No dependency on the ``ollama`` CLI being on PATH — only the
+          Ollama server needs to be reachable. Matters for the packaged
+          .app where users may not have the CLI installed.
+        - Timeouts + error handling live in ``stream_pull`` (httpx-based),
+          not in subprocess wrangling.
+        """
+        from localsmartz.ollama import stream_pull
+
         model = body.get("model", "").strip() if isinstance(body.get("model"), str) else ""
         if not model:
             self._json_response({"error": "No model specified"}, 400)
@@ -1896,59 +1945,60 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         self._start_sse()
         self._send_event({"type": "step", "message": f"Pulling {model}..."})
         try:
-            proc = subprocess.Popen(
-                ["ollama", "pull", model],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-        except FileNotFoundError:
-            self._send_event({"type": "error", "message": "`ollama` not on PATH"})
-            return
-        assert proc.stdout is not None
-        try:
-            for line in proc.stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                self._send_event({"type": "progress", "model": model, "line": line})
-            proc.wait()
-            if proc.returncode == 0:
-                self._send_event({"type": "done", "model": model})
-            else:
-                self._send_event({
-                    "type": "error",
-                    "message": f"ollama pull exited {proc.returncode}",
-                })
+            for chunk in stream_pull(model):
+                payload: dict = {
+                    "type": "progress",
+                    "model": model,
+                    "status": chunk.get("status", ""),
+                    # Keep ``line`` for UI code that still renders the
+                    # last status string rather than a layer bar.
+                    "line": chunk.get("status", ""),
+                }
+                digest = chunk.get("digest")
+                total = chunk.get("total")
+                completed = chunk.get("completed")
+                if isinstance(digest, str) and digest:
+                    payload["digest"] = digest
+                if isinstance(total, int) and total > 0:
+                    payload["total"] = total
+                if isinstance(completed, int) and completed >= 0:
+                    payload["completed"] = completed
+                    if isinstance(total, int) and total > 0:
+                        payload["percent"] = round(100 * completed / total, 1)
+                self._send_event(payload)
+
+                err_msg = chunk.get("error")
+                if isinstance(err_msg, str) and err_msg:
+                    self._send_event({"type": "error", "message": err_msg})
+                    return
+            self._send_event({"type": "done", "model": model})
+        except RuntimeError as exc:
+            self._send_event({"type": "error", "message": str(exc)})
         except (BrokenPipeError, ConnectionResetError):
-            proc.terminate()
+            # Client disconnected mid-pull. Ollama keeps pulling in the
+            # background — we just stop relaying.
+            return
+        except Exception as exc:  # noqa: BLE001 — surface to UI, don't crash
+            self._send_event({"type": "error", "message": f"Pull failed: {exc}"})
 
     def _handle_model_delete(self):
-        """DELETE /api/models?name=<model> — remove a model from Ollama."""
+        """DELETE /api/models?name=<model> — remove a model from Ollama.
+
+        Uses the HTTP ``/api/delete`` endpoint via ``delete_model()`` —
+        drops the ``ollama`` CLI PATH dependency and gains idempotent 404
+        handling (nothing to delete → soft success).
+        """
+        from localsmartz.ollama import delete_model
+
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
         model = (qs.get("name") or [""])[0].strip()
         if not model:
             self._json_response({"error": "No model specified (use ?name=...)"}, 400)
             return
-        try:
-            result = subprocess.run(
-                ["ollama", "rm", model],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except FileNotFoundError:
-            self._json_response({"error": "`ollama` not on PATH"}, 500)
-            return
-        except subprocess.TimeoutExpired:
-            self._json_response({"error": "`ollama rm` timed out"}, 504)
-            return
-        if result.returncode != 0:
-            self._json_response({
-                "error": f"ollama rm failed: {result.stderr.strip() or result.stdout.strip()}"
-            }, 500)
+        ok, err = delete_model(model)
+        if not ok:
+            self._json_response({"error": err or "delete failed"}, 500)
             return
         self._json_response({"ok": True, "removed": model})
 
