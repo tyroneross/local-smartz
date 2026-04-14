@@ -421,8 +421,16 @@ def _build_subagent_specs(
     scoped tools — a cleaner replacement for the pre-migration
     prompt-injection hack that broadcast role focus via the system prompt.
     """
+    # Roles that run as the MAIN agent only — never as a delegated subagent.
+    # The orchestrator is the router: it lives at the top and emits
+    # ``task()`` calls to the other roles. Adding it to ``subagents=`` would
+    # create a recursive delegation path that we don't want.
+    _MAIN_AGENT_ONLY = {"orchestrator"}
+
     specs: list[dict] = []
     for role_name, meta in AGENT_ROLES.items():
+        if role_name in _MAIN_AGENT_ONLY:
+            continue
         if "tools" not in meta:
             # Role has no explicit tool allow-list at all — skip rather
             # than inherit the flat set, so we don't re-open the
@@ -572,10 +580,24 @@ def create_agent(
         )
     else:
         subagent_specs = _build_subagent_specs(profile, tools)
+        # Substitute the orchestrator system prompt when available. The
+        # orchestrator is the top-level router — it emits ``task()`` calls
+        # in parallel for multi-facet queries and drives the fact-check
+        # loop (AGENT_ROLES["orchestrator"].system_focus). Falls back to
+        # the generic system prompt if orchestrator isn't defined
+        # (backward-compatible with older profile configs).
+        orch_meta = AGENT_ROLES.get("orchestrator")
+        if isinstance(orch_meta, dict) and orch_meta.get("system_focus"):
+            main_system_prompt = (
+                orch_meta["system_focus"]
+                + (("\n\n" + extra_system_prompt) if extra_system_prompt else "")
+            )
+        else:
+            main_system_prompt = system_prompt
         agent = create_deep_agent(
             model=model,
             tools=tools,
-            system_prompt=system_prompt,
+            system_prompt=main_system_prompt,
             backend=FilesystemBackend(root_dir=str(storage_dir), virtual_mode=True),
             checkpointer=checkpointer,
             subagents=subagent_specs if subagent_specs else None,
@@ -782,9 +804,16 @@ def review_output(
     profile: dict,
     cwd: Path | None = None,
 ) -> str | None:
-    """Run quality gate on agent output (full profile only).
+    """Run a POST-HOC quality gate on finished research output (full profile only).
 
-    Creates a separate reviewer agent that evaluates the research output.
+    This is distinct from the mid-pipeline ``fact_checker`` role in
+    ``AGENT_ROLES`` — ``fact_checker`` runs DURING the agent graph and
+    returns a structured JSON verdict that can trigger re-dispatch.
+    ``review_output`` runs AFTER the pipeline terminates and emits a
+    human-readable critique for the CLI to print. It loads the
+    ``reviewer.md`` prompt file (kept on disk for this function) and
+    does not consult ``AGENT_ROLES``.
+
     Returns the review text, or None if review not applicable.
     """
     if profile["name"] != "full":

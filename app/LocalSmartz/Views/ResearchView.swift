@@ -737,6 +737,18 @@ struct ResearchView: View {
             // Idle keep-alive — no UI state change. The URLSession idle
             // timer resets on any byte received, which is what we want.
             break
+        case .stage(let name):
+            // Orchestrator pipeline transition. Surface it as a tool-call
+            // entry so the existing OutputView tool-list UI renders the
+            // pipeline breadcrumb without a new surface. Full breadcrumb
+            // UI (Orchestrator → Researcher → …) is a follow-up.
+            toolCalls.append(
+                ToolCallEntry(
+                    name: "stage: \(name)",
+                    message: "",
+                    isError: false
+                )
+            )
         }
     }
 

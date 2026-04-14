@@ -38,9 +38,18 @@ def fake_home(tmp_path, monkeypatch):
 def test_list_agents_full_returns_dict_with_model(fake_home):
     profile = get_profile("full")
     agents = list_agents(profile)
-    assert len(agents) == 5
+    # After the orchestrator migration: planner, researcher, analyzer, writer,
+    # fact_checker (reshaped from reviewer), orchestrator (new).
+    assert len(agents) == 6
     names = {a["name"] for a in agents}
-    assert names == {"planner", "researcher", "analyzer", "writer", "reviewer"}
+    assert names == {
+        "planner",
+        "researcher",
+        "analyzer",
+        "writer",
+        "fact_checker",
+        "orchestrator",
+    }
     for a in agents:
         assert "name" in a
         assert "title" in a
@@ -175,8 +184,11 @@ def test_multi_agent_mode_passes_scoped_subagents(fake_home, tmp_path):
     subagents = call_kwargs.get("subagents") or []
     by_name = {s["name"]: s for s in subagents}
 
-    # All five roles from AGENT_ROLES should be present as subagents.
-    assert {"planner", "researcher", "analyzer", "writer", "reviewer"} <= set(by_name.keys())
+    # All specialist roles from AGENT_ROLES should be present as subagents
+    # (the orchestrator runs as the MAIN agent, not as a subagent, so it's
+    # absent from this list).
+    assert {"planner", "researcher", "analyzer", "writer", "fact_checker"} <= set(by_name.keys())
+    assert "orchestrator" not in by_name  # main-agent role, not a subagent
 
     # Per-agent tool scoping — the list here is the CUSTOM tool overlay that
     # sits on top of DeepAgents' always-on middleware tools (write_todos,

@@ -1580,6 +1580,28 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                                 turn_count += 1
                                 self._send_event({"type": "tool", "name": name})
 
+                                # Stage tracking — when the orchestrator
+                                # delegates via the DeepAgents ``task`` tool,
+                                # surface the target role so the UI can
+                                # render pipeline transitions (Researcher →
+                                # Fact-checker → Writer). OTel mirror for
+                                # Phoenix trace correlation.
+                                if name == "task":
+                                    _args = tc.get("args") or {}
+                                    if isinstance(_args, dict):
+                                        stage = _args.get("subagent_type")
+                                        if isinstance(stage, str) and stage:
+                                            self._send_event({
+                                                "type": "stage",
+                                                "stage": stage,
+                                            })
+                                            try:
+                                                full_span.set_attribute(
+                                                    "pipeline.stage", stage
+                                                )
+                                            except Exception:
+                                                pass
+
                                 # Loop detection
                                 if is_lite and loop_detector.record(name, tc.get("args")):
                                     self._send_event({

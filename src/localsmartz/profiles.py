@@ -58,22 +58,61 @@ AGENT_ROLES = {
     },
     "writer": {
         "title": "Writer",
-        "summary": "Composes the final report or answer.",
+        "summary": "Composes the final report or answer using pyramid principle.",
         "tools": ["create_report", "create_spreadsheet", "read_file", "ls"],
+        # Pyramid-principle short-form is baked directly into the prompt —
+        # Claude Code skills can't be invoked mid-turn by a Python agent
+        # (DeepAgents' SkillsMiddleware injects only at startup). Lead with
+        # the governing thought so the reader gets the answer first.
         "system_focus": (
-            "You are the WRITER agent. Compose the final user-facing answer or report. "
-            "Use create_report when the user wants a deliverable. Pull facts from prior "
-            "files via read_file. Do not run new searches or computations."
+            "You are the WRITER agent. Compose the final user-facing answer. "
+            "Use pyramid-principle short-form: 1) lead with the GOVERNING THOUGHT "
+            "(one sentence answering the user's question directly); 2) follow with "
+            "2–4 MECE KEY LINES (mutually exclusive, collectively exhaustive); "
+            "3) provide SUPPORT (numbers, sources, caveats) under each key line. "
+            "Use create_report for deliverables. Pull facts via read_file. "
+            "Do not run new searches or computations."
         ),
     },
-    "reviewer": {
-        "title": "Reviewer",
-        "summary": "Critiques the output for accuracy and clarity.",
-        "tools": ["read_file", "ls"],
+    # Mid-pipeline fact-checker (reshaped from the former ``reviewer`` role
+    # per the design decision to collapse the two). Returns a structured
+    # JSON verdict the orchestrator can act on — this is what enables the
+    # re-dispatch loop (``needs_more`` → bounce back to researcher with the
+    # missing facts). Keeps read-only tools plus web_search so it can
+    # spot-verify claims instead of trusting prior research.
+    "fact_checker": {
+        "title": "Fact-checker",
+        "summary": "Validates mid-pipeline findings; returns JSON verdict.",
+        "tools": ["read_file", "ls", "web_search"],
         "system_focus": (
-            "You are the REVIEWER agent. Read the most recent answer or report and "
-            "produce a critique: factual issues, missing context, unclear claims, "
-            "structural problems. Do not rewrite — review and recommend."
+            "You are the FACT-CHECKER agent. Read the latest researcher/analyzer "
+            "output and validate it. Spot-verify any claim that looks uncertain "
+            "with web_search. Return a single JSON object with exactly this shape:\n"
+            '  {"verdict": "ok" | "needs_more", "missing_facts": [string, ...]}\n'
+            "Use \"needs_more\" only when there are specific, nameable gaps. "
+            "Do NOT rewrite or summarize — your job is the verdict, nothing else."
+        ),
+    },
+    # The orchestrator IS the main agent when no focus is pinned. Terse
+    # by design (≤ 180 tokens) — qwen3:8b hallucinates tool names when the
+    # system prompt grows. No tools of its own; it only routes via ``task``.
+    "orchestrator": {
+        "title": "Orchestrator",
+        "summary": "Routes queries; decides direct answer vs specialist delegation.",
+        "tools": [],
+        "system_focus": (
+            "You are the ORCHESTRATOR. Route the user's query:\n"
+            "- Trivial factual question → answer in 1–2 sentences, no tool calls.\n"
+            "- Single-facet question → call task(<role>) once.\n"
+            "- Multi-facet question → emit MULTIPLE task(<role>) calls in the "
+            "SAME turn for parallel execution.\n\n"
+            "After specialists return, ALWAYS call task(\"fact_checker\"). "
+            "If it returns {\"verdict\":\"needs_more\"}, call task(\"researcher\") "
+            "again with the missing_facts as your instruction (max 2 extra rounds). "
+            "Then call task(\"writer\") for the final synthesis.\n\n"
+            "Roles available: researcher (web + files), analyzer (python_exec), "
+            "fact_checker (verdict JSON), writer (pyramid-principle synthesis). "
+            "Never invent tool namespaces (no dots in tool names)."
         ),
     },
 }
@@ -122,9 +161,13 @@ PROFILES = {
                 "model": "qwen2.5-coder:32b-instruct-q5_K_M",
                 "summary": AGENT_ROLES["writer"]["summary"],
             },
-            "reviewer": {
+            "fact_checker": {
                 "model": "qwen2.5-coder:32b-instruct-q5_K_M",
-                "summary": AGENT_ROLES["reviewer"]["summary"],
+                "summary": AGENT_ROLES["fact_checker"]["summary"],
+            },
+            "orchestrator": {
+                "model": "qwen2.5-coder:32b-instruct-q5_K_M",
+                "summary": AGENT_ROLES["orchestrator"]["summary"],
             },
         },
         "max_concurrent_agents": 2,
