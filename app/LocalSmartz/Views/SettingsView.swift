@@ -152,6 +152,21 @@ private struct GeneralTab: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            Divider().padding(.vertical, 2)
+            LabeledRow("Research pipeline") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Picker("", selection: $vm.settings.pipelineBackend) {
+                        Text("Deterministic graph (default)").tag("graph")
+                        Text("Prompt-driven orchestrator").tag("orchestrator")
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    Text("Graph mode is more reliable on small models (qwen3:8b), enforcing a fact-check loop structurally. Orchestrator mode is simpler and slightly faster on trivial queries.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 }

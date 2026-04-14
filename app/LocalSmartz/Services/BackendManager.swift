@@ -126,6 +126,18 @@ class BackendManager: ObservableObject {
         } else {
             env.removeValue(forKey: "LOCALSMARTZ_OBSERVE")
         }
+        // Pipeline backend selector — propagate the user's Settings choice.
+        // Graph is the default on the Python side; we only set the env var
+        // when the user has opted out to the legacy orchestrator path so an
+        // inherited env var from a dev shell can't silently override the UI.
+        let chosenPipeline = GlobalSettings.load().pipelineBackend
+        if chosenPipeline == "orchestrator" || chosenPipeline == "deepagents" {
+            env["LOCALSMARTZ_PIPELINE"] = chosenPipeline
+        } else {
+            // "graph", empty, or anything else: let the Python default
+            // (is_enabled() → True when unset) apply. Strip inherited value.
+            env.removeValue(forKey: "LOCALSMARTZ_PIPELINE")
+        }
         // Force line-buffered output so every crash message reaches the log
         // file immediately — critical for post-mortem on silent child exits.
         env["PYTHONUNBUFFERED"] = "1"

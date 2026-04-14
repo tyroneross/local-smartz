@@ -15,6 +15,24 @@ struct GlobalSettings: Codable, Equatable {
     /// with a model whose estimated size exceeds detected system RAM.
     /// Default: true — prevents silent swap-thrashing on under-spec machines.
     var warnBeforeLargeModels: Bool = true
+    /// Which research pipeline backend to run on ``/api/research``.
+    ///
+    /// - ``"graph"`` (default) — deterministic LangGraph supervisor. Each
+    ///   specialist (researcher, analyzer, fact_checker, writer) is a real
+    ///   ReAct executor with a scoped tool subset. Hard fact-check loop
+    ///   bounded at 2 re-dispatch rounds. More reliable on small models
+    ///   (qwen3:8b) because fan-out + re-dispatch are structural edges,
+    ///   not LLM decisions.
+    /// - ``"orchestrator"`` (opt-in) — legacy prompt-driven router inside
+    ///   DeepAgents. Main agent gets the orchestrator ``system_focus`` and
+    ///   delegates to specialists via ``task()``. Simpler and slightly
+    ///   faster on trivial queries, but relies on the LLM to remember to
+    ///   fan-out and re-dispatch.
+    ///
+    /// Wired through to the backend via the ``LOCALSMARTZ_PIPELINE`` env
+    /// var when BackendManager spawns Python. "graph" or empty → do not
+    /// set (default applies). "orchestrator" → set env var to opt out.
+    var pipelineBackend: String = "graph"
 
     enum CodingKeys: String, CodingKey {
         case workspace
@@ -23,6 +41,7 @@ struct GlobalSettings: Codable, Equatable {
         case pluginPaths = "plugin_paths"
         case activeSkills = "active_skills"
         case warnBeforeLargeModels = "warn_before_large_models"
+        case pipelineBackend = "pipeline_backend"
     }
 
     init(
@@ -31,7 +50,8 @@ struct GlobalSettings: Codable, Equatable {
         activeModel: String = "",
         pluginPaths: [String] = [],
         activeSkills: [String] = [],
-        warnBeforeLargeModels: Bool = true
+        warnBeforeLargeModels: Bool = true,
+        pipelineBackend: String = "graph"
     ) {
         self.workspace = workspace
         self.pythonPath = pythonPath
@@ -39,6 +59,7 @@ struct GlobalSettings: Codable, Equatable {
         self.pluginPaths = pluginPaths
         self.activeSkills = activeSkills
         self.warnBeforeLargeModels = warnBeforeLargeModels
+        self.pipelineBackend = pipelineBackend
     }
 
     init(from decoder: Decoder) throws {
@@ -49,6 +70,7 @@ struct GlobalSettings: Codable, Equatable {
         self.pluginPaths = (try? c.decodeIfPresent([String].self, forKey: .pluginPaths)) ?? []
         self.activeSkills = (try? c.decodeIfPresent([String].self, forKey: .activeSkills)) ?? []
         self.warnBeforeLargeModels = (try? c.decodeIfPresent(Bool.self, forKey: .warnBeforeLargeModels)) ?? true
+        self.pipelineBackend = (try? c.decodeIfPresent(String.self, forKey: .pipelineBackend)) ?? "graph"
     }
 
     // MARK: - Paths
@@ -75,7 +97,8 @@ struct GlobalSettings: Codable, Equatable {
             activeModel: "",
             pluginPaths: [],
             activeSkills: [],
-            warnBeforeLargeModels: true
+            warnBeforeLargeModels: true,
+            pipelineBackend: "graph"
         )
     }
 
@@ -135,6 +158,13 @@ struct GlobalSettings: Codable, Equatable {
     /// Fill empty fields from `defaults`. The on-disk file may legitimately
     /// omit keys; we preserve explicit empty arrays but backfill empty strings
     /// for critical paths so the UI shows something useful.
+    ///
+    /// Pipeline-backend migration (2026-04-13): default flipped from
+    /// "orchestrator" to "graph". Existing users who explicitly stored
+    /// "orchestrator" on disk keep that value through this merge — only
+    /// empty or missing values get the new default. Users who never touched
+    /// the setting (absent key → decoded default "graph") also get "graph".
+    /// Net: no one is surprise-migrated off their chosen backend.
     private func mergedOverDefaults() -> GlobalSettings {
         let d = GlobalSettings.defaults
         return GlobalSettings(
@@ -143,7 +173,8 @@ struct GlobalSettings: Codable, Equatable {
             activeModel: activeModel,
             pluginPaths: pluginPaths,
             activeSkills: activeSkills,
-            warnBeforeLargeModels: warnBeforeLargeModels
+            warnBeforeLargeModels: warnBeforeLargeModels,
+            pipelineBackend: pipelineBackend.isEmpty ? d.pipelineBackend : pipelineBackend
         )
     }
 }
