@@ -4,13 +4,31 @@ struct AgentInfo: Decodable, Identifiable {
     let name: String
     let title: String
     let summary: String
+    /// Effective model for this agent (profile default + user override).
+    /// Optional because older payloads may omit it; the Settings → Agents
+    /// tab falls back to em-dash when nil.
+    let model: String?
     /// Tool allow-list for this agent — surfaced in the sidebar so users
     /// can see what each focused agent will actually call. Backend populates
     /// it from ``AGENT_ROLES[role]["tools"]`` (see profiles.list_agents).
     /// Optional in the decoder because older servers pre-e7b1baa don't
     /// include the field.
     let tools: [String]?
+    /// Full role system prompt from ``AGENT_ROLES[role]["system_focus"]``.
+    /// Optional in the decoder because older servers (pre-D2) don't send it;
+    /// the Settings → Agents tab hides the "System prompt" disclosure when
+    /// absent or empty.
+    let systemFocus: String?
     var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case title
+        case summary
+        case model
+        case tools
+        case systemFocus = "system_focus"
+    }
 }
 
 struct ThreadListView: View {

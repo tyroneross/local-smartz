@@ -292,6 +292,12 @@ def list_agents(profile: dict) -> list[dict]:
             # sidebar can render "Planner uses: write_todos" without the
             # Swift app having to know about profile internals.
             "tools": agent_tool_names(name),
+            # Full role-specific system prompt — surfaced read-only in the
+            # Settings → Agents tab so users can inspect what each agent is
+            # actually being told. Empty string when the role has no custom
+            # focus prompt (rather than None) so consumers can treat it as
+            # a plain string.
+            "system_focus": meta.get("system_focus", ""),
         })
     return out
 

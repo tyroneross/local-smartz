@@ -276,3 +276,31 @@ def test_list_agents_preserves_legacy_keys(fake_home):
         assert isinstance(a.get("name"), str)
         assert isinstance(a.get("title"), str)
         assert isinstance(a.get("summary"), str)
+
+
+# ── system_focus exposed to UI (Settings → Agents read-only viewer) ──────
+
+def test_list_agents_exposes_system_focus(fake_home):
+    """Every agent dict includes `system_focus` as a string. The Swift
+    Settings → Agents tab renders this verbatim so users can inspect the
+    role's actual system prompt without reading Python source."""
+    from localsmartz.profiles import AGENT_ROLES
+
+    profile = get_profile("full")
+    for a in list_agents(profile):
+        assert "system_focus" in a, f"{a['name']} missing system_focus"
+        assert isinstance(a["system_focus"], str)
+        # Matches the AGENT_ROLES source of truth for each exposed role.
+        expected = AGENT_ROLES.get(a["name"], {}).get("system_focus", "")
+        assert a["system_focus"] == expected
+
+
+def test_list_agents_system_focus_nonempty_for_specialists(fake_home):
+    """Specialist roles (planner/researcher/analyzer/writer/fact_checker)
+    all have a nonempty system_focus — the UI should never show a blank
+    "System prompt" section for them."""
+    profile = get_profile("full")
+    for a in list_agents(profile):
+        assert a["system_focus"].strip(), (
+            f"{a['name']} has empty system_focus — UI would render blank"
+        )
