@@ -199,25 +199,20 @@ You are Local Smartz, a local-first research assistant. You answer questions usi
 def _create_model(profile: dict, role: str, *, model_name: str | None = None) -> ChatOllama:
     """Create a ChatOllama instance for the given profile and role.
 
-    Improvements over the default ``ChatOllama()`` constructor:
+    Returns a bare ``ChatOllama`` (NOT wrapped in ``with_retry``). Wrapping
+    produces a ``RunnableRetry`` which (a) is unhashable and blows up inside
+    ``create_deep_agent``'s model cache with ``unhashable type: 'RunnableRetry'``
+    and (b) strips ``bind_tools`` so specialists silently lose their tool
+    whitelist. The same constraint is enforced in ``pipeline.py::_role_llm``.
 
-    - **Explicit client timeout** — Ollama's default httpx client has no read
-      timeout. A hung model would block the stream indefinitely. We cap
-      read at 600 s (aligned with long report-generation SSE) and keep
-      connect/write short so transient network issues fail fast instead
-      of silently stalling the UI.
-    - **Transient-error retry** — ChatOllama is wrapped in LangChain's
-      ``with_retry`` so a ``httpx.ReadError`` from a hot-unloaded model
-      (common during model switches) re-dispatches once with a jittered
-      backoff instead of killing the turn. Still bubbles up after the
-      second failure so the SSE error path fires.
+    Transient ``httpx.ReadError`` on model hot-swaps bubbles up to the SSE
+    error path; the UI's re-run is the retry.
 
-    If ``model_name`` is passed, it overrides the role lookup — used when a
-    per-agent model has been resolved upstream.
+    If ``model_name`` is passed, it overrides the role lookup.
     """
     import httpx  # local import: heavy, only needed for the timeout struct
     name = model_name or get_model(profile, role)
-    llm = ChatOllama(
+    return ChatOllama(
         model=name,
         temperature=0,  # Deterministic for reliable tool calling
         num_ctx=4096,  # Conservative context window for memory
@@ -229,14 +224,6 @@ def _create_model(profile: dict, role: str, *, model_name: str | None = None) ->
                 pool=5.0,
             ),
         },
-    )
-    return llm.with_retry(
-        stop_after_attempt=2,
-        wait_exponential_jitter=True,
-        retry_if_exception_type=(
-            httpx.TransportError,
-            httpx.TimeoutException,
-        ),
     )
 
 
