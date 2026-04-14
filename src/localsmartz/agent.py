@@ -662,6 +662,8 @@ def run_research(
     final_state = None
     tools_used = set()
     showed_thinking = False
+    phase_label_active = False
+    phase_is_tty = sys.stderr.isatty()
 
     # Immediate feedback — show "Thinking..." before LLM responds
     print("  Thinking...", end="", flush=True, file=sys.stderr)
@@ -688,6 +690,9 @@ def run_research(
                 if not showed_thinking:
                     print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
                     showed_thinking = True
+                if phase_label_active:
+                    _clear_phase_label(phase_is_tty)
+                    phase_label_active = False
                 # Stream tokens to stdout so the answer scrolls in real time.
                 print(content, end="", flush=True)
             elif isinstance(content, list):
@@ -697,6 +702,9 @@ def run_research(
                         if not showed_thinking:
                             print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
                             showed_thinking = True
+                        if phase_label_active:
+                            _clear_phase_label(phase_is_tty)
+                            phase_label_active = False
                         print(text, end="", flush=True)
             continue
 
@@ -726,7 +734,14 @@ def run_research(
                             showed_thinking = True
                         turn_count += 1
                         args_preview = _preview_args(tc.get("args", {}))
+                        # Clear any existing in-place phase label before the
+                        # breadcrumb scrolls, then print breadcrumb, then print
+                        # the new phase label in-place.
+                        if phase_label_active:
+                            _clear_phase_label(phase_is_tty)
                         print(f"  ▸ {name}({args_preview})", file=sys.stderr)
+                        _print_phase_label(_phase_for_tool(name), phase_is_tty)
+                        phase_label_active = True
 
                         # Loop detection (lite only)
                         if is_lite and loop_detector.record(name, tc.get("args")):
@@ -754,6 +769,11 @@ def run_research(
             break
         if loop_broken:
             break
+
+    # Clear any lingering phase label before summary lines scroll.
+    if phase_label_active:
+        _clear_phase_label(phase_is_tty)
+        phase_label_active = False
 
     # Clear "Thinking..." if no tools were used (simple answer)
     if not showed_thinking:
@@ -791,6 +811,48 @@ def _preview_args(args: dict, max_len: int = 60) -> str:
     if len(result) > max_len:
         result = result[:max_len - 3] + "..."
     return result
+
+
+# Width used to erase the in-place phase label. Labels are short (<32 chars)
+# so this is plenty without being wasteful.
+_PHASE_LABEL_CLEAR_WIDTH = 40
+
+
+def _phase_for_tool(name: str) -> str:
+    """Map a tool name to a compact phase label shown while that tool runs."""
+    if name in ("web_search", "scrape_url", "fetch_url"):
+        return "🔍 Searching"
+    if name == "python_exec":
+        return "🧠 Analyzing"
+    if name in ("create_report", "create_spreadsheet", "write_file"):
+        return "✍ Writing"
+    if name in (
+        "read_file", "ls", "glob", "grep",
+        "parse_pdf", "read_text_file", "read_spreadsheet",
+    ):
+        return "📖 Reading"
+    if name == "write_todos":
+        return "📋 Planning"
+    return "⏳ Working"
+
+
+def _print_phase_label(label: str, is_tty: bool) -> None:
+    """Print the current phase label in-place on stderr.
+
+    TTY: pad + write label + \\r so the next print overwrites it.
+    Non-TTY: plain line so logs stay readable.
+    """
+    if is_tty:
+        padded = f"  {label}".ljust(_PHASE_LABEL_CLEAR_WIDTH)
+        print(f"\r{padded}\r", end="", flush=True, file=sys.stderr)
+    else:
+        print(f"  {label}", flush=True, file=sys.stderr)
+
+
+def _clear_phase_label(is_tty: bool) -> None:
+    """Erase the in-place phase label on stderr (TTY-only; no-op otherwise)."""
+    if is_tty:
+        print("\r" + " " * _PHASE_LABEL_CLEAR_WIDTH + "\r", end="", flush=True, file=sys.stderr)
 
 
 def review_output(

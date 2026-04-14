@@ -77,3 +77,37 @@ def test_non_string_not_fast_path():
 def test_keyword_case_insensitive():
     assert is_fast_path("Research the market") is False
     assert is_fast_path("ANALYZE this") is False
+
+
+# ── Positive short-circuit for factual-question prefixes ──
+
+def test_capital_of_is_fast_path():
+    assert is_fast_path("what's the capital of Peru") is True
+
+
+def test_who_is_is_fast_path():
+    assert is_fast_path("who is marie curie") is True
+
+
+def test_when_did_is_fast_path():
+    assert is_fast_path("when did ww2 start?") is True
+
+
+def test_how_many_is_fast_path():
+    assert is_fast_path("how many planets are in the solar system?") is True
+
+
+def test_define_prefix_is_fast_path():
+    assert is_fast_path("definition of osmosis") is True
+
+
+def test_analyze_still_blocks_fast_path():
+    # Regression: positive prefixes don't override the no-research-keyword rule
+    # when the prompt isn't a factual-prefix shape.
+    assert is_fast_path("analyze X") is False
+
+
+def test_research_keyword_wins_when_no_factual_prefix():
+    # "research the population of Tokyo" — doesn't start with a factual prefix,
+    # so the research keyword still wins and blocks fast-path.
+    assert is_fast_path("research the population of Tokyo") is False

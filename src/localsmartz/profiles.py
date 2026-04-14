@@ -395,13 +395,28 @@ def get_profile(name: str | None = None, model_override: str | None = None) -> d
     return profile
 
 
+_FAST_PATH_FACTUAL_PREFIXES: tuple[str, ...] = (
+    "what is ", "what's ", "whats ",
+    "who is ", "who's ", "whos ",
+    "when did ", "when was ", "when is ",
+    "where is ", "where's ", "where are ", "where did ",
+    "how many ", "how much ", "how old ", "how tall ",
+    "define ", "definition of ", "meaning of ",
+    "capital of ", "population of ", "name of ",
+)
+
+
 def is_fast_path(prompt: str) -> bool:
     """True if the prompt looks trivial enough to skip the agent graph.
 
-    Heuristics (all must pass):
+    Heuristics:
     - Under 400 chars
-    - No research-oriented keywords
     - No more than 2 sentence terminators (period or question mark)
+    - Positive short-circuit: if the prompt starts with a factual-question
+      prefix (``what is``/``who is``/``when did``/``capital of`` etc.), it's
+      fast-path regardless of research keywords. This rescues short single-
+      clause questions whose subject happens to include a research-y word.
+    - Otherwise: must not contain any research-oriented keyword.
     """
     if not isinstance(prompt, str):
         return False
@@ -410,6 +425,12 @@ def is_fast_path(prompt: str) -> bool:
     t = prompt.lower().strip()
     if not t:
         return False
+    # Size/terminator caps apply to the positive short-circuit too.
+    if t.count(".") + t.count("?") > 2:
+        return False
+    # Positive short-circuit for short factual-question shapes.
+    if any(t.startswith(p) for p in _FAST_PATH_FACTUAL_PREFIXES):
+        return True
     research_keywords = [
         "research", "analyze", "compare", "report", "write a", "summarize",
         "investigate", "find out", "look into", "deep dive", "explore",
@@ -417,9 +438,6 @@ def is_fast_path(prompt: str) -> bool:
         "search the web", "find sources", "pull data",
     ]
     if any(k in t for k in research_keywords):
-        return False
-    # Multi-sentence prompts usually imply composition
-    if t.count(".") + t.count("?") > 2:
         return False
     return True
 
