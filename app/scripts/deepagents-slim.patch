@@ -1,0 +1,59 @@
+# deepagents-slim.patch
+#
+# WHY
+# ---
+# Local Smartz is Ollama-only. deepagents eagerly imports langchain_anthropic
+# at module load (graph.py). We strip the langchain_anthropic + anthropic +
+# langchain_google_genai + google.genai packages from the DMG bundled Python
+# to save ~18 MB. Without this patch, `from deepagents import create_deep_agent`
+# raises ImportError at import time because those packages no longer exist on disk.
+#
+# Upstream issue to track:
+#   https://github.com/langchain-ai/deepagents -- request optional provider
+#   extras (deepagents[anthropic], deepagents[google]) and lazy-import the
+#   providers in graph.py.
+#
+# FORMAT
+# ------
+# Not a unified diff. Two anchored sed-style replacements applied in-place by
+# the DMG build. Anchored on full import lines so the patch is a no-op if
+# deepagents drops or reshapes the imports. Any failure falls through to
+# the `|| echo "patch skipped"` guard in build-dmg.sh.
+#
+# LAST VERIFIED against deepagents 0.5.2.
+# On deepagents update: re-check that graph.py still contains the two anchor
+# lines below. If not, refresh this patch.
+#
+# APPLY
+# -----
+# This file is consumed by app/build-dmg.sh via a small inline python script.
+# Format: one replacement per block, delimited by lines starting with `@@`.
+# Each block has FIND: and REPLACE: sections (python raw strings on one line
+# is not flexible enough; we use literal blocks).
+
+@@ replace-anthropic-imports
+FIND:
+from langchain_anthropic import ChatAnthropic
+from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
+REPLACE:
+# --- local-smartz slim patch: lazy-import Anthropic provider (deepagents-slim.patch) ---
+try:
+    from langchain_anthropic import ChatAnthropic  # type: ignore[import-not-found]
+    from langchain_anthropic.middleware import (  # type: ignore[import-not-found]
+        AnthropicPromptCachingMiddleware,
+    )
+except ImportError:
+    ChatAnthropic = None  # type: ignore[assignment,misc]
+
+    # No-op stand-in: graph.py unconditionally appends this middleware to the
+    # pipeline. It must be a real AgentMiddleware subclass or the runtime
+    # rejects it. All hooks are intentionally empty.
+    from langchain.agents.middleware.types import AgentMiddleware  # noqa: E402
+
+    class AnthropicPromptCachingMiddleware(AgentMiddleware):  # type: ignore[no-redef]
+        """Stub: no-op when langchain_anthropic is not installed (Ollama-only build)."""
+
+        def __init__(self, *args, **kwargs):  # noqa: D401, ANN002, ANN003
+            super().__init__()
+# --- end local-smartz slim patch ---
+@@ end

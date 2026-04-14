@@ -6,14 +6,14 @@ no Anthropic, no Google GenAI — but both packages ride in via
 
 ## Why they're present
 
-`deepagents` 0.4.11 declares:
+`deepagents` 0.5.2 declares:
 
 ```
 langchain-anthropic >= 1.3.4
 langchain-google-genai >= 4.2.0
 ```
 
-And `deepagents/graph.py:10-11` *eagerly imports*:
+And `deepagents/graph.py:16-17` *eagerly imports*:
 
 ```python
 from langchain_anthropic import ChatAnthropic
@@ -31,62 +31,121 @@ uv tree --package langchain-google-genai --invert
 (no grep hits) but is still a resolved dependency, so it lands in
 `site-packages` anyway.
 
-## Disk footprint in `.venv`
+## Disk footprint in the clean bundled Python (pycache-stripped)
 
 ```
-468K  langchain_anthropic/
-5.9M  anthropic/                 ← largest single unused package
-568K  langchain_google_genai/
- 14M  google/                    ← includes genai + unused google-auth deps
+232K  langchain_anthropic/
+4.1M  anthropic/
+296K  langchain_google_genai/
+8.0M  google/        (of which: 4.4M genai, 728K auth, 596K api, 236K oauth2,
+                      plus cloud/gapic/logging/longrunning/rpc/type)
+708K  jiter/         (transitive of anthropic; streaming-only)
 ```
 
-Total: ~21 MB in site-packages, plus whatever falls out of pruning
-transitive deps (`jiter`, `google-genai`, parts of `google-auth`).
+Keep: `google/protobuf/` (996K) and `google/_upb/_message.abi3.so` (~648K) —
+required by `opentelemetry-proto` (traces/metrics/logs collector protobufs).
 
-## What we can do without forking deepagents
+## Approach shipped (Option B from prior audit)
 
-**Option A — keep (current state).**
-No source changes. Bundle includes both provider SDKs. ~21 MB overhead.
-No risk of eager-import breakage.
+Post-install strip in `app/build-dmg.sh` plus a patch to `deepagents/graph.py`
+that lazy-imports `ChatAnthropic` and installs a no-op `AnthropicPromptCachingMiddleware`
+stub when `langchain_anthropic` is absent. The stub is a real `AgentMiddleware`
+subclass so `graph.py`'s unconditional `middleware.append(...)` calls still
+succeed — they just become no-ops at runtime.
 
-**Option B — post-install strip in `build-dmg.sh`.**
-After `pip install`, delete `langchain_anthropic/`, `anthropic/`,
-`langchain_google_genai/`, and the non-auth parts of `google/`.
-Then patch `deepagents/graph.py:10-11` to guard the import:
+### Patch (`app/scripts/deepagents-slim.patch`)
+
+Applied by an inline Python script in `build-dmg.sh`. Anchor-based
+replacement; idempotent; skips if the anchor text is missing (e.g. after a
+deepagents upgrade reshapes the imports).
 
 ```python
+# Before:
+from langchain_anthropic import ChatAnthropic
+from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
+
+# After:
 try:
     from langchain_anthropic import ChatAnthropic
     from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 except ImportError:
     ChatAnthropic = None
-    AnthropicPromptCachingMiddleware = None
+    from langchain.agents.middleware.types import AgentMiddleware
+
+    class AnthropicPromptCachingMiddleware(AgentMiddleware):
+        """Stub: no-op when langchain_anthropic is not installed (Ollama-only build)."""
+        def __init__(self, *args, **kwargs):
+            super().__init__()
 ```
 
-This runs on the shipped `.app` only — the dev venv keeps the full deps
-for compatibility. Savings: ~18 MB off the DMG.
+### Directories removed from the bundled site-packages
 
-**Risk:** every time `deepagents` publishes a new release we have to
-re-verify the patch target. The line numbers and exact import surface
-will drift. Future middleware work in upstream could add more
-`langchain_anthropic` references. Worth tracking against the CHANGELOG
-before each bundle bump.
+```
+langchain_anthropic/
+langchain_anthropic-*.dist-info/
+anthropic/
+anthropic-*.dist-info/
+langchain_google_genai/
+langchain_google_genai-*.dist-info/
+google_genai-*.dist-info/
+google_auth-*.dist-info/
+googleapis_common_protos-*.dist-info/
+jiter/
+jiter-*.dist-info/
 
-**Option C — upstream.**
-File an issue on `langchain-ai/deepagents` asking for optional provider
-extras (`deepagents[anthropic]`, `deepagents[google]`). Lazy-import in
-`graph.py` so the base package can install without the adapters. This
-is the clean fix but external timeline.
+google/genai/
+google/auth/
+google/oauth2/
+google/api/
+google/cloud/
+google/gapic/
+google/logging/
+google/longrunning/
+google/rpc/
+google/type/
+```
 
-## Decision
+## Measured impact
 
-Ship Option A for now. Keep a watch item: if the DMG crosses ~120 MB
-compressed, revisit Option B with the graph.py patch committed to our
-build script for easy maintenance.
+Measured against the currently-installed `/Applications/Local Smartz.app`
+(deepagents 0.5.2) on 2026-04-13, after `__pycache__` strip both before and
+after the slim, to isolate the delta from bytecode noise.
 
-Re-audit:
-- on every `deepagents` version bump
-- when packaging for platforms with tight size budgets (Mac App Store)
+| Location            | Baseline | After slim | Delta |
+|---------------------|----------|------------|-------|
+| `site-packages/`    | 139 MB   | 127 MB     | -12 MB (-8.6%) |
+| `Contents/Resources/python/` total | 723 MB | 711 MB | -12 MB |
+
+DMG (UDZO zlib-9) delta was not re-measured in this session — the
+`.app` would need a full xcodebuild rebuild to ship the slimmed Python.
+Expect the compressed DMG savings to be smaller than the raw 12 MB
+because zlib already compresses a lot of duplicate provider-SDK code.
+
+## Validation
+
+1. `"$PY/bin/python3" -c "from deepagents import create_deep_agent; print('ok')"`
+   → `ok` ✅
+2. `pytest tests -q` against the slimmed bundled Python → **379 passed** ✅
+3. `from opentelemetry.proto.trace.v1 import trace_pb2` still imports ✅
+   (confirms we kept the right subtree of `google/`).
+
+## Upstream issue to track
+
+Open on `langchain-ai/deepagents`: request optional provider extras
+(`deepagents[anthropic]`, `deepagents[google]`) with lazy imports in
+`graph.py`. Eliminates the need for our patch. Track against each
+`deepagents` version bump.
+
+## Re-verify checklist on deepagents upgrade
+
+- [ ] `grep -n "from langchain_anthropic" site-packages/deepagents/graph.py` —
+  confirm the two anchor lines in the patch still match byte-for-byte.
+- [ ] Search for any new `from langchain_anthropic` / `from langchain_google_genai` /
+  `from google.genai` imports anywhere in the deepagents tree.
+- [ ] Confirm `AnthropicPromptCachingMiddleware` is still a subclass of
+  `AgentMiddleware` in upstream (our stub matches that parent).
+- [ ] Re-run the smoke test and the full pytest suite against the slimmed bundle.
+- [ ] Update this file with new before/after numbers.
 
 ## Reproducing
 
@@ -96,4 +155,5 @@ uv tree --no-dev | grep -E "anthropic|google" | head
 du -sh .venv/lib/python3.*/site-packages/{langchain_anthropic,anthropic,langchain_google_genai,google}
 ```
 
-*Last audit: 2026-04-13 against deepagents v0.4.11.*
+*Last audit: 2026-04-13 against deepagents 0.5.2, langchain-anthropic 1.4.0,
+langchain-google-genai 4.2.1, google-genai 1.73.0.*
