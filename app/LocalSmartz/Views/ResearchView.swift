@@ -47,6 +47,17 @@ struct ResearchView: View {
     /// ToolCallEntry breadcrumbs — OutputView is unchanged.
     @State private var currentPhase: String? = nil
 
+    // MARK: - Project folder (New Research flow)
+    /// Set when the user names a project via the "New Research" sheet.
+    /// Sent as `cwd` in every /api/research POST so the backend writes
+    /// threads/artifacts/reports inside the project folder.
+    @State private var projectDir: URL? = nil
+    @State private var showNewProjectSheet = false
+    @State private var newProjectName: String = ""
+    @State private var existingProjectURL: URL? = nil
+    @State private var showExistingProjectAlert = false
+    @State private var lastQuery: String = ""
+
     private let sseClient = SSEClient()
 
     var body: some View {
@@ -54,7 +65,10 @@ struct ResearchView: View {
             ThreadListView(
                 threads: threads,
                 selectedThread: $selectedThread,
-                onNewThread: newThread,
+                onNewThread: {
+                    newProjectName = ""
+                    showNewProjectSheet = true
+                },
                 agents: agents,
                 focusAgent: $focusAgent
             )
@@ -162,6 +176,27 @@ struct ResearchView: View {
                         }
                     }
                 )
+            }
+            .sheet(isPresented: $showNewProjectSheet) {
+                newProjectSheet
+            }
+            .alert(
+                "A folder named \u{0022}\(existingProjectURL?.lastPathComponent ?? "")\u{0022} already exists. Open it?",
+                isPresented: $showExistingProjectAlert,
+                presenting: existingProjectURL
+            ) { url in
+                Button("Open") {
+                    projectDir = url
+                    newThread()
+                    showNewProjectSheet = false
+                    existingProjectURL = nil
+                }
+                Button("Choose another", role: .cancel) {
+                    existingProjectURL = nil
+                    // Keep the sheet open so the user can rename.
+                }
+            } message: { _ in
+                Text("Existing queries.json and artifacts will be reused.")
             }
         }
         .task {
@@ -625,6 +660,7 @@ struct ResearchView: View {
 
         prompt = ""
         currentTitle = query
+        lastQuery = query
         outputText = ""
         toolCalls = []
         durationMs = nil
@@ -649,6 +685,9 @@ struct ResearchView: View {
         }
         if let agent = focusAgent {
             payload["agent"] = agent
+        }
+        if let dir = projectDir {
+            payload["cwd"] = dir.path
         }
 
         do {
@@ -741,6 +780,9 @@ struct ResearchView: View {
             currentPhase = nil
             researchTask?.cancel()
             researchTask = nil
+            if let dir = projectDir {
+                appendQueryRecord(dir: dir, query: lastQuery, answer: outputText)
+            }
         case .error(let message):
             errorMessage = message
             isStreaming = false
@@ -961,6 +1003,133 @@ struct ResearchView: View {
         let minutes = Int(seconds) / 60
         let secs = Int(seconds) % 60
         return "\(minutes)m \(secs)s"
+    }
+
+    // MARK: - New Research project sheet
+
+    private var newProjectSheet: some View {
+        let sanitized = Self.sanitizeProjectName(newProjectName)
+        let trimmed = newProjectName.trimmingCharacters(in: .whitespaces)
+        let canCreate = !sanitized.isEmpty
+        return VStack(alignment: .leading, spacing: 0) {
+            Text("New Research")
+                .font(.system(size: 15, weight: .semibold))
+                .padding(.horizontal, 20)
+                .padding(.top, 18)
+                .padding(.bottom, 12)
+
+            Form {
+                TextField("Research topic…", text: $newProjectName)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { if canCreate { commitNewProject(sanitized) } }
+
+                if !trimmed.isEmpty {
+                    Text("Folder: ~/Desktop/\(sanitized)/")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .padding(.horizontal, 20)
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) {
+                    showNewProjectSheet = false
+                }
+                .keyboardShortcut(.escape, modifiers: [])
+
+                Button("Create") { commitNewProject(sanitized) }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canCreate)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+        }
+        .frame(width: 440)
+    }
+
+    /// Sanitize a user-entered project name into a safe folder name.
+    /// Strips characters outside [A-Za-z0-9._ -], replaces runs with a
+    /// single dash, trims surrounding whitespace/dashes, caps at 80 chars.
+    static func sanitizeProjectName(_ raw: String) -> String {
+        let allowed: Set<Character> = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._ -")
+        var out = ""
+        var lastWasDash = false
+        for ch in raw {
+            if allowed.contains(ch) {
+                out.append(ch)
+                lastWasDash = (ch == "-")
+            } else {
+                if !lastWasDash { out.append("-") }
+                lastWasDash = true
+            }
+        }
+        out = out.trimmingCharacters(in: CharacterSet(charactersIn: " -"))
+        if out.count > 80 { out = String(out.prefix(80)) }
+        return out
+    }
+
+    private func commitNewProject(_ sanitized: String) {
+        guard !sanitized.isEmpty else { return }
+        let fm = FileManager.default
+        guard let desktop = try? fm.url(
+            for: .desktopDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false
+        ) else {
+            errorMessage = "Could not resolve ~/Desktop."
+            return
+        }
+        let dir = desktop.appendingPathComponent(sanitized, isDirectory: true)
+
+        if fm.fileExists(atPath: dir.path) {
+            existingProjectURL = dir
+            showExistingProjectAlert = true
+            return
+        }
+
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try fm.createDirectory(
+                at: dir.appendingPathComponent("artifacts", isDirectory: true),
+                withIntermediateDirectories: true
+            )
+            let seed = Data("{\"queries\": []}\n".utf8)
+            try seed.write(to: dir.appendingPathComponent("queries.json"))
+        } catch {
+            errorMessage = "Could not create \(dir.path): \(error.localizedDescription)"
+            return
+        }
+
+        projectDir = dir
+        newThread()
+        showNewProjectSheet = false
+    }
+
+    /// Append {query, answer_preview, timestamp} to `<projectDir>/queries.json`.
+    /// Best-effort: a failure here never blocks the UI.
+    private func appendQueryRecord(dir: URL, query: String, answer: String) {
+        let file = dir.appendingPathComponent("queries.json")
+        let preview = String(answer.prefix(240))
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let record: [String: Any] = [
+            "query": query, "answer_preview": preview, "timestamp": ts,
+        ]
+        var list: [[String: Any]] = []
+        if let data = try? Data(contentsOf: file),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let arr = obj["queries"] as? [[String: Any]] {
+            list = arr
+        }
+        list.append(record)
+        if let data = try? JSONSerialization.data(
+            withJSONObject: ["queries": list], options: [.prettyPrinted]
+        ) {
+            try? data.write(to: file)
+        }
     }
 }
 

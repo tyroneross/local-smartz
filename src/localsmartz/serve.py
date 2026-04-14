@@ -1243,7 +1243,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         thread_id = body.get("thread_id")
         profile_name = body.get("profile") or self._default_profile
         agent = body.get("agent")  # Optional: pin to a single agent
-        self._handle_research_request(prompt, thread_id, profile_name, agent)
+        cwd_override = body.get("cwd")  # Optional: per-project working dir
+        self._handle_research_request(prompt, thread_id, profile_name, agent, cwd_override)
 
     def _handle_research_request(
         self,
@@ -1251,6 +1252,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         thread_id: str | None,
         profile_name: str | None,
         agent: str | None = None,
+        cwd_override: str | None = None,
     ):
         if not isinstance(prompt, str) or not prompt.strip():
             self._json_response({"error": "No prompt provided"}, 400)
@@ -1263,7 +1265,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         self._start_sse()
 
         try:
-            self._stream_research(prompt.strip(), profile_name, thread_id, agent)
+            self._stream_research(prompt.strip(), profile_name, thread_id, agent, cwd_override)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
@@ -1827,6 +1829,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         profile_name: str | None,
         thread_id: str | None,
         focus_agent: str | None = None,
+        cwd_override: str | None = None,
     ):
         """Run research agent and emit SSE events.
 
@@ -1846,6 +1849,14 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         if preflight is None:
             return
         profile, model, model_override, cwd = preflight
+        # Per-request project folder override (set by the macOS app's
+        # "New Research" flow). When the user names a project the Swift
+        # client creates ~/Desktop/<name>/ and sends that path as `cwd`
+        # so threads/artifacts/reports land inside the project folder.
+        if cwd_override:
+            override_path = Path(cwd_override).expanduser()
+            if override_path.is_dir():
+                cwd = override_path
 
         # Ensure storage
         storage = cwd / ".localsmartz"
