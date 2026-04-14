@@ -13,6 +13,7 @@ These tests lock in the guarantee that:
 
 from __future__ import annotations
 
+import os
 import threading
 from typing import Any, Iterator
 from unittest.mock import patch
@@ -162,7 +163,11 @@ def test_full_agent_loop_breaks_on_broken_pipe():
 
     stub_agent = _StubAgent(n_chunks=20)
 
-    with patch("localsmartz.serve._HeartbeatPulse", _StubPulse), \
+    # Force the legacy DeepAgents path — this test exercises
+    # _run_full_agent's BrokenPipe handling specifically. With graph as the
+    # new default we must explicitly opt out.
+    with patch.dict(os.environ, {"LOCALSMARTZ_PIPELINE": "orchestrator"}), \
+         patch("localsmartz.serve._HeartbeatPulse", _StubPulse), \
          patch("localsmartz.profiles.is_fast_path", return_value=False), \
          patch("localsmartz.profiles.get_profile", return_value=fake_profile), \
          patch("localsmartz.ollama.check_server", return_value=True), \
