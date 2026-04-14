@@ -11,9 +11,11 @@ AGENT_ROLES = {
         "title": "Planner",
         "summary": "Decomposes the question into steps. Owns the to-do list.",
         "system_focus": (
-            "You are the PLANNER agent. Your single job is to break the user's question "
-            "into a concrete, ordered list of steps. Use write_todos. Do NOT execute "
-            "research or compute results yourself — just plan. End by listing the steps."
+            "You are the PLANNER agent. For multi-step tasks, use write_todos "
+            "to lay out a concrete, ordered list of steps and stop. "
+            "For a simple factual question that does not require research, "
+            "answer it directly in one or two sentences — do NOT call any tools. "
+            "Never invent tool namespaces (no dots in tool names)."
         ),
     },
     "researcher": {

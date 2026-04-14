@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime, timezone
@@ -53,6 +54,122 @@ def _saved_model_override(cwd: Path) -> str | None:
     except Exception:
         pass
     return None
+
+
+# Process-level warmup state. Keyed by model name. Values:
+#   {"stage": "idle"|"loading"|"ready"|"error",
+#    "started_at": float, "finished_at": float,
+#    "error": str | None, "duration_ms": int}
+# Accessed from the main request thread, background warmup threads, and
+# startup. Always take _WARMUP_STATE_LOCK before reading/writing.
+_WARMUP_STATE: dict[str, dict] = {}
+_WARMUP_STATE_LOCK = threading.Lock()
+
+
+def _warmup_in_background(model: str, keep_alive: str = "30m") -> None:
+    """Kick off a background warmup and record state — used at server boot
+    and from the ``/api/models/warmup`` POST handler.
+    """
+    from localsmartz.ollama import warmup_model
+
+    if not model:
+        return
+    with _WARMUP_STATE_LOCK:
+        current = _WARMUP_STATE.get(model, {})
+        if current.get("stage") == "loading":
+            return
+        _WARMUP_STATE[model] = {
+            "stage": "loading",
+            "started_at": time.time(),
+            "error": None,
+            "duration_ms": 0,
+        }
+
+    def _run():
+        ok, ms, err = warmup_model(model, keep_alive=keep_alive)
+        with _WARMUP_STATE_LOCK:
+            started = _WARMUP_STATE.get(model, {}).get("started_at", time.time())
+            _WARMUP_STATE[model] = {
+                "stage": "ready" if ok else "error",
+                "started_at": started,
+                "finished_at": time.time(),
+                "error": err,
+                "duration_ms": ms,
+            }
+
+    threading.Thread(target=_run, name=f"warmup-{model}", daemon=True).start()
+
+
+class _HeartbeatPulse:
+    """Background keep-alive for silent SSE periods.
+
+    Fires a ``{"type": "heartbeat", "elapsed_s": N}`` event when the main
+    stream has been silent longer than ``interval_s``. Required because the
+    agent loop blocks in-place during tool calls and model cold-loads —
+    without this the client sees "Thinking…" with no liveness signal, and
+    intermediaries drop the idle connection.
+
+    The sender (``send_event``) is expected to be serialized by the caller
+    (the handler's ``_send_event`` takes a per-request lock).
+    """
+
+    def __init__(self, send_event, interval_s: float = 15.0):
+        self._send = send_event
+        self._interval = float(interval_s)
+        self._stop = threading.Event()
+        self._touch_lock = threading.Lock()
+        self._last_event = time.time()
+        self._thread: threading.Thread | None = None
+
+    def touch(self) -> None:
+        """Reset the silence timer. Call after every real event."""
+        with self._touch_lock:
+            self._last_event = time.time()
+
+    def _run(self) -> None:
+        # Poll in ticks of half the interval (capped at 1s) so stop() is
+        # responsive in prod (interval=15s → 1s tick) and tests with short
+        # intervals still observe emissions.
+        poll_s = max(0.02, min(1.0, self._interval / 2.0))
+        while not self._stop.wait(timeout=poll_s):
+            with self._touch_lock:
+                elapsed = time.time() - self._last_event
+            if elapsed >= self._interval:
+                try:
+                    self._send({"type": "heartbeat", "elapsed_s": int(elapsed)})
+                except Exception:
+                    # Client disconnected — stop quietly.
+                    return
+                with self._touch_lock:
+                    self._last_event = time.time()
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run, name="sse-heartbeat", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+
+def _is_valid_tool_name(name: str, *, valid_names: set[str] | None = None) -> bool:
+    """Small local model tool-name sanity check.
+
+    Qwen3 and similar 8B models occasionally fabricate namespace prefixes
+    (e.g. ``repo_browser.write_todos``) when forced to emit tool calls for
+    prompts that don't need them. Our tools never contain dots or slashes —
+    reject those outright before the LangGraph loop retries endlessly.
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    if "." in name or "/" in name:
+        return False
+    if valid_names is not None and name not in valid_names:
+        return False
+    return True
 
 
 _UI_HTML = r"""<!DOCTYPE html>
@@ -854,6 +971,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_models()
         elif path == "/api/models/catalog":
             self._handle_models_catalog()
+        elif path == "/api/models/warmup":
+            self._handle_warmup_status()
         elif path == "/api/agents":
             self._handle_agents()
         elif path == "/api/agents/models":
@@ -887,6 +1006,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_model_select()
         elif path == "/api/models/pull":
             self._handle_model_pull()
+        elif path == "/api/models/warmup":
+            self._handle_warmup_start()
         elif path == "/api/skills/refactor":
             self._handle_skill_refactor()
         elif path == "/api/skills/new":
@@ -949,12 +1070,21 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _send_event(self, data: dict):
-        try:
-            line = f"data: {json.dumps(data)}\n\n"
-            self.wfile.write(line.encode("utf-8"))
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            raise
+        """Serialized SSE write. A per-request lock lets a heartbeat
+        sidecar thread coexist with the main stream loop without
+        interleaving bytes on the wire.
+        """
+        lock = getattr(self, "_sse_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._sse_lock = lock
+        with lock:
+            try:
+                line = f"data: {json.dumps(data)}\n\n"
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                raise
 
     def _read_json_body(self) -> dict:
         content_length = self.headers.get("Content-Length", "0")
@@ -1127,13 +1257,18 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             extract_final_response,
             fast_path_stream,
         )
+        from localsmartz.observability import get_tracer
         from localsmartz.profiles import (
             agent_focus_prompt,
             get_profile,
             is_fast_path,
         )
         from localsmartz.ollama import (
-            check_server, model_available, list_models, resolve_available_model,
+            check_server,
+            list_models,
+            model_available,
+            resolve_available_model,
+            warmup_model,
         )
         from localsmartz.threads import create_thread, append_entry
 
@@ -1169,8 +1304,34 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             # Substitute found — switch to it for this run, surface the warning
             # as an info-style text event so the user sees what happened.
             model_override = chosen
+            model = chosen
             if msg:
                 self._send_event({"type": "text", "content": f"[note] {msg}\n\n"})
+
+        # Warm the model into Ollama VRAM before we spin up the agent graph.
+        # Ollama short-circuits when the model is already resident, so this
+        # is cheap on the hot path and eliminates the "~30s silent Thinking…"
+        # window on the first query after app launch.
+        self._send_event({
+            "type": "status",
+            "stage": "loading_model",
+            "model": model,
+        })
+        warm_ok, warm_ms, warm_err = warmup_model(model, keep_alive="30m")
+        if not warm_ok:
+            # Non-fatal: the subsequent stream call will also try to load
+            # the model. Surface the warning so the user knows if something
+            # is off (e.g. Ollama restarted mid-request).
+            self._send_event({
+                "type": "text",
+                "content": f"[warmup] {warm_err}\n\n",
+            })
+        self._send_event({
+            "type": "status",
+            "stage": "ready",
+            "model": model,
+            "warmup_ms": warm_ms,
+        })
 
         # Ensure storage
         storage = cwd / ".localsmartz"
@@ -1183,25 +1344,45 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
 
         # ── Fast path ─────────────────────────────────────────────────────
         # Trivial prompts (short, no research verbs, <=2 sentences) skip the
-        # DeepAgents graph entirely — one direct ChatOllama stream. Not used
-        # when a focus_agent is pinned (caller asked for a specific role).
-        if focus_agent is None and is_fast_path(prompt):
+        # DeepAgents graph entirely — one direct ChatOllama stream.
+        # Also taken when the user pinned the Planner agent for a trivial
+        # prompt: Planner's whole job is decomposition, and forcing a small
+        # model to emit write_todos for a one-liner triggers tool-call
+        # hallucinations like `repo_browser.write_todos`. Answer directly.
+        allow_fast_path = (
+            focus_agent is None or focus_agent == "planner"
+        )
+        if allow_fast_path and is_fast_path(prompt):
             start_time = time.time()
             first_text = ""
-            for event in fast_path_stream(prompt, profile, model_override=model_override):
-                if event.get("type") == "done":
-                    # Rewrite thread_id + duration so the client sees our wall time.
-                    self._send_event({
-                        "type": "done",
-                        "duration_ms": int((time.time() - start_time) * 1000),
-                        "thread_id": thread_id or "",
-                    })
-                    continue
-                if event.get("type") == "text":
-                    content = event.get("content", "")
-                    if isinstance(content, str):
-                        first_text += content
-                self._send_event(event)
+            pulse = _HeartbeatPulse(self._send_event, interval_s=15.0)
+            pulse.start()
+            tracer = get_tracer("local-smartz.research")
+            fast_path_span_cm = tracer.start_as_current_span("research.fast_path")
+            fast_path_span = fast_path_span_cm.__enter__()
+            fast_path_span.set_attribute("routing.path", "fast_path")
+            fast_path_span.set_attribute("routing.reason", "trivial_prompt")
+            fast_path_span.set_attribute("agent.focus", focus_agent or "none")
+            fast_path_span.set_attribute("model.name", model)
+            try:
+                for event in fast_path_stream(prompt, profile, model_override=model_override):
+                    pulse.touch()
+                    if event.get("type") == "done":
+                        # Rewrite thread_id + duration so the client sees our wall time.
+                        self._send_event({
+                            "type": "done",
+                            "duration_ms": int((time.time() - start_time) * 1000),
+                            "thread_id": thread_id or "",
+                        })
+                        continue
+                    if event.get("type") == "text":
+                        content = event.get("content", "")
+                        if isinstance(content, str):
+                            first_text += content
+                    self._send_event(event)
+            finally:
+                pulse.stop()
+                fast_path_span_cm.__exit__(None, None, None)
 
             # Best-effort thread append — mirrors the full-path behavior.
             if thread_id:
@@ -1248,74 +1429,127 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         turn_count = 0
         loop_broken = False
 
-        # Stream agent execution
-        for chunk in agent.stream(input_msg, config=config, stream_mode="updates"):
-            for node_name, state_update in chunk.items():
-                if state_update is None:
-                    continue
-                messages = state_update.get("messages", [])
-                # LangGraph wraps state in Overwrite objects
-                if hasattr(messages, "value"):
-                    messages = messages.value
-                if not isinstance(messages, list):
-                    continue
-                for msg in messages:
-                    # Tool calls from the AI
-                    if hasattr(msg, "tool_calls") and msg.tool_calls:
-                        for tc in msg.tool_calls:
-                            name = tc.get("name", "unknown")
-                            tools_used.add(name)
-                            turn_count += 1
-                            self._send_event({"type": "tool", "name": name})
+        # Build the set of valid tool names exposed to the model so we can
+        # reject hallucinated namespaced ones (e.g. ``repo_browser.write_todos``)
+        # surfaced by small Ollama models.
+        _valid_tool_names: set[str] = set()
+        try:
+            bound_tools = getattr(agent, "tools", None) or getattr(agent, "_tools", None)
+            if bound_tools:
+                for _tool in bound_tools:
+                    _name = getattr(_tool, "name", None)
+                    if isinstance(_name, str) and _name:
+                        _valid_tool_names.add(_name)
+        except Exception:
+            _valid_tool_names = set()
 
-                            # Loop detection
-                            if is_lite and loop_detector.record(name, tc.get("args")):
+        # Start the heartbeat pulse. The agent.stream loop blocks during tool
+        # execution and model reasoning; without this the client sees long
+        # silent gaps.
+        pulse = _HeartbeatPulse(self._send_event, interval_s=15.0)
+        pulse.start()
+
+        # OTel span covering the whole full-path agent run so Phoenix can
+        # distinguish it from the fast-path and show which agent (if any)
+        # was pinned.
+        tracer = get_tracer("local-smartz.research")
+        full_span_cm = tracer.start_as_current_span("research.full_agent")
+        full_span = full_span_cm.__enter__()
+        full_span.set_attribute("routing.path", "full_agent")
+        full_span.set_attribute("agent.focus", focus_agent or "none")
+        full_span.set_attribute("model.name", model)
+        full_span.set_attribute("profile.name", profile.get("name", "unknown"))
+
+        try:
+            # Stream agent execution
+            for chunk in agent.stream(input_msg, config=config, stream_mode="updates"):
+                pulse.touch()
+                for node_name, state_update in chunk.items():
+                    if state_update is None:
+                        continue
+                    messages = state_update.get("messages", [])
+                    # LangGraph wraps state in Overwrite objects
+                    if hasattr(messages, "value"):
+                        messages = messages.value
+                    if not isinstance(messages, list):
+                        continue
+                    for msg in messages:
+                        # Tool calls from the AI
+                        if hasattr(msg, "tool_calls") and msg.tool_calls:
+                            for tc in msg.tool_calls:
+                                name = tc.get("name", "unknown")
+                                # Guard against hallucinated namespace prefixes
+                                # (``repo_browser.write_todos`` etc).
+                                if not _is_valid_tool_name(
+                                    name, valid_names=_valid_tool_names or None
+                                ):
+                                    self._send_event({
+                                        "type": "tool_error",
+                                        "name": name,
+                                        "message": (
+                                            f"Invalid tool name '{name}' — "
+                                            "tool names do not include dots or slashes. "
+                                            "The model likely hallucinated a namespace."
+                                        ),
+                                    })
+                                    continue
+                                tools_used.add(name)
+                                turn_count += 1
+                                self._send_event({"type": "tool", "name": name})
+
+                                # Loop detection
+                                if is_lite and loop_detector.record(name, tc.get("args")):
+                                    self._send_event({
+                                        "type": "tool_error",
+                                        "name": name,
+                                        "message": f"Loop detected: {name} called {loop_detector.max_repeats}x with same args. Stopping.",
+                                    })
+                                    loop_broken = True
+
+                                # Drift detection
+                                for de in drift_detector.record_tool_call(name, tc.get("args"), turn_count):
+                                    self._send_event({
+                                        "type": "tool_error",
+                                        "name": "drift",
+                                        "message": f"{de.signal.value} [{de.severity.value}] {de.message}",
+                                    })
+
+                        # Tool error results
+                        if hasattr(msg, "type") and msg.type == "tool":
+                            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                            is_error = content.startswith("Error")
+                            if is_error:
                                 self._send_event({
                                     "type": "tool_error",
-                                    "name": name,
-                                    "message": f"Loop detected: {name} called {loop_detector.max_repeats}x with same args. Stopping.",
+                                    "name": getattr(msg, "name", "unknown"),
+                                    "message": content[:200],
                                 })
-                                loop_broken = True
-
-                            # Drift detection
-                            for de in drift_detector.record_tool_call(name, tc.get("args"), turn_count):
+                            for de in drift_detector.record_tool_result(getattr(msg, "name", "unknown"), content, is_error, turn_count):
                                 self._send_event({
                                     "type": "tool_error",
                                     "name": "drift",
                                     "message": f"{de.signal.value} [{de.severity.value}] {de.message}",
                                 })
 
-                    # Tool error results
-                    if hasattr(msg, "type") and msg.type == "tool":
-                        content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                        is_error = content.startswith("Error")
-                        if is_error:
-                            self._send_event({
-                                "type": "tool_error",
-                                "name": getattr(msg, "name", "unknown"),
-                                "message": content[:200],
-                            })
-                        for de in drift_detector.record_tool_result(getattr(msg, "name", "unknown"), content, is_error, turn_count):
-                            self._send_event({
-                                "type": "tool_error",
-                                "name": "drift",
-                                "message": f"{de.signal.value} [{de.severity.value}] {de.message}",
-                            })
+                        # AI text output
+                        if hasattr(msg, "type") and msg.type == "ai":
+                            if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content.strip():
+                                self._send_event({"type": "text", "content": msg.content})
 
-                    # AI text output
-                    if hasattr(msg, "type") and msg.type == "ai":
-                        if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content.strip():
-                            self._send_event({"type": "text", "content": msg.content})
-
-            # Enforce turn limit and loop break
-            if turn_count >= max_turns or loop_broken:
-                if turn_count >= max_turns:
-                    self._send_event({
-                        "type": "tool_error",
-                        "name": "system",
-                        "message": f"Turn limit ({max_turns}) reached. Returning partial results.",
-                    })
-                break
+                # Enforce turn limit and loop break
+                if turn_count >= max_turns or loop_broken:
+                    if turn_count >= max_turns:
+                        self._send_event({
+                            "type": "tool_error",
+                            "name": "system",
+                            "message": f"Turn limit ({max_turns}) reached. Returning partial results.",
+                        })
+                    break
+        finally:
+            pulse.stop()
+            full_span.set_attribute("turn_count", turn_count)
+            full_span.set_attribute("tools_used", ",".join(sorted(tools_used)))
+            full_span_cm.__exit__(None, None, None)
 
         # Get final result
         full_result = agent.invoke(None, config=config)
@@ -1435,6 +1669,49 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             "current": current or (profile["planning_model"] if profile else ""),
             "profile": profile["name"] if profile else "unknown",
         })
+
+    def _handle_warmup_start(self):
+        """POST /api/models/warmup {"model": "...", "keep_alive"?: "30m"}.
+
+        Preloads a model into Ollama VRAM. Fires a background warmup so the
+        UI can show a loading screen and poll GET /api/models/warmup.
+        Idempotent — if the model is already resident, the background call
+        returns fast and state flips to 'ready'.
+        """
+        try:
+            body = self._read_json_body()
+        except ValueError:
+            self._json_response({"error": "Invalid request body"}, 400)
+            return
+        model = body.get("model", "").strip() if isinstance(body.get("model"), str) else ""
+        if not model:
+            self._json_response({"error": "No model specified"}, 400)
+            return
+
+        keep_alive = body.get("keep_alive")
+        if not isinstance(keep_alive, str) or not keep_alive.strip():
+            keep_alive = "30m"
+
+        _warmup_in_background(model, keep_alive=keep_alive)
+        with _WARMUP_STATE_LOCK:
+            state = dict(_WARMUP_STATE.get(model, {"stage": "loading"}))
+        self._json_response({"model": model, **state})
+
+    def _handle_warmup_status(self):
+        """GET /api/models/warmup?model=... — return current warmup state.
+
+        Omit `model` to get the full map.
+        """
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        model = (qs.get("model") or [""])[0].strip()
+        with _WARMUP_STATE_LOCK:
+            if model:
+                state = dict(_WARMUP_STATE.get(model, {"stage": "idle"}))
+                self._json_response({"model": model, **state})
+                return
+            snapshot = {k: dict(v) for k, v in _WARMUP_STATE.items()}
+        self._json_response({"warmup": snapshot})
 
     def _handle_model_pull(self):
         """Stream SSE progress for `ollama pull <model>`."""
@@ -2096,6 +2373,27 @@ def start_server(port: int = 11435, profile_name: str | None = None):
     from localsmartz import __version__ as _version
     from localsmartz import log_buffer as _log_buffer
     _log_buffer.info("startup", f"local-smartz {_version} starting on port {port}")
+
+    # Preload the default planning model into Ollama VRAM as soon as the
+    # server starts, so the first user query doesn't pay the 10–60s cold
+    # load cost silently. The Swift app polls /api/models/warmup and keeps
+    # the query input disabled until stage == "ready".
+    try:
+        from localsmartz.config import load_config
+        from localsmartz.ollama import check_server
+        from localsmartz.profiles import get_profile
+
+        _cwd = Path.cwd()
+        _config = load_config(_cwd) or {}
+        _saved = _config.get("planning_model")
+        _profile = get_profile(profile_name, model_override=_saved or None)
+        _boot_model = _profile.get("planning_model") if isinstance(_profile, dict) else None
+        if _boot_model and check_server():
+            print(f"  Warming {_boot_model} (background)...", file=sys.stderr)
+            _warmup_in_background(_boot_model, keep_alive="30m")
+    except Exception as exc:  # noqa: BLE001 — don't let warmup crash startup
+        _log_buffer.info("startup", f"boot warmup skipped: {exc}")
+
     server = ThreadingHTTPServer(("127.0.0.1", port), LocalSmartzHandler)
     server.daemon_threads = True
     print(f"\n  Local Smartz running at http://localhost:{port}", file=sys.stderr)

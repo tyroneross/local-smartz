@@ -367,9 +367,10 @@ def _preflight(profile: dict) -> bool:
     """Quick Ollama check before running. Returns True if ready.
 
     Mutates `profile["planning_model"]` to a fallback if the configured one
-    isn't pulled but a usable substitute exists.
+    isn't pulled but a usable substitute exists. Also warms the model into
+    Ollama VRAM so the first query doesn't sit in a silent cold-load.
     """
-    from localsmartz.ollama import check_server, resolve_available_model
+    from localsmartz.ollama import check_server, resolve_available_model, warmup_model
 
     if not check_server():
         print("Error: Ollama is not running. Start it with: ollama serve", file=sys.stderr)
@@ -383,6 +384,17 @@ def _preflight(profile: dict) -> bool:
     if msg:
         print(f"  \033[33m!\033[0m {msg}", file=sys.stderr)
         profile["planning_model"] = chosen
+
+    # Warm the model — blocks until it's loaded into VRAM (or keep_alive refreshed).
+    # Idempotent: returns fast if the model is already resident.
+    target = profile["planning_model"]
+    print(f"  Loading model {target}...", end="", flush=True, file=sys.stderr)
+    ok, warm_ms, warm_err = warmup_model(target, keep_alive="30m")
+    if ok:
+        print(f" \033[32m\u2713\033[0m ({warm_ms} ms)", file=sys.stderr)
+    else:
+        # Non-fatal: the first real query will also trigger a load attempt.
+        print(f" \033[33m!\033[0m ({warm_err})", file=sys.stderr)
     return True
 
 

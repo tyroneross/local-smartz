@@ -18,16 +18,26 @@ OLLAMA_BASE = "http://localhost:11434"
 # so they can see what's available to pull without hunting on ollama.com.
 # Size is the approximate on-disk estimate; actual will be reported for installed.
 SUGGESTED_MODELS: list[dict] = [
-    # Lite-class (fast, low RAM) ---------------------------------------------
+    # Lite-class (fast, ≤16 GB RAM) ------------------------------------------
     {"name": "qwen3:8b-q4_K_M",                   "size_gb_estimate": 5.2, "ram_class": "lite",  "note": "Fast general model (lite profile default)"},
     {"name": "llama3.2:3b",                       "size_gb_estimate": 2.0, "ram_class": "lite",  "note": "Small fast model, good for quick queries"},
+    {"name": "llama3.2:1b",                       "size_gb_estimate": 1.3, "ram_class": "lite",  "note": "Tiniest Llama — quick replies, limited reasoning"},
     {"name": "phi3:mini",                         "size_gb_estimate": 2.3, "ram_class": "lite",  "note": "Microsoft Phi-3 mini"},
     {"name": "gemma2:9b",                         "size_gb_estimate": 5.4, "ram_class": "lite",  "note": "Google Gemma 2 9B"},
-    # Full-class (mid range, 16-32GB+ RAM) -----------------------------------
+    {"name": "gemma3:4b",                         "size_gb_estimate": 3.3, "ram_class": "lite",  "note": "Google Gemma 3 4B — multimodal-ready"},
+    {"name": "mistral:7b",                        "size_gb_estimate": 4.1, "ram_class": "lite",  "note": "Mistral 7B — strong general baseline"},
+    # Full-class (16–32 GB RAM) ----------------------------------------------
     {"name": "qwen2.5-coder:32b-instruct-q5_K_M", "size_gb_estimate": 23.0, "ram_class": "full", "note": "Strong code/agent model (default execution)"},
+    {"name": "qwen3:14b",                         "size_gb_estimate": 9.3, "ram_class": "full",  "note": "Qwen 3 14B — better tool calling than 8B"},
+    {"name": "gemma3:12b",                        "size_gb_estimate": 8.1, "ram_class": "full",  "note": "Google Gemma 3 12B"},
+    {"name": "llama3.3:70b",                      "size_gb_estimate": 42.0, "ram_class": "full", "note": "Meta Llama 3.3 70B (q4)"},
     {"name": "gpt-oss:20b",                       "size_gb_estimate": 14.0, "ram_class": "full", "note": "OSS-tuned model"},
-    # Heavy (64GB+ RAM) ------------------------------------------------------
-    {"name": "llama3.1:70b-instruct-q5_K_M",      "size_gb_estimate": 48.0, "ram_class": "heavy","note": "Full profile default planning model"},
+    {"name": "nemotron-mini:4b",                  "size_gb_estimate": 2.7, "ram_class": "lite",  "note": "NVIDIA Nemotron Mini 4B"},
+    # Heavy (64 GB+ RAM) -----------------------------------------------------
+    {"name": "llama3.3:70b-instruct-q5_K_M",      "size_gb_estimate": 48.0, "ram_class": "heavy","note": "Llama 3.3 70B high-quality quant"},
+    {"name": "gemma3:27b",                        "size_gb_estimate": 17.0, "ram_class": "heavy","note": "Google Gemma 3 27B — heaviest Gemma"},
+    {"name": "nemotron:70b",                      "size_gb_estimate": 40.0, "ram_class": "heavy","note": "NVIDIA Llama-Nemotron 70B"},
+    {"name": "qwen3:32b",                         "size_gb_estimate": 20.0, "ram_class": "heavy","note": "Qwen 3 32B — strong tool calling"},
     {"name": "gpt-oss:120b",                      "size_gb_estimate": 65.0, "ram_class": "heavy","note": "Largest OSS model"},
 ]
 
@@ -137,6 +147,48 @@ def model_available(model_name: str) -> bool:
 def suggest_pull(model_name: str) -> str:
     """Generate an ollama pull command."""
     return f"ollama pull {model_name}"
+
+
+def warmup_model(
+    model_name: str,
+    keep_alive: str = "30m",
+    timeout: float = 300.0,
+) -> tuple[bool, int, str | None]:
+    """Pre-load a model into Ollama's VRAM so the first real query is fast.
+
+    POSTs an empty-prompt /api/generate request with ``keep_alive`` set so the
+    model stays resident. Idempotent — Ollama returns immediately when the
+    model is already loaded.
+
+    Returns:
+        (ok, duration_ms, error_message). On timeout or any HTTP/network
+        error, ok is False and error_message describes the failure. Never
+        raises — callers can decide whether to surface or swallow.
+    """
+    start = time.time()
+    try:
+        resp = httpx.post(
+            f"{OLLAMA_BASE}/api/generate",
+            json={
+                "model": model_name,
+                "prompt": "",
+                "keep_alive": keep_alive,
+                "stream": False,
+            },
+            timeout=timeout,
+        )
+        elapsed_ms = int((time.time() - start) * 1000)
+        if resp.status_code == 200:
+            return True, elapsed_ms, None
+        # Ollama returns 404 when a model isn't pulled. Surface the body
+        # so callers can fall back cleanly.
+        return False, elapsed_ms, f"Ollama returned {resp.status_code}: {resp.text[:200]}"
+    except httpx.TimeoutException:
+        elapsed_ms = int((time.time() - start) * 1000)
+        return False, elapsed_ms, f"Warmup timed out after {timeout:.0f}s"
+    except Exception as exc:  # noqa: BLE001 — broad catch, we surface via return
+        elapsed_ms = int((time.time() - start) * 1000)
+        return False, elapsed_ms, f"Warmup failed: {exc}"
 
 
 def resolve_available_model(

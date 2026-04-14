@@ -102,6 +102,31 @@ def setup_observability(
     return True
 
 
+def get_tracer(name: str = "local-smartz"):
+    """Return an OTel tracer, or a no-op tracer if instrumentation isn't set up.
+
+    Lets call sites emit spans unconditionally without first checking
+    ``_INSTRUMENTED`` — if OTel deps aren't loaded, the default global
+    tracer is a no-op that drops spans silently.
+    """
+    try:
+        from opentelemetry import trace  # type: ignore
+        return trace.get_tracer(name)
+    except Exception:
+        # Return a no-op tracer shim so callers can still use `with ...`.
+        class _NoopSpan:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def set_attribute(self, *a, **k): pass
+            def record_exception(self, *a, **k): pass
+
+        class _NoopTracer:
+            def start_as_current_span(self, *a, **k):  # noqa: D401
+                return _NoopSpan()
+
+        return _NoopTracer()
+
+
 def status() -> dict:
     """Snapshot for the /api/observability/info endpoint."""
     return {

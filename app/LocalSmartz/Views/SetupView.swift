@@ -36,22 +36,21 @@ struct SetupView: View {
     @State private var showPythonChangeConfirm = false
 
     var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
-
-            Image(systemName: "magnifyingglass.circle.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-
-            Text("Local Smartz")
-                .font(.title)
-                .fontWeight(.semibold)
-
-            Text("Local-first research powered by Ollama")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-
-            Spacer().frame(height: 8)
+        VStack(spacing: 14) {
+            // Single compact header block (icon + title + subtitle together)
+            // — avoids the "floating logo, gap, title, gap, subtitle" stack
+            // that used to push Get Started off the window on shorter screens.
+            VStack(spacing: 6) {
+                Image(systemName: "magnifyingglass.circle.fill")
+                    .font(.system(size: 34))
+                    .foregroundStyle(.secondary)
+                Text("Local Smartz")
+                    .font(.system(size: 20, weight: .semibold))
+                Text("Local-first research powered by Ollama")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 4)
 
             // Detection checklist — single border around the group.
             VStack(spacing: 0) {
@@ -134,11 +133,10 @@ struct SetupView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            // Generous breathing room between the checklist/status and the
-            // primary action. Calm Precision: the eye should rest before
-            // committing. No competing secondary buttons at the bottom —
-            // per-row Change… handles advanced swaps.
-            Spacer().frame(minHeight: 32)
+            // Flexible breathing room — compresses when the window is short
+            // so Get Started stays on-screen. Was a fixed 32+40pt gap which
+            // pushed content off the viewport on 720p displays.
+            Spacer(minLength: 8)
 
             Button {
                 completeSetup()
@@ -152,10 +150,10 @@ struct SetupView: View {
             .controlSize(.large)
             .disabled(!canCompleteSetup)
             .keyboardShortcut(.defaultAction)
-
-            Spacer().frame(height: 40)
         }
-        .padding(32)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .frame(minHeight: 560)
         .task { await runInitialDetection() }
         .onDisappear { shutdownTempBackend() }
         .sheet(isPresented: $showPythonChangeConfirm) {

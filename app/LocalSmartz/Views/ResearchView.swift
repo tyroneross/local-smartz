@@ -19,6 +19,7 @@ struct ResearchView: View {
     @State private var researchTask: Task<Void, Never>?
     @State private var agents: [AgentInfo] = []
     @State private var focusAgent: String?
+    @State private var showInstallSheet = false
 
     private let sseClient = SSEClient()
 
@@ -73,6 +74,26 @@ struct ResearchView: View {
 
                 // Input bar
                 inputBar
+            }
+            // Loading overlay — blocks input until the planning model is
+            // resident in Ollama VRAM. Without this, the first query on
+            // a cold model silently waits 10–60s with only "Thinking…".
+            .overlay {
+                if appState.modelWarmup == .loading {
+                    warmupOverlay
+                }
+            }
+            .sheet(isPresented: $showInstallSheet) {
+                InstallModelSheet(
+                    backendBaseURL: backend.baseURL,
+                    onInstalled: { name in
+                        Task {
+                            await fetchModels()
+                            // Optionally auto-switch to the freshly installed model.
+                            await switchModel(to: name)
+                        }
+                    }
+                )
             }
         }
         .task {
@@ -172,6 +193,12 @@ struct ResearchView: View {
                     }
                 }
                 Divider()
+            }
+            Divider()
+            Button {
+                showInstallSheet = true
+            } label: {
+                Label("Install new model…", systemImage: "plus.circle")
             }
             Button("Refresh list") {
                 Task { await fetchModels() }
@@ -281,6 +308,9 @@ struct ResearchView: View {
     }
 
     private var inputPlaceholder: String {
+        if appState.modelWarmup == .loading {
+            return "Loading model — please wait…"
+        }
         if isStreaming { return "Type your next question — send when ready…" }
         return "Ask a research question…"
     }
@@ -292,6 +322,41 @@ struct ResearchView: View {
             && !isStreaming
             && backend.isRunning
             && appState.ollamaStatus == .ready
+            && appState.modelWarmup != .loading
+    }
+
+    // MARK: - Warmup overlay
+
+    private var warmupOverlay: some View {
+        // Full-view block with centered label. Tap capture via a clear
+        // background so clicks can't reach the input beneath.
+        ZStack {
+            Color.black.opacity(0.35)
+                .ignoresSafeArea()
+            VStack(spacing: 12) {
+                ProgressView()
+                    .controlSize(.large)
+                VStack(spacing: 4) {
+                    Text("Loading model")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.primary)
+                    Text(appState.warmupModelName.isEmpty ? " " : appState.warmupModelName)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text("Ollama is loading the model into memory. This only happens on first use.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 320)
+                }
+            }
+            .padding(24)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(.regularMaterial)
+            )
+        }
+        .allowsHitTesting(true)
     }
 
     private var ollamaColor: Color {
@@ -430,6 +495,23 @@ struct ResearchView: View {
             appState.isResearching = false
             researchTask?.cancel()
             researchTask = nil
+        case .status(let stage, let model, _):
+            // Backend mid-stream lifecycle. We don't need to flip the main
+            // warmup overlay here — startup polling already handles that —
+            // but keep warmupModelName fresh so the overlay copy is right
+            // if the next query triggers a reload.
+            if let model, !model.isEmpty {
+                appState.warmupModelName = model
+            }
+            if stage == "loading_model" {
+                appState.modelWarmup = .loading
+            } else if stage == "ready" {
+                appState.modelWarmup = .ready
+            }
+        case .heartbeat:
+            // Idle keep-alive — no UI state change. The URLSession idle
+            // timer resets on any byte received, which is what we want.
+            break
         }
     }
 
@@ -451,6 +533,15 @@ struct ResearchView: View {
                 await switchModel(to: fallback)
             } else {
                 currentModel = ""
+            }
+            // Kick off warmup for whatever ended up as the active model,
+            // so the first query doesn't pay the cold-load cost silently.
+            if !currentModel.isEmpty, backend.isRunning {
+                ModelWarmup.shared.start(
+                    baseURL: backend.baseURL,
+                    model: currentModel,
+                    appState: appState
+                )
             }
         } catch {
             // Non-fatal — picker shows "Loading models…" / "No models loaded"
@@ -482,6 +573,12 @@ struct ResearchView: View {
             let (_, response) = try await URLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode == 200 {
                 currentModel = name
+                // New active model — warm it so the next query is fast.
+                ModelWarmup.shared.start(
+                    baseURL: backend.baseURL,
+                    model: name,
+                    appState: appState
+                )
                 await refreshStatus()
             } else {
                 errorMessage = "Could not switch to \(name)."

@@ -25,6 +25,13 @@ class AppState: ObservableObject {
     @Published var ollamaStatus: OllamaStatus = .unknown
     @Published var isResearching = false
     @Published var mode: AppMode = .research
+    /// Warmup state of the active planning model. Input is disabled until
+    /// ``.ready`` or ``.error`` (error is non-fatal — the backend will
+    /// still attempt to load on first query).
+    @Published var modelWarmup: ModelWarmupState = .idle
+    /// Name of the model currently being warmed — used for the loading
+    /// overlay copy ("Loading qwen3:8b-q4_K_M…").
+    @Published var warmupModelName: String = ""
 
     enum OllamaStatus: Equatable {
         case unknown
@@ -32,6 +39,16 @@ class AppState: ObservableObject {
         case offline
         case loading
         case needsSetup
+    }
+
+    enum ModelWarmupState: String {
+        case idle
+        case loading
+        case ready
+        case error
+
+        /// True while the UI should block new queries.
+        var isBlocking: Bool { self == .loading }
     }
 
     init() {

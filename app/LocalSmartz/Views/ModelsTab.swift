@@ -242,6 +242,10 @@ struct ModelsTab: View {
     @State private var overrideDraft: String = ""
     @State private var removalCandidate: CatalogModel?
 
+    /// Free-text name for pulling a model that isn't in the curated catalog.
+    /// e.g. "mistral:7b", "llama3.2:1b". Any name Ollama accepts works.
+    @State private var customModelInput: String = ""
+
     /// Effective RAM for classification — override wins if set.
     private var effectiveRAMGB: Int? {
         if ramGBOverride > 0 { return ramGBOverride }
@@ -281,6 +285,13 @@ struct ModelsTab: View {
                         }
                     } header: {
                         Text("Ollama models")
+                            .font(.system(size: 11).smallCaps())
+                            .foregroundStyle(.secondary)
+                    }
+                    Section {
+                        customPullRow
+                    } header: {
+                        Text("Add a model")
                             .font(.system(size: 11).smallCaps())
                             .foregroundStyle(.secondary)
                     }
@@ -491,6 +502,52 @@ struct ModelsTab: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    // Free-form pull: user types an Ollama model tag (e.g. "mistral:7b")
+    // and clicks Install. We don't validate against the Ollama library —
+    // any name `ollama pull` accepts is fair game.
+    @ViewBuilder
+    private var customPullRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("model-name:tag  (e.g. mistral:7b)", text: $customModelInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .disableAutocorrection(true)
+                    .onSubmit { submitCustomPull() }
+                Button("Install") {
+                    submitCustomPull()
+                }
+                .disabled(customTrimmed.isEmpty || vm.busyModel == customTrimmed)
+            }
+            HStack(spacing: 6) {
+                Text("Browse names at")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Link("ollama.com/library", destination: URL(string: "https://ollama.com/library")!)
+                    .font(.system(size: 11))
+            }
+            if let progress = vm.pullProgress[customTrimmed],
+               vm.busyModel == customTrimmed || progress == "Downloaded ✓" {
+                Text(progress)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(progress.hasPrefix("Error") ? .red : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var customTrimmed: String {
+        customModelInput.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func submitCustomPull() {
+        let name = customTrimmed
+        guard !name.isEmpty, vm.busyModel != name else { return }
+        Task { await vm.pull(name) }
     }
 
     private func fitChip(_ fit: RAMFit) -> some View {
