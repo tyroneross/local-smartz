@@ -133,11 +133,80 @@ def test_create_agent_focus_agent_picks_configured_model(fake_home, tmp_path, mo
     # so downstream code (logging, status) agrees.
     assert profile["planning_model"] == analyzer_model
 
-    # The agent_focus_prompt section should have been woven into the system prompt.
+    # Focus mode now *replaces* the system prompt with the role's system_focus
+    # (previously it was an appended "## Single-Agent Mode" section). Since
+    # DeepAgents' subagents list is passed empty in focus mode, the main
+    # agent *is* the role and speaks in that voice directly.
     call_kwargs = mock_create.call_args.kwargs
     sys_prompt = call_kwargs.get("system_prompt", "")
-    assert "Single-Agent Mode" in sys_prompt
     assert "ANALYZER agent" in sys_prompt
+    # subagents=[] in focus mode — the role runs as the main agent, no
+    # ``task`` delegation to avoid small-model tool-call hallucinations.
+    assert call_kwargs.get("subagents") == []
+    # Main agent's tools should be scoped to the analyzer's allow-list.
+    tools_passed = call_kwargs.get("tools") or []
+    tool_names = {getattr(t, "name", None) or getattr(t, "__name__", None) for t in tools_passed}
+    # Analyzer is allowed python_exec + read_file + write_file + ls.
+    assert "python_exec" in tool_names
+    # Analyzer is NOT allowed web_search — scoping prevents the researcher's
+    # tools from bleeding into the focused agent.
+    assert "web_search" not in tool_names
+
+
+def test_multi_agent_mode_passes_scoped_subagents(fake_home, tmp_path):
+    """Default (no focus) mode should pass subagents=[...] where each
+    entry has a narrow tool allow-list. Proves the DeepAgents migration:
+    the planner subagent must not see researcher/analyzer tools."""
+    fake_deep_agent = MagicMock(name="fake_deep_agent")
+    with patch("localsmartz.agent.ChatOllama") as mock_chat, \
+         patch("localsmartz.agent.create_deep_agent", return_value=fake_deep_agent) as mock_create:
+        mock_chat.return_value = MagicMock(name="chat_ollama_instance")
+
+        from localsmartz.agent import create_agent
+
+        create_agent(
+            profile_name="full",
+            cwd=tmp_path,
+            include_plugin_skills=False,
+            include_plugin_tools=False,
+        )
+
+    call_kwargs = mock_create.call_args.kwargs
+    subagents = call_kwargs.get("subagents") or []
+    by_name = {s["name"]: s for s in subagents}
+
+    # All five roles from AGENT_ROLES should be present as subagents.
+    assert {"planner", "researcher", "analyzer", "writer", "reviewer"} <= set(by_name.keys())
+
+    # Per-agent tool scoping — the list here is the CUSTOM tool overlay that
+    # sits on top of DeepAgents' always-on middleware tools (write_todos,
+    # ls, read_file, write_file, edit_file, glob, grep). Planner gets no
+    # custom tools — the tighter surface is what blocks
+    # ``repo_browser.*`` tool-name hallucinations.
+    planner_tool_names = {
+        getattr(t, "name", None) or getattr(t, "__name__", None)
+        for t in by_name["planner"]["tools"]
+    }
+    assert "web_search" not in planner_tool_names
+    assert "python_exec" not in planner_tool_names
+
+    # Analyzer gets python_exec but NOT web_search.
+    analyzer_tool_names = {
+        getattr(t, "name", None) or getattr(t, "__name__", None)
+        for t in by_name["analyzer"]["tools"]
+    }
+    assert "python_exec" in analyzer_tool_names
+    assert "web_search" not in analyzer_tool_names
+
+    # Researcher gets web_search + scrape_url + parse_pdf.
+    researcher_tool_names = {
+        getattr(t, "name", None) or getattr(t, "__name__", None)
+        for t in by_name["researcher"]["tools"]
+    }
+    assert "web_search" in researcher_tool_names
+    assert "scrape_url" in researcher_tool_names
+    # Researcher should not be computing things.
+    assert "python_exec" not in researcher_tool_names
 
 
 def test_create_agent_focus_agent_respects_override(fake_home, tmp_path):

@@ -17,7 +17,8 @@ from langchain_ollama import ChatOllama
 from langgraph.checkpoint.memory import MemorySaver
 
 from localsmartz.profiles import (
-    agent_focus_prompt,
+    AGENT_ROLES,
+    agent_tool_names,
     get_agent_model,
     get_model,
     get_profile,
@@ -198,14 +199,44 @@ You are Local Smartz, a local-first research assistant. You answer questions usi
 def _create_model(profile: dict, role: str, *, model_name: str | None = None) -> ChatOllama:
     """Create a ChatOllama instance for the given profile and role.
 
+    Improvements over the default ``ChatOllama()`` constructor:
+
+    - **Explicit client timeout** — Ollama's default httpx client has no read
+      timeout. A hung model would block the stream indefinitely. We cap
+      read at 600 s (aligned with long report-generation SSE) and keep
+      connect/write short so transient network issues fail fast instead
+      of silently stalling the UI.
+    - **Transient-error retry** — ChatOllama is wrapped in LangChain's
+      ``with_retry`` so a ``httpx.ReadError`` from a hot-unloaded model
+      (common during model switches) re-dispatches once with a jittered
+      backoff instead of killing the turn. Still bubbles up after the
+      second failure so the SSE error path fires.
+
     If ``model_name`` is passed, it overrides the role lookup — used when a
     per-agent model has been resolved upstream.
     """
+    import httpx  # local import: heavy, only needed for the timeout struct
     name = model_name or get_model(profile, role)
-    return ChatOllama(
+    llm = ChatOllama(
         model=name,
         temperature=0,  # Deterministic for reliable tool calling
         num_ctx=4096,  # Conservative context window for memory
+        client_kwargs={
+            "timeout": httpx.Timeout(
+                connect=5.0,
+                read=600.0,
+                write=30.0,
+                pool=5.0,
+            ),
+        },
+    )
+    return llm.with_retry(
+        stop_after_attempt=2,
+        wait_exponential_jitter=True,
+        retry_if_exception_type=(
+            httpx.TransportError,
+            httpx.TimeoutException,
+        ),
     )
 
 
@@ -243,10 +274,20 @@ def fast_path_stream(
         "content": f"[fast-path] using {model_name} (no agent planning)\n\n",
     }
 
+    import httpx
     llm = ChatOllama(
         model=model_name,
         temperature=0,
         num_ctx=2048,  # Tight: fast-path prompts are always short.
+        # Match the main-agent timeout discipline — never let the UI hang
+        # waiting on an unresponsive local model.
+        client_kwargs={
+            "timeout": httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=5.0),
+        },
+    ).with_retry(
+        stop_after_attempt=2,
+        wait_exponential_jitter=True,
+        retry_if_exception_type=(httpx.TransportError, httpx.TimeoutException),
     )
 
     messages = [
@@ -343,6 +384,68 @@ def _build_tool_set(
     return tools, mcp_clients
 
 
+def _tools_index(tools: list) -> dict:
+    """Index the full tool set by ``tool.name`` so we can look up a role's
+    allowed tools from the string names stored in AGENT_ROLES. Tools that
+    don't expose a ``name`` attribute (rare — raw callables) are indexed by
+    ``__name__``."""
+    idx: dict = {}
+    for t in tools:
+        name = getattr(t, "name", None) or getattr(t, "__name__", None)
+        if isinstance(name, str):
+            idx[name] = t
+    return idx
+
+
+def _scope_tools(all_tools: list, wanted: list[str]) -> list:
+    """Select the subset of ``all_tools`` whose name matches one of ``wanted``.
+
+    Silently drops unknown names — the caller can verify completeness via a
+    length check. Used for both focus-mode (main agent is the role) and
+    subagent specs (each role gets a narrow list).
+    """
+    idx = _tools_index(all_tools)
+    return [idx[name] for name in wanted if name in idx]
+
+
+def _build_subagent_specs(
+    profile: dict,
+    all_tools: list,
+) -> list[dict]:
+    """Build a DeepAgents ``subagents=`` list from AGENT_ROLES.
+
+    Each entry gets its own tool set (prevents tool-name hallucinations by
+    shrinking the model's surface area) and its own model (honors per-agent
+    overrides via ``global_config.agent_models`` + profile defaults). The
+    main agent uses ``task()`` to delegate; each subagent sees only its
+    scoped tools — a cleaner replacement for the pre-migration
+    ``agent_focus_prompt`` prompt-injection hack.
+    """
+    specs: list[dict] = []
+    for role_name, meta in AGENT_ROLES.items():
+        if "tools" not in meta:
+            # Role has no explicit tool allow-list at all — skip rather
+            # than inherit the flat set, so we don't re-open the
+            # hallucination surface.
+            continue
+        wanted = agent_tool_names(role_name)
+        scoped = _scope_tools(all_tools, wanted)
+        spec: dict = {
+            "name": role_name,
+            "description": meta.get("summary", role_name),
+            "system_prompt": meta.get("system_focus", ""),
+            # Empty list means "no custom tools" — DeepAgents middleware
+            # still provides write_todos + filesystem built-ins.
+            "tools": scoped,
+        }
+        # Per-agent model override (profile default merged with user overrides).
+        role_model = get_agent_model(profile, role_name)
+        if role_model:
+            spec["model"] = role_model
+        specs.append(spec)
+    return specs
+
+
 def create_agent(
     profile_name: str | None = None,
     thread_id: str | None = None,
@@ -394,29 +497,23 @@ def create_agent(
     # Per-agent model resolution — when the caller pins focus to a named agent,
     # prefer that agent's configured model (profile default merged with any
     # global_config override). An explicit ``model_override`` passed in still
-    # wins so CLI --model keeps working. Also inject the agent_focus_prompt so
-    # the LLM stays in role.
-    focus_suffix = ""
+    # wins so CLI --model keeps working.
     effective_planning_model: str | None = None
-    if focus_agent:
-        focus_suffix = agent_focus_prompt(focus_agent)
-        if not model_override:
-            agent_model = get_agent_model(profile, focus_agent)
-            if agent_model:
-                effective_planning_model = agent_model
-                profile["planning_model"] = agent_model
+    if focus_agent and not model_override:
+        agent_model = get_agent_model(profile, focus_agent)
+        if agent_model:
+            effective_planning_model = agent_model
+            profile["planning_model"] = agent_model
 
     # Use planning model for the main agent
     model = _create_model(profile, "planning", model_name=effective_planning_model)
-
-    combined_extra_prompt = extra_system_prompt + focus_suffix
 
     system_prompt = _build_system_prompt(
         profile,
         include_plugin_skills=include_plugin_skills,
         thread_id=thread_id,
         cwd=cwd,
-        extra_system_prompt=combined_extra_prompt,
+        extra_system_prompt=extra_system_prompt,
     )
 
     tools, mcp_clients = _build_tool_set(
@@ -431,13 +528,41 @@ def create_agent(
     storage_dir = cwd / ".localsmartz"
     storage_dir.mkdir(parents=True, exist_ok=True)
 
-    agent = create_deep_agent(
-        model=model,
-        tools=tools,
-        system_prompt=system_prompt,
-        backend=FilesystemBackend(root_dir=str(storage_dir), virtual_mode=True),
-        checkpointer=checkpointer,
-    )
+    # Two modes:
+    # 1. Focus mode (``focus_agent`` set): scope the MAIN agent's tools to just
+    #    the role's whitelist + replace the system prompt with the role's
+    #    system_focus. No subagents — the role IS the main agent. This blocks
+    #    tool-name hallucinations (the old ``agent_focus_prompt`` hack left
+    #    the full flat tool set accessible, which is how we got
+    #    ``repo_browser.write_todos`` bugs in qwen3:8b).
+    # 2. Multi-agent mode (default): main agent keeps its full tool set and
+    #    ``task()`` delegation. Subagents are built from AGENT_ROLES with
+    #    their own scoped tools + models via _build_subagent_specs.
+    if focus_agent and focus_agent in AGENT_ROLES:
+        role_meta = AGENT_ROLES[focus_agent]
+        wanted = agent_tool_names(focus_agent)
+        scoped_tools = _scope_tools(tools, wanted)
+        role_prompt = role_meta.get("system_focus", "") or system_prompt
+        agent = create_deep_agent(
+            model=model,
+            tools=scoped_tools,
+            system_prompt=role_prompt,
+            backend=FilesystemBackend(root_dir=str(storage_dir), virtual_mode=True),
+            checkpointer=checkpointer,
+            # No subagents — main agent is the role. Removing ``task`` delegation
+            # also keeps the tool budget small for small local models.
+            subagents=[],
+        )
+    else:
+        subagent_specs = _build_subagent_specs(profile, tools)
+        agent = create_deep_agent(
+            model=model,
+            tools=tools,
+            system_prompt=system_prompt,
+            backend=FilesystemBackend(root_dir=str(storage_dir), virtual_mode=True),
+            checkpointer=checkpointer,
+            subagents=subagent_specs if subagent_specs else None,
+        )
 
     return agent, profile, checkpointer, mcp_clients
 

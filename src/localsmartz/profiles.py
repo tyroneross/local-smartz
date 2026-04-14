@@ -10,6 +10,15 @@ AGENT_ROLES = {
     "planner": {
         "title": "Planner",
         "summary": "Decomposes the question into steps. Owns the to-do list.",
+        # Custom tools this role is allowed to call (beyond DeepAgents
+        # built-ins like write_todos, ls, read_file, write_file, edit_file,
+        # glob, grep — those are always provided by the middleware stack).
+        # The Planner has an EMPTY custom list: it has nothing to do
+        # except write todos, and the tighter surface blocks the class of
+        # tool-call hallucinations we saw in practice (small models
+        # inventing namespaced tools like ``repo_browser.write_todos``
+        # when given too many options).
+        "tools": [],
         "system_focus": (
             "You are the PLANNER agent. For multi-step tasks, use write_todos "
             "to lay out a concrete, ordered list of steps and stop. "
@@ -21,6 +30,15 @@ AGENT_ROLES = {
     "researcher": {
         "title": "Researcher",
         "summary": "Gathers information from the web and local files.",
+        "tools": [
+            "web_search",
+            "scrape_url",
+            "parse_pdf",
+            "read_spreadsheet",
+            "read_text_file",
+            "write_file",
+            "read_file",
+        ],
         "system_focus": (
             "You are the RESEARCHER agent. Use web_search, scrape_url, parse_pdf, "
             "read_text_file, and read_spreadsheet to gather raw information. "
@@ -31,6 +49,7 @@ AGENT_ROLES = {
     "analyzer": {
         "title": "Analyzer",
         "summary": "Computes, calculates, and reasons over data.",
+        "tools": ["python_exec", "read_file", "write_file", "ls"],
         "system_focus": (
             "You are the ANALYZER agent. Use python_exec for ALL computation, "
             "statistics, and data manipulation. Read prior research from disk with "
@@ -40,6 +59,7 @@ AGENT_ROLES = {
     "writer": {
         "title": "Writer",
         "summary": "Composes the final report or answer.",
+        "tools": ["create_report", "create_spreadsheet", "read_file", "ls"],
         "system_focus": (
             "You are the WRITER agent. Compose the final user-facing answer or report. "
             "Use create_report when the user wants a deliverable. Pull facts from prior "
@@ -49,6 +69,7 @@ AGENT_ROLES = {
     "reviewer": {
         "title": "Reviewer",
         "summary": "Critiques the output for accuracy and clarity.",
+        "tools": ["read_file", "ls"],
         "system_focus": (
             "You are the REVIEWER agent. Read the most recent answer or report and "
             "produce a critique: factual issues, missing context, unclear claims, "
@@ -56,6 +77,19 @@ AGENT_ROLES = {
         ),
     },
 }
+
+
+def agent_tool_names(role: str) -> list[str]:
+    """Return the tool names allowed for a given role, or an empty list if
+    the role isn't defined. Used both by the agent builder and by ``/api/agents``
+    so the UI can show "Planner uses: write_todos"."""
+    meta = AGENT_ROLES.get(role)
+    if not isinstance(meta, dict):
+        return []
+    tools = meta.get("tools")
+    if isinstance(tools, list):
+        return [str(t) for t in tools]
+    return []
 
 
 # Profile-level agent definitions. Each entry maps agent-name → {model, summary}.
@@ -192,6 +226,10 @@ def list_agents(profile: dict) -> list[dict]:
             "title": meta.get("title", name.title()),
             "summary": summary,
             "model": overrides.get(name, default_model),
+            # Tool allow-list from AGENT_ROLES — surfaced to the UI so a
+            # sidebar can render "Planner uses: write_todos" without the
+            # Swift app having to know about profile internals.
+            "tools": agent_tool_names(name),
         })
     return out
 
@@ -230,20 +268,12 @@ def get_agent_model(profile: dict, agent_name: str) -> str | None:
 
 
 def agent_focus_prompt(agent_name: str | None) -> str:
-    """Return a system prompt suffix that pins the LLM to one role.
-
-    Empty when agent_name is None or unknown — the default multi-agent flow runs.
-    """
-    if not agent_name:
-        return ""
-    meta = AGENT_ROLES.get(agent_name)
-    if not meta:
-        return ""
-    return (
-        "\n\n## Single-Agent Mode\n\n"
-        f"{meta['system_focus']}\n\n"
-        "Do not delegate via the task tool. Do the work in your own scope and stop."
-    )
+    """Deprecated — retained as a shim so older callers (e.g. a cached
+    plugin) don't import-error. Focus mode is now implemented by scoping
+    the main agent's tools + replacing its system prompt directly in
+    ``agent.create_agent``. See the ``AGENT_ROLES[role]["system_focus"]``
+    field and ``_scope_tools`` for the new path. Returns empty string."""
+    return ""
 
 
 def detect_profile() -> str:

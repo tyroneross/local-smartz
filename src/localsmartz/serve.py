@@ -1267,7 +1267,6 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         )
         from localsmartz.observability import get_tracer
         from localsmartz.profiles import (
-            agent_focus_prompt,
             get_profile,
             is_fast_path,
         )
@@ -1407,9 +1406,9 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                     pass
             return
 
-        # Note: create_agent applies agent_focus_prompt internally when
-        # focus_agent is set — we don't need to stuff it into extra_system_prompt
-        # again. Keep the user-visible note for UI feedback.
+        # Focus mode: create_agent now scopes the main agent's tools + swaps
+        # system prompt (see agent.create_agent focus-mode branch). The
+        # banner stays — it's what the user sees in the UI.
         if focus_agent:
             self._send_event({"type": "text", "content": f"[focus] running as `{focus_agent}` agent only\n\n"})
 
