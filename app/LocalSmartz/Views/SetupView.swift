@@ -133,10 +133,10 @@ struct SetupView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            // Flexible breathing room — compresses when the window is short
-            // so Get Started stays on-screen. Was a fixed 32+40pt gap which
-            // pushed content off the viewport on 720p displays.
-            Spacer(minLength: 8)
+            // Flexible breathing room — capped so Get Started sits close to
+            // the "ready" message on tall windows instead of pinning to the
+            // bottom. Still compresses on short windows (min 8, max 32).
+            Spacer(minLength: 8).frame(maxHeight: 32)
 
             Button {
                 completeSetup()
