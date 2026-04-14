@@ -98,8 +98,14 @@ struct ResearchView: View {
             // Loading overlay — blocks input until the planning model is
             // resident in Ollama VRAM. Without this, the first query on
             // a cold model silently waits 10–60s with only "Thinking…".
+            //
+            // Gated on !isStreaming so mid-run specialist model swaps
+            // (SSE status stage="loading_model") don't drop a full-screen
+            // cover over OutputView and obliterate in-flight content.
+            // Mid-stream loads surface inline via the loading_model
+            // ToolCallEntry breadcrumb below.
             .overlay {
-                if appState.modelWarmup == .loading {
+                if appState.modelWarmup == .loading && !isStreaming {
                     warmupOverlay
                 }
             }
@@ -730,6 +736,19 @@ struct ResearchView: View {
             }
             if stage == "loading_model" {
                 appState.modelWarmup = .loading
+                // Mid-stream the overlay is suppressed (would hide OutputView);
+                // drop a breadcrumb into the tool list so the user can see
+                // that the specialist swap is what the pause is about.
+                if isStreaming {
+                    let modelLabel = (model?.isEmpty == false) ? model! : "model"
+                    toolCalls.append(
+                        ToolCallEntry(
+                            name: "loading model: \(modelLabel)",
+                            message: "",
+                            isError: false
+                        )
+                    )
+                }
             } else if stage == "ready" {
                 appState.modelWarmup = .ready
             }
