@@ -1374,19 +1374,23 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             try:
                 for event in fast_path_stream(prompt, profile, model_override=model_override):
                     pulse.touch()
-                    if event.get("type") == "done":
-                        # Rewrite thread_id + duration so the client sees our wall time.
-                        self._send_event({
-                            "type": "done",
-                            "duration_ms": int((time.time() - start_time) * 1000),
-                            "thread_id": thread_id or "",
-                        })
-                        continue
-                    if event.get("type") == "text":
-                        content = event.get("content", "")
-                        if isinstance(content, str):
-                            first_text += content
-                    self._send_event(event)
+                    try:
+                        if event.get("type") == "done":
+                            # Rewrite thread_id + duration so the client sees our wall time.
+                            self._send_event({
+                                "type": "done",
+                                "duration_ms": int((time.time() - start_time) * 1000),
+                                "thread_id": thread_id or "",
+                            })
+                            continue
+                        if event.get("type") == "text":
+                            content = event.get("content", "")
+                            if isinstance(content, str):
+                                first_text += content
+                        self._send_event(event)
+                    except (BrokenPipeError, ConnectionResetError):
+                        # Client disconnected — stop pulling tokens immediately.
+                        break
             finally:
                 pulse.stop()
                 fast_path_span_cm.__exit__(None, None, None)
@@ -1435,6 +1439,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         drift_detector = create_drift_detector(profile)
         turn_count = 0
         loop_broken = False
+        client_disconnected = False
 
         # Build the set of valid tool names exposed to the model so we can
         # reject hallucinated namespaced ones (e.g. ``repo_browser.write_todos``)
@@ -1594,36 +1599,43 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                             "message": f"Turn limit ({max_turns}) reached. Returning partial results.",
                         })
                     break
+        except (BrokenPipeError, ConnectionResetError):
+            # Client disconnected mid-stream. Flag it so the post-stream
+            # invoke()/done-event writes are skipped, but still run
+            # pulse.stop() + span close + mcp cleanup below.
+            client_disconnected = True
         finally:
             pulse.stop()
             full_span.set_attribute("turn_count", turn_count)
             full_span.set_attribute("tools_used", ",".join(sorted(tools_used)))
             full_span_cm.__exit__(None, None, None)
 
-        # Get final result
-        full_result = agent.invoke(None, config=config)
-        response = extract_final_response(full_result) if full_result else "No response generated."
+        try:
+            if not client_disconnected:
+                # Get final result
+                full_result = agent.invoke(None, config=config)
+                response = extract_final_response(full_result) if full_result else "No response generated."
 
-        # Log to thread BEFORE sending done event (prevents race condition)
-        if thread_id and full_result:
-            try:
-                append_entry(
-                    thread_id=thread_id,
-                    cwd=str(cwd),
-                    query=prompt,
-                    summary=response[:500],
-                    artifacts=[],
-                    turns=len(full_result.get("messages", [])),
-                )
-            except Exception:
-                pass
+                # Log to thread BEFORE sending done event (prevents race condition)
+                if thread_id and full_result:
+                    try:
+                        append_entry(
+                            thread_id=thread_id,
+                            cwd=str(cwd),
+                            query=prompt,
+                            summary=response[:500],
+                            artifacts=[],
+                            turns=len(full_result.get("messages", [])),
+                        )
+                    except Exception:
+                        pass
 
-        duration_ms = int((time.time() - start_time) * 1000)
-        self._send_event({"type": "done", "duration_ms": duration_ms, "thread_id": thread_id or ""})
-
-        if mcp_clients:
-            from localsmartz.plugins.agent_integration import close_mcp_clients
-            close_mcp_clients(mcp_clients)
+                duration_ms = int((time.time() - start_time) * 1000)
+                self._send_event({"type": "done", "duration_ms": duration_ms, "thread_id": thread_id or ""})
+        finally:
+            if mcp_clients:
+                from localsmartz.plugins.agent_integration import close_mcp_clients
+                close_mcp_clients(mcp_clients)
 
     def _handle_models(self):
         """Return available Ollama models with current selection."""
