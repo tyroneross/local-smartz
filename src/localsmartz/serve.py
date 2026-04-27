@@ -1678,7 +1678,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         from localsmartz.agent import create_agent, extract_final_response
         from localsmartz.observability import get_tracer
         from localsmartz.threads import append_entry
-        from localsmartz.validation import LoopDetector
+        from localsmartz.validation import LoopDetector, TurnCallDeduplicator, IntentAnchor
         from localsmartz.drift import create_drift_detector
 
         # Focus mode: create_agent now scopes the main agent's tools + swaps
@@ -1706,6 +1706,13 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         max_turns = profile.get("max_turns", 20)
         loop_detector = LoopDetector(max_repeats=3)
         drift_detector = create_drift_detector(profile)
+        # Per-turn tool-call deduplication (1b): suppress redundant calls that
+        # the model re-emits within the same user-message turn (e.g. Harmony-
+        # wrapped duplicates). Resets at the next user message.
+        turn_dedup = TurnCallDeduplicator()
+        # Intent anchor (1c): pins the original user prompt so tool-error
+        # recovery can re-inject context and prevent generic fallback replies.
+        intent_anchor = IntentAnchor(prompt)
         turn_count = 0
         loop_broken = False
         client_disconnected = False
@@ -1799,8 +1806,26 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                     for msg in messages:
                         # Tool calls from the AI
                         if hasattr(msg, "tool_calls") and msg.tool_calls:
+                            from localsmartz.runners.harmony import (
+                                strip_harmony_tokens,
+                                extract_harmony_tool_call,
+                            )
                             for tc in msg.tool_calls:
                                 name = tc.get("name", "unknown")
+                                # Pre-process gpt-oss Harmony-format token wrappers
+                                # before the name validator sees the string.
+                                # e.g. "assistant<|channel|>commentary<|message|>functions=web_search"
+                                # → "web_search"
+                                harmony_call = extract_harmony_tool_call(name)
+                                if harmony_call is not None:
+                                    # Recover args from the harmony string if
+                                    # the tc dict doesn't already have them.
+                                    _hname, _hargs = harmony_call
+                                    if not tc.get("args"):
+                                        tc["args"] = _hargs
+                                    name = _hname
+                                else:
+                                    name = strip_harmony_tokens(name)
                                 # Guard against hallucinated namespace prefixes
                                 # (``repo_browser.write_todos`` etc).
                                 if not _is_valid_tool_name(
@@ -1816,6 +1841,27 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                                         ),
                                     })
                                     continue
+                                # Per-turn dedup (1b): if the model re-emits
+                                # the same (name, args) within one turn, return
+                                # the cached result without re-running.
+                                _tc_args = tc.get("args") or {}
+                                if turn_dedup.is_duplicate(name, _tc_args):
+                                    self._send_event({
+                                        "type": "tool_error",
+                                        "name": name,
+                                        "message": (
+                                            f"Duplicate tool call '{name}' suppressed "
+                                            "within this turn — returning cached result."
+                                        ),
+                                    })
+                                    continue
+                                # Register this call in the per-turn cache.
+                                # The actual result isn't available here (the
+                                # framework runs the tool asynchronously), so
+                                # we store a sentinel; future duplicates are
+                                # caught by is_duplicate() above.
+                                turn_dedup.check_and_record(name, _tc_args, result="[cached]")
+
                                 tools_used.add(name)
                                 turn_count += 1
                                 self._send_event({"type": "tool", "name": name})
@@ -1868,6 +1914,17 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                                     "type": "tool_error",
                                     "name": getattr(msg, "name", "unknown"),
                                     "message": content[:200],
+                                })
+                                # Intent anchor (1c): record the error so the
+                                # anchor knows to inject on next generation.
+                                intent_anchor.record_error()
+                                # Re-inject the original user prompt as a
+                                # system note so the model stays anchored to
+                                # the task rather than falling back to a
+                                # generic greeting.
+                                self._send_event({
+                                    "type": "intent_recovery",
+                                    "message": intent_anchor.recovery_message(),
                                 })
                             for de in drift_detector.record_tool_result(getattr(msg, "name", "unknown"), content, is_error, turn_count):
                                 self._send_event({

@@ -134,6 +134,10 @@ When producing a final report:
 - If a tool fails, report the error and try an alternative
 - Cite sources for every factual claim
 - Save reports to .localsmartz/reports/ unless user specifies otherwise
+
+## PowerPoint / Slide Deck Policy
+
+When the user asks for a PowerPoint, slide deck, .pptx, or "deck", produce a markdown outline using `# Slide N: <title>` headers with bullet points underneath each slide. Do not attempt to generate `.pptx` binary output. State at the top of your response that the user can paste this into their slide tool.
 """
 
 
@@ -193,6 +197,10 @@ You are Local Smartz, a local-first research assistant. You answer questions usi
 - Use bullet points for key findings
 - Cite sources: [Source Name] for claims
 - Keep answers focused and concise
+
+## PowerPoint / Slide Deck Policy
+
+When the user asks for a PowerPoint, slide deck, .pptx, or "deck", produce a markdown outline using `# Slide N: <title>` headers with bullet points underneath each slide. Do not attempt to generate `.pptx` binary output. State at the top of your response that the user can paste this into their slide tool.
 """
 
 

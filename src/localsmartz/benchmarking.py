@@ -545,7 +545,40 @@ def run_golden_on_provider(
         "openai": "gpt-4.1-mini",
         "groq": "llama-3.3-70b-versatile",
     }
-    resolved_model = model or defaults.get(provider, "qwen3.5:9b-q4_K_M")
+
+    if model is None and provider == "ollama":
+        # Prefer an actually-installed model over the catalog default.
+        # Fallback chain:
+        #   1. First installed model whose name appears in the registry
+        #   2. First installed model (any)
+        #   3. Active profile's planning_model (guaranteed installed because
+        #      the backend is already running)
+        #   4. Hardcoded catalog default (legacy path)
+        from localsmartz.ollama import list_models as _list_ollama
+        from localsmartz.models.registry import get_all_recs as _all_recs
+        from localsmartz.profiles import get_profile as _get_profile
+
+        installed = _list_ollama()
+        if installed:
+            registry_names = {r["name"] for r in _all_recs()}
+            # Normalise: strip quant suffix for matching (e.g. qwen3:8b-q4_K_M → qwen3:8b)
+            def _base(n: str) -> str:
+                return n.split("-")[0] if "-" in n.split(":")[-1] else n
+
+            registry_bases = {_base(n) for n in registry_names}
+            registry_match = next(
+                (m for m in installed if _base(m) in registry_bases),
+                None,
+            )
+            resolved_model = registry_match or installed[0]
+        else:
+            # Ollama not reachable; fall back to profile's planning_model
+            try:
+                resolved_model = _get_profile()["planning_model"]
+            except Exception:
+                resolved_model = defaults["ollama"]
+    else:
+        resolved_model = model or defaults.get(provider, "qwen3.5:9b-q4_K_M")
 
     try:
         runner = get_runner(provider)

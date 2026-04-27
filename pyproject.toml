@@ -50,6 +50,7 @@ dependencies = [
 
 [project.scripts]
 localsmartz = "localsmartz.__main__:main"
+local-smartz = "localsmartz.__main__:main"
 localsmartz-benchmark = "localsmartz.benchmarking:main"
 
 [tool.hatch.build.targets.wheel]
