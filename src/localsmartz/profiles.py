@@ -513,6 +513,34 @@ _FAST_PATH_FACTUAL_PREFIXES: tuple[str, ...] = (
     "capital of ", "population of ", "name of ",
 )
 
+_FAST_PATH_CURRENT_DATA_BLOCKERS: tuple[str, ...] = (
+    "current", "latest", "recent", "today", "this month", "this week",
+    "news", "stock", "price", "now",
+)
+
+_FAST_PATH_RECOMMENDATION_BLOCKERS: tuple[str, ...] = (
+    "recommend", "recommendation", "should i", "which model", "which tool",
+    "which option", "which should", "best ",
+)
+
+_FAST_PATH_LOCAL_WORK_BLOCKERS: tuple[str, ...] = (
+    "debug", "diagnose", "fix ", "stuck", "launching", "this app",
+)
+
+_FAST_PATH_AGENT_BLOCKERS: tuple[str, ...] = (
+    _FAST_PATH_CURRENT_DATA_BLOCKERS
+    + _FAST_PATH_RECOMMENDATION_BLOCKERS
+    + _FAST_PATH_LOCAL_WORK_BLOCKERS
+)
+
+_FAST_PATH_RESEARCH_KEYWORDS: tuple[str, ...] = (
+    "research", "analyze", "compare", "report", "write a", "summarize",
+    "investigate", "find out", "look into", "deep dive", "explore",
+    "evaluate", "assess", "benchmark", "survey", "breakdown", "scrape",
+    "search the web", "find sources", "find citations", "citations",
+    "pull data",
+)
+
 
 def is_fast_path(prompt: str) -> bool:
     """True if the prompt looks trivial enough to skip the agent graph.
@@ -536,17 +564,15 @@ def is_fast_path(prompt: str) -> bool:
     # Size/terminator caps apply to the positive short-circuit too.
     if t.count(".") + t.count("?") > 2:
         return False
+    for blocker in _FAST_PATH_AGENT_BLOCKERS:
+        if blocker in t:
+            return False
     # Positive short-circuit for short factual-question shapes.
-    if any(t.startswith(p) for p in _FAST_PATH_FACTUAL_PREFIXES):
+    if t.startswith(_FAST_PATH_FACTUAL_PREFIXES):
         return True
-    research_keywords = [
-        "research", "analyze", "compare", "report", "write a", "summarize",
-        "investigate", "find out", "look into", "deep dive", "explore",
-        "evaluate", "assess", "benchmark", "survey", "breakdown", "scrape",
-        "search the web", "find sources", "pull data",
-    ]
-    if any(k in t for k in research_keywords):
-        return False
+    for keyword in _FAST_PATH_RESEARCH_KEYWORDS:
+        if keyword in t:
+            return False
     return True
 
 

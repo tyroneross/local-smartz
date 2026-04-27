@@ -1,0 +1,15 @@
+{
+  "target": "query-doe-routing-score",
+  "scope": "src/localsmartz/profiles.py,src/localsmartz/query_doe.py,tests/test_fast_path.py,tests/test_query_doe.py",
+  "metric_cmd": "./.venv/bin/python -m localsmartz.query_doe --repetitions 200 --score-only",
+  "guard_cmd": "./.venv/bin/python -m pytest tests/test_fast_path.py tests/test_query_doe.py tests/test_benchmarking.py -q",
+  "budget": 10,
+  "direction": "higher",
+  "baseline_commit": "50701ec",
+  "baseline_value": 1280.684,
+  "best_value": 2996.875,
+  "prompt_version": "doe-v1",
+  "started_at": "2026-04-27T09:01:56.973350+00:00Z",
+  "iterations_kept": 8,
+  "iterations_total": 10
+}

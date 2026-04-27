@@ -1,0 +1,12 @@
+iteration	commit	metric	delta	status	description	hypothesis
+0	50701ec	1280.6840	0.0	baseline	initial state
+1	50701ec	2441.5110	+1160.8270	keep	metric 2441.5110 (delta +1160.8270 vs best)	Block current/recent/stock/news prompts before factual-prefix fast-path short-circuit.
+2	50701ec	2645.6280	+204.1170	keep	metric 2645.6280 (delta +204.1170 vs best)	Treat citation-finding as a research task so source-backed queries stay on the agent graph.
+3	50701ec	2823.7840	+178.1560	keep	metric 2823.7840 (delta +178.1560 vs best)	Route recommendation and model-selection prompts through agents instead of the generic short-prompt fallback.
+4	50701ec	2989.7900	+166.0060	keep	metric 2989.7900 (delta +166.0060 vs best)	Keep debugging and local-app repair prompts on the agent path because they need investigation, not one-turn trivia.
+5	50701ec	2989.3750	-0.4150	discard	metric not improved 2989.3750 (delta -0.4150 vs best)	Move research keyword allocation out of is_fast_path to reduce per-call classifier work.
+6	50701ec	2990.6250	+0.8350	keep	metric 2990.6250 (delta +0.8350 vs best)	Combine pre-prefix agent blockers into one tuple to reduce repeated any() passes.
+7	50701ec	2990.8300	+0.2050	keep	metric 2990.8300 (delta +0.2050 vs best)	Hoist research keyword set to module scope after blocker consolidation to avoid list allocation on agent-route checks.
+8	50701ec	2994.3750	+3.5450	keep	metric 2994.3750 (delta +3.5450 vs best)	Use tuple-aware str.startswith for factual prefixes instead of a generator loop.
+9	50701ec	2996.8750	+2.5000	keep	metric 2996.8750 (delta +2.5000 vs best)	Replace generator-based membership scans with early-return loops to reduce classifier overhead.
+10	50701ec	2996.8750	+0.0000	discard	metric not improved 2996.8750 (delta +0.0000 vs best)	Strip before length and lowercase checks to avoid lowercasing empty or oversized surrounding whitespace.

@@ -111,3 +111,18 @@ def test_research_keyword_wins_when_no_factual_prefix():
     # "research the population of Tokyo" — doesn't start with a factual prefix,
     # so the research keyword still wins and blocks fast-path.
     assert is_fast_path("research the population of Tokyo") is False
+
+
+def test_current_data_blocks_factual_prefix_fast_path():
+    assert is_fast_path("what is the latest price of Apple stock?") is False
+    assert is_fast_path("who is the current CEO of OpenAI?") is False
+
+
+def test_recommendation_and_model_selection_block_fast_path():
+    assert is_fast_path("what's the best laptop to buy this month?") is False
+    assert is_fast_path("which model should I use, qwen or gpt-oss?") is False
+
+
+def test_citation_and_debugging_prompts_block_fast_path():
+    assert is_fast_path("find citations for local model latency") is False
+    assert is_fast_path("debug why the macOS app is stuck launching") is False
