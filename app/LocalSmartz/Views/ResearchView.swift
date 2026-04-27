@@ -809,6 +809,8 @@ struct ResearchView: View {
                 Button(action: runResearch) {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.title2)
+                        .frame(minWidth: 24, minHeight: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.borderless)
                 .disabled(!canRun)

@@ -52,6 +52,8 @@ struct ThreadListView: View {
             Section {
                 Button(action: onNewThread) {
                     Label("New Research", systemImage: "plus.circle")
+                        .frame(minHeight: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.accentColor)

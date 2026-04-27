@@ -35,6 +35,8 @@ struct MainView: View {
                     }
                     .foregroundStyle(appState.mode == mode ? Color.primary : .secondary)
                     .padding(.vertical, 6)
+                    .frame(minHeight: 24)
+                    .contentShape(Rectangle())
                     .overlay(alignment: .bottom) {
                         Rectangle()
                             .fill(appState.mode == mode ? Color.accentColor : .clear)
