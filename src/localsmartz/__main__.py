@@ -13,7 +13,7 @@ except ImportError:
     pass  # Windows fallback — input() still works, just no history
 
 
-_NOUNS = ("plugins", "skills", "config", "secrets", "logs", "doctor")
+_NOUNS = ("plugins", "skills", "config", "secrets", "logs", "doctor", "model")
 
 
 def main():
@@ -126,11 +126,19 @@ def _legacy_main():
         os.environ["LANGSMITH_TRACING"] = "true"
     configure_tracing(cwd)
 
-    # Configure OpenTelemetry observability (local Phoenix, opt-in via --observe
-    # OR LOCALSMARTZ_OBSERVE=1 env var). Failures are logged + swallowed.
-    from localsmartz.observability import setup_observability, is_observability_enabled
+    # OpenTelemetry observability (local Phoenix). Default posture:
+    #   - If --observe or LOCALSMARTZ_OBSERVE=1 → force-init.
+    #   - Else auto-init when a collector is reachable (Phoenix at :6006).
+    #   - LOCALSMARTZ_OBSERVE=0 forces off regardless of reachability.
+    from localsmartz.observability import (
+        auto_setup_if_reachable,
+        is_observability_enabled,
+        setup_observability,
+    )
     if (hasattr(args, 'observe') and args.observe) or is_observability_enabled():
         setup_observability()
+    else:
+        auto_setup_if_reachable()
 
     # List threads mode
     if args.list_threads:
@@ -367,10 +375,16 @@ def _preflight(profile: dict) -> bool:
     """Quick Ollama check before running. Returns True if ready.
 
     Mutates `profile["planning_model"]` to a fallback if the configured one
-    isn't pulled but a usable substitute exists. Also warms the model into
-    Ollama VRAM so the first query doesn't sit in a silent cold-load.
+    isn't pulled but a usable substitute exists. Also ensures the model is
+    ready in Ollama VRAM, but skips the warmup call when it is already
+    resident.
     """
-    from localsmartz.ollama import check_server, resolve_available_model, warmup_model
+    from localsmartz.ollama import (
+        check_server,
+        ensure_model_ready,
+        is_model_loaded,
+        resolve_available_model,
+    )
 
     if not check_server():
         print("Error: Ollama is not running. Start it with: ollama serve", file=sys.stderr)
@@ -385,11 +399,13 @@ def _preflight(profile: dict) -> bool:
         print(f"  \033[33m!\033[0m {msg}", file=sys.stderr)
         profile["planning_model"] = chosen
 
-    # Warm the model — blocks until it's loaded into VRAM (or keep_alive refreshed).
-    # Idempotent: returns fast if the model is already resident.
     target = profile["planning_model"]
+    if is_model_loaded(target):
+        print(f"  Model {target}: already loaded", file=sys.stderr)
+        return True
+
     print(f"  Loading model {target}...", end="", flush=True, file=sys.stderr)
-    ok, warm_ms, warm_err = warmup_model(target, keep_alive="30m")
+    ok, warm_ms, warm_err, _ = ensure_model_ready(target, keep_alive="30m")
     if ok:
         print(f" \033[32m\u2713\033[0m ({warm_ms} ms)", file=sys.stderr)
     else:
@@ -594,9 +610,59 @@ def _interactive(args, cwd: Path):
         print()
 
 
+def _run_fast_path_cli(
+    prompt: str,
+    profile: dict,
+    *,
+    model_override: str | None,
+    verbose: bool,
+) -> str:
+    """Run the trivial-prompt fast path for the CLI."""
+    from localsmartz.agent import fast_path_stream
+
+    chunks: list[str] = []
+    for event in fast_path_stream(prompt, profile, model_override=model_override):
+        event_type = event.get("type")
+        if event_type == "text":
+            content = event.get("content", "")
+            if isinstance(content, str):
+                # Server UI keeps the marker; the CLI only needs the answer.
+                if content.startswith("[fast-path]"):
+                    continue
+                chunks.append(content)
+        elif event_type == "tool_error" and verbose:
+            print(
+                f"  Fast-path warning: {event.get('message', 'unknown error')}",
+                file=sys.stderr,
+            )
+    return "".join(chunks).strip()
+
+
+def _run_graph_pipeline_cli(
+    prompt: str,
+    profile: dict,
+    *,
+    verbose: bool,
+) -> tuple[dict, str]:
+    """Run the deterministic graph pipeline for the CLI."""
+    from localsmartz import pipeline as _pipeline
+
+    def _sink(event: dict) -> None:
+        if not verbose:
+            return
+        if event.get("type") == "stage":
+            stage = event.get("stage", "unknown")
+            print(f"  ▸ {stage}", file=sys.stderr)
+
+    result = _pipeline.run(prompt, profile=profile, sink=_sink, with_agents=True)
+    response = result.get("final_answer", "")
+    return result, response if isinstance(response, str) else str(response)
+
+
 def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
     """Execute a single research query."""
     from localsmartz.agent import run_research, extract_final_response, review_output
+    from localsmartz.routing import select_research_runtime
     from localsmartz.threads import create_thread, append_entry
     from localsmartz.profiles import get_profile
 
@@ -624,18 +690,37 @@ def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
     if thread_id:
         create_thread(thread_id, str(cwd), title=prompt[:60])
 
-    # Run the agent with streaming
-    result = run_research(
-        prompt=prompt,
-        profile_name=args.profile,
-        thread_id=thread_id,
-        cwd=cwd,
-        verbose=verbose,
-        model_override=effective_override,
-    )
+    route = select_research_runtime(prompt)
+    if verbose and route != "full_agent":
+        print(f"  Route: {route}", file=sys.stderr)
 
-    # Extract and print final response
-    response = extract_final_response(result)
+    if route == "fast_path":
+        result = {"messages": []}
+        response = _run_fast_path_cli(
+            prompt,
+            profile,
+            model_override=effective_override,
+            verbose=verbose,
+        )
+    elif route == "graph_pipeline":
+        result, response = _run_graph_pipeline_cli(
+            prompt,
+            profile,
+            verbose=verbose,
+        )
+    else:
+        # Legacy DeepAgents path remains available, but is no longer the
+        # default local runtime for every CLI request.
+        result = run_research(
+            prompt=prompt,
+            profile_name=args.profile,
+            thread_id=thread_id,
+            cwd=cwd,
+            verbose=verbose,
+            model_override=effective_override,
+        )
+        response = extract_final_response(result)
+
     print(response)
 
     # Quality gate (full profile only)
@@ -657,7 +742,7 @@ def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
                 query=prompt,
                 summary=response[:500],
                 artifacts=[],
-                turns=len(result.get("messages", [])),
+                turns=max(1, len(result.get("messages", []))),
             )
         except Exception:
             pass  # Thread logging is best-effort
@@ -682,6 +767,10 @@ def _handle_noun_command(noun: str, rest: list[str]) -> None:
             _cmd_logs(rest)
         elif noun == "doctor":
             _cmd_doctor(rest)
+        elif noun == "model":
+            from localsmartz.cli.model import main as _model_main
+
+            sys.exit(_model_main(rest))
     except SystemExit:
         raise
     except Exception as e:  # pragma: no cover — unexpected crashes

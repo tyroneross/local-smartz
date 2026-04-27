@@ -23,3 +23,6 @@ build/
 .navgator/architecture/SUMMARY.md
 .navgator/architecture/SUMMARY_FULL.md
 # <<< NavGator safety guard
+
+# Bookmark snapshot data
+.claude/bookmarks/

@@ -118,6 +118,89 @@ def test_build_graph_has_expected_nodes():
         assert name in node_names, f"missing node: {name}"
 
 
+def test_build_agents_for_roles_reuses_cached_specialists():
+    """Repeated calls with the same effective profile should reuse the
+    compiled role executors instead of rebuilding them every request."""
+    pipeline.clear_agents_cache()
+    profile = {
+        "name": "lite",
+        "planning_model": "qwen3:8b-q4_K_M",
+        "execution_model": "qwen3:8b-q4_K_M",
+    }
+    calls: list[str] = []
+
+    def fake_build_role_agent(role: str, profile: dict, all_tools: list):
+        calls.append(f"{role}:{profile['planning_model']}:{len(all_tools)}")
+        return f"agent:{role}:{profile['planning_model']}"
+
+    with patch("localsmartz.pipeline._build_tool_registry", return_value=["tool"]), \
+         patch("localsmartz.pipeline._build_role_agent", side_effect=fake_build_role_agent):
+        first = pipeline._build_agents_for_roles(profile)
+        second = pipeline._build_agents_for_roles(dict(profile))
+
+    assert first == second
+    assert len(calls) == len(pipeline._SPECIALIST_ROLES)
+
+
+def test_build_agents_for_roles_cache_invalidates_on_profile_change():
+    """Changing the effective profile/model should force a rebuild."""
+    pipeline.clear_agents_cache()
+    calls: list[str] = []
+
+    def fake_build_role_agent(role: str, profile: dict, all_tools: list):
+        calls.append(f"{role}:{profile['planning_model']}")
+        return f"agent:{role}:{profile['planning_model']}"
+
+    with patch("localsmartz.pipeline._build_tool_registry", return_value=["tool"]), \
+         patch("localsmartz.pipeline._build_role_agent", side_effect=fake_build_role_agent):
+        pipeline._build_agents_for_roles(
+            {
+                "name": "lite",
+                "planning_model": "qwen3:8b-q4_K_M",
+                "execution_model": "qwen3:8b-q4_K_M",
+            }
+        )
+        pipeline._build_agents_for_roles(
+            {
+                "name": "lite",
+                "planning_model": "gemma3:12b",
+                "execution_model": "gemma3:12b",
+            }
+        )
+
+    assert len(calls) == len(pipeline._SPECIALIST_ROLES) * 2
+
+
+def test_build_agents_for_roles_skips_cache_when_disabled(monkeypatch):
+    """Explicit opt-out should rebuild specialists every call."""
+    pipeline.clear_agents_cache()
+    monkeypatch.setenv("LOCALSMARTZ_DISABLE_ROLE_AGENT_CACHE", "1")
+    calls: list[str] = []
+
+    def fake_build_role_agent(role: str, profile: dict, all_tools: list):
+        calls.append(f"{role}:{profile['planning_model']}")
+        return f"agent:{role}:{profile['planning_model']}"
+
+    with patch("localsmartz.pipeline._build_tool_registry", return_value=["tool"]), \
+         patch("localsmartz.pipeline._build_role_agent", side_effect=fake_build_role_agent):
+        pipeline._build_agents_for_roles(
+            {
+                "name": "lite",
+                "planning_model": "qwen3:8b-q4_K_M",
+                "execution_model": "qwen3:8b-q4_K_M",
+            }
+        )
+        pipeline._build_agents_for_roles(
+            {
+                "name": "lite",
+                "planning_model": "qwen3:8b-q4_K_M",
+                "execution_model": "qwen3:8b-q4_K_M",
+            }
+        )
+
+    assert len(calls) == len(pipeline._SPECIALIST_ROLES) * 2
+
+
 # ── End-to-end execution (stubbed _invoke_role) ─────────────────────────
 
 class _Script:
@@ -400,7 +483,10 @@ def test_role_llm_uses_profile_model(monkeypatch):
                 content = "stub"
             return _Resp()
 
-    monkeypatch.setattr("localsmartz.pipeline.ChatOllama", FakeChat)
+    # Post 2026-04-23, ``_role_llm`` delegates to ``agent._create_model``
+    # which dispatches on config.provider and calls the ollama builder
+    # through the LangChain ChatOllama class imported in agent.py.
+    monkeypatch.setattr("localsmartz.agent.ChatOllama", FakeChat)
     from localsmartz.pipeline import _role_llm
 
     profile = get_profile("full")
@@ -435,7 +521,7 @@ def test_role_llm_not_wrapped_in_runnable_retry():
         def bind_tools(self, tools, **_kwargs):
             return self
 
-    with patch("localsmartz.pipeline.ChatOllama", FakeChat):
+    with patch("localsmartz.agent.ChatOllama", FakeChat):
         from localsmartz.pipeline import _role_llm
         llm = _role_llm("writer", profile)
 
@@ -477,7 +563,7 @@ def test_build_role_agent_binds_tools(monkeypatch):
                 return {"messages": [type("M", (), {"content": "ok"})()]}
         return _Exec()
 
-    monkeypatch.setattr("localsmartz.pipeline.ChatOllama", FakeChat)
+    monkeypatch.setattr("localsmartz.agent.ChatOllama", FakeChat)
     # The real module imports this as ``create_react_agent`` per the
     # alias in pipeline.py to avoid colliding with ``agent.create_agent``.
     monkeypatch.setattr("localsmartz.pipeline.create_react_agent", fake_create_agent)

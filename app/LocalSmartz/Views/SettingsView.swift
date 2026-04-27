@@ -69,6 +69,10 @@ struct SettingsView: View {
                     .tabItem { Label("Agent Routing", systemImage: "arrow.triangle.branch") }
                 AgentsTab()
                     .tabItem { Label("Agents", systemImage: "person.3") }
+                PatternTab()
+                    .tabItem { Label("Pattern", systemImage: "rectangle.connected.to.line.below") }
+                EvalTab()
+                    .tabItem { Label("Eval", systemImage: "checkmark.seal") }
                 ApiKeysTab()
                     .tabItem { Label("API Keys", systemImage: "key") }
                 TelemetryTab()

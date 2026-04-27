@@ -67,6 +67,23 @@ struct ResearchView: View {
     /// Pending deletion confirmation — set by the sidebar context menu.
     @State private var projectPendingDeletion: Project? = nil
 
+    // MARK: - Cost-confirm modal (Item 4, 2026-04-23)
+    /// Cached provider read from /api/patterns/current. Refreshed on
+    /// appear and after a Save on the PatternTab. Defaults to "ollama"
+    /// which bypasses the cost modal.
+    @State private var currentProvider: String = "ollama"
+    @State private var currentPattern: String = "single"
+    /// When non-nil, surface the cost-confirm modal. Cleared by
+    /// Continue (which fires the real run) or Cancel.
+    @State private var pendingCloudQuery: String?
+    @State private var pendingCostUSD: Double? = nil
+    @State private var pendingCostRateKnown: Bool = true
+    @State private var pendingCostRateDate: String = ""
+
+    // MARK: - Thread pattern conflict modal (Item 7, F15)
+    @State private var patternConflictQuery: String?
+    @State private var patternConflictMessage: String = ""
+
     private let sseClient = SSEClient()
 
     var body: some View {
@@ -256,6 +273,36 @@ struct ResearchView: View {
             } message: { _ in
                 Text("This removes the folder from Desktop \u{2014} saved queries will be lost.")
             }
+            .sheet(
+                isPresented: Binding(
+                    get: { pendingCloudQuery != nil },
+                    set: { if !$0 { pendingCloudQuery = nil } }
+                )
+            ) {
+                costConfirmSheet
+            }
+            .alert(
+                "Pattern change requires a new thread",
+                isPresented: Binding(
+                    get: { patternConflictQuery != nil },
+                    set: { if !$0 { patternConflictQuery = nil } }
+                )
+            ) {
+                Button("Start new thread") {
+                    if let q = patternConflictQuery {
+                        patternConflictQuery = nil
+                        newThread()
+                        // Re-queue the query now that selectedThread is nil.
+                        prompt = q
+                        runResearch(query: q, bypassRAMCheck: true, bypassCostCheck: true)
+                    }
+                }
+                Button("Cancel", role: .cancel) {
+                    patternConflictQuery = nil
+                }
+            } message: {
+                Text(patternConflictMessage)
+            }
         }
         .task {
             appState.ollamaStatus = .loading
@@ -267,6 +314,7 @@ struct ResearchView: View {
                 await fetchThreads()
                 await fetchCatalog()
                 await fetchRam()
+                await fetchPatternConfig()
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(30))
                     await refreshStatus()
@@ -275,6 +323,118 @@ struct ResearchView: View {
                 appState.ollamaStatus = .offline
                 errorMessage = backend.errorMessage ?? "Backend failed to start."
             }
+        }
+    }
+
+    // MARK: - Cost-confirm sheet + fetchers (Item 4)
+
+    @ViewBuilder
+    private var costConfirmSheet: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Cloud run — confirm cost")
+                .font(.system(size: 14, weight: .semibold))
+            Text(
+                "This request will run against the \(currentProvider) API, not a "
+                + "local model. Estimated cost for this query:"
+            )
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                if let usd = pendingCostUSD {
+                    Text(String(format: "$%.4f", usd))
+                        .font(.system(size: 20, weight: .semibold, design: .monospaced))
+                } else {
+                    ProgressView().controlSize(.small)
+                    Text("Estimating…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            if !pendingCostRateKnown {
+                Text("Rate not found in table — cost may be off. (\(pendingCostRateDate))")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+            } else if !pendingCostRateDate.isEmpty {
+                Text("Rates dated \(pendingCostRateDate).")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    pendingCloudQuery = nil
+                    pendingCostUSD = nil
+                }
+                Button("Continue") {
+                    if let q = pendingCloudQuery {
+                        pendingCloudQuery = nil
+                        pendingCostUSD = nil
+                        runResearch(query: q, bypassRAMCheck: true, bypassCostCheck: true)
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(pendingCostUSD == nil)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 360)
+    }
+
+    /// Fetch the active pattern + provider from /api/patterns/current.
+    /// Called on view startup and after the Research flow (so switching
+    /// the pattern in Settings reflects without an app relaunch).
+    private func fetchPatternConfig() async {
+        guard let url = URL(string: "\(backend.baseURL)/api/patterns/current") else { return }
+        struct Resp: Decodable { let pattern: String?; let provider: String? }
+        if let (data, _) = try? await URLSession.shared.data(from: url),
+           let decoded = try? JSONDecoder().decode(Resp.self, from: data) {
+            if let p = decoded.pattern, !p.isEmpty { currentPattern = p }
+            if let p = decoded.provider, !p.isEmpty { currentProvider = p }
+        }
+    }
+
+    /// POST /api/cloud/estimate with the current model + pattern to get a
+    /// token-based USD estimate. Populates pendingCostUSD + rate flags.
+    private func fetchCostEstimate(for query: String) async {
+        guard let url = URL(string: "\(backend.baseURL)/api/cloud/estimate") else {
+            pendingCostUSD = 0
+            pendingCostRateKnown = false
+            pendingCostRateDate = ""
+            return
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "model": currentModel,
+            "prompt": query,
+            "pattern": currentPattern,
+        ])
+        struct Resp: Decodable {
+            let estimatedUsd: Double
+            let rateKnown: Bool
+            let lastUpdated: String?
+            enum CodingKeys: String, CodingKey {
+                case estimatedUsd = "estimated_usd"
+                case rateKnown = "rate_known"
+                case lastUpdated = "last_updated"
+            }
+        }
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            let decoded = try JSONDecoder().decode(Resp.self, from: data)
+            pendingCostUSD = decoded.estimatedUsd
+            pendingCostRateKnown = decoded.rateKnown
+            pendingCostRateDate = decoded.lastUpdated ?? ""
+        } catch {
+            // Surface a pessimistic "unknown" state rather than silently
+            // blocking — user can still proceed.
+            pendingCostUSD = 0
+            pendingCostRateKnown = false
+            pendingCostRateDate = ""
         }
     }
 
@@ -808,13 +968,25 @@ struct ResearchView: View {
     /// this with ``bypassRAMCheck: false`` so a too-large-model dialog can
     /// gate the request; the "Continue anyway" branch of that dialog calls
     /// back in with ``bypassRAMCheck: true`` and the same query.
-    private func runResearch(query: String, bypassRAMCheck: Bool) {
+    ///
+    /// Cloud runs (provider != ollama) additionally pass through a
+    /// cost-confirm modal (Item 4). ``bypassCostCheck`` is set by the
+    /// modal's Continue button so we don't loop.
+    private func runResearch(query: String, bypassRAMCheck: Bool, bypassCostCheck: Bool = false) {
         if !bypassRAMCheck, let warning = ramWarningForCurrentModel() {
             // Stash state and surface the dialog. Preserve the prompt in
             // the text field so the user can edit/retry after switching
             // models — only clear once they actually commit.
             pendingLargeModelQuery = query
             pendingLargeModelSize = warning
+            return
+        }
+
+        // Cost-confirm gate — cloud runs only, always shown (no threshold).
+        if !bypassCostCheck && currentProvider != "ollama" {
+            pendingCloudQuery = query
+            pendingCostUSD = nil  // show "Estimating…" until fetch completes
+            Task { await fetchCostEstimate(for: query) }
             return
         }
 
@@ -849,6 +1021,11 @@ struct ResearchView: View {
         if let dir = projectDir {
             payload["cwd"] = dir.path
         }
+        // Thread pattern-pinning (F15) needs pattern + provider on the
+        // request so the backend can 409 on cross-pattern re-use of an
+        // existing thread, and pin both on first creation.
+        payload["pattern"] = currentPattern
+        payload["provider"] = currentProvider
 
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: payload)
@@ -867,7 +1044,17 @@ struct ResearchView: View {
                 }
             } catch {
                 if !Task.isCancelled {
-                    errorMessage = error.localizedDescription
+                    // Detect the pattern-mismatch 409 (F15) and surface a
+                    // friendlier modal instead of a raw error line. The
+                    // SSEClient packs the HTTP status + response body
+                    // into SSEError.badResponse.
+                    if case SSEError.badResponse(let status, let message) = error,
+                       status == 409 {
+                        patternConflictMessage = message ?? "Switching pattern will start a new thread."
+                        patternConflictQuery = query
+                    } else {
+                        errorMessage = error.localizedDescription
+                    }
                 }
             }
             isStreaming = false

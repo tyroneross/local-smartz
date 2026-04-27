@@ -37,12 +37,11 @@ from __future__ import annotations
 import json
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal, Optional, TypedDict
 
-import httpx
 from langchain.agents import create_agent as create_react_agent
-from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import Send
@@ -106,38 +105,28 @@ class PipelineState(TypedDict):
 # ── Node builders ───────────────────────────────────────────────────────
 
 def _role_llm(role: str, profile: dict):
-    """Construct a ChatOllama bound to the role's configured model.
+    """Construct a bare chat model bound to the role's configured model.
+
+    Provider-aware (Phase 2 cloud toggle): dispatches through
+    ``agent._create_model`` so the pipeline and the main agent share a
+    single LangChain-model factory. Keeps the registry-based F22 guard
+    (qwen3.5 → ``reasoning=false``) and the one-way
+    ``with_retry``-before-``create_deep_agent`` prohibition in a single
+    place.
 
     Honors per-role overrides (profile + ``global_config.agent_models``) via
     ``get_agent_model``. Falls back to the profile planning model when the
     role has no explicit entry.
 
-    **Do NOT wrap in ``with_retry`` here.** ``create_agent`` calls
-    ``llm.bind_tools(...)`` on this return value; ``RunnableRetry`` doesn't
-    expose ``bind_tools``, which silently breaks tool registration for every
-    specialist. Transient-error retry for the graph path lives at the
-    node-loop level (the ReAct executor retries within its own message loop
-    on tool errors). If we need model-swap retry specifically, it belongs
-    after tool-binding, not before.
-
-    Config matches ``agent._create_model`` everywhere except the retry wrap:
-    - 600s read timeout so long report generation doesn't hang the SSE stream
-    - Short connect/write so transient network issues fail fast
+    **Do NOT wrap in ``with_retry`` at any caller of this.** ``create_agent``
+    calls ``llm.bind_tools(...)`` on the return value; ``RunnableRetry``
+    doesn't expose ``bind_tools``, which silently breaks tool registration
+    for every specialist.
     """
+    from localsmartz.agent import _create_model
+
     model_name = get_agent_model(profile, role) or profile.get("planning_model")
-    return ChatOllama(
-        model=model_name,
-        temperature=0,
-        num_ctx=4096,
-        client_kwargs={
-            "timeout": httpx.Timeout(
-                connect=5.0,
-                read=600.0,
-                write=30.0,
-                pool=5.0,
-            ),
-        },
-    )
+    return _create_model(profile, role, model_name=model_name)
 
 
 def _role_system_prompt(role: str) -> str:
@@ -464,6 +453,41 @@ _SPECIALIST_ROLES: tuple[str, ...] = (
 )
 
 
+def is_role_agent_cache_enabled() -> bool:
+    """True unless explicitly disabled for A/B benchmarking or debugging."""
+    val = os.environ.get("LOCALSMARTZ_DISABLE_ROLE_AGENT_CACHE", "").strip().lower()
+    return val not in ("1", "true", "yes", "on")
+
+
+def _profile_cache_key(profile: dict) -> str:
+    """Stable cache key for reusable specialist executors.
+
+    We only cache the expensive per-profile role executors. The graph itself
+    still compiles per request because the node closures capture a request-
+    scoped SSE sink.
+    """
+    return json.dumps(profile, sort_keys=True, separators=(",", ":"), default=str)
+
+
+@lru_cache(maxsize=8)
+def _build_agents_for_roles_cached(profile_key: str) -> tuple[tuple[str, Any], ...]:
+    """Compile specialist executors once per effective profile."""
+    profile = json.loads(profile_key)
+    all_tools = _build_tool_registry(profile)
+    return tuple(
+        (role, _build_role_agent(role, profile, all_tools))
+        for role in _SPECIALIST_ROLES
+    )
+
+
+def clear_agents_cache() -> None:
+    """Clear the cached specialist executors.
+
+    Test code calls this to keep cache assertions isolated.
+    """
+    _build_agents_for_roles_cached.cache_clear()
+
+
 def _build_agents_for_roles(profile: dict) -> dict:
     """Compile one ReAct executor per specialist role, sharing a single
     tool registry. Returns a dict ``{role: agent_executor}``. Roles whose
@@ -471,11 +495,13 @@ def _build_agents_for_roles(profile: dict) -> dict:
     reason, it just won't have tool access (writer in particular, for
     instance, only produces text).
     """
-    all_tools = _build_tool_registry(profile)
-    return {
-        role: _build_role_agent(role, profile, all_tools)
-        for role in _SPECIALIST_ROLES
-    }
+    if not is_role_agent_cache_enabled():
+        all_tools = _build_tool_registry(profile)
+        return {
+            role: _build_role_agent(role, profile, all_tools)
+            for role in _SPECIALIST_ROLES
+        }
+    return dict(_build_agents_for_roles_cached(_profile_cache_key(profile)))
 
 
 def build_graph(
@@ -584,6 +610,8 @@ __all__ = [
     "NODE_NAMES",
     "PipelineState",
     "_build_agents_for_roles",
+    "clear_agents_cache",
+    "is_role_agent_cache_enabled",
     "_build_role_agent",
     "_build_tool_registry",
     "_run_role_agent",

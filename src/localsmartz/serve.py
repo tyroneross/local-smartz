@@ -430,15 +430,48 @@ textarea::placeholder { color: var(--fg-muted); }
   const $ = id => document.getElementById(id);
   const out = $('output'), pr = $('prompt'), runBtn = $('run-btn'), stopBtn = $('stop-btn');
   let ctrl = null, activeThread = null;
+  let streamTextNode = null, bufferedText = '', textFlushTimer = null;
 
   const setRunning = v => { runBtn.disabled = v; stopBtn.disabled = !v; pr.disabled = v; };
   const append = el => { out.appendChild(el); out.scrollTop = out.scrollHeight; };
+  const resetOutput = () => {
+    out.innerHTML = '';
+    streamTextNode = null;
+    bufferedText = '';
+    if (textFlushTimer !== null) {
+      clearTimeout(textFlushTimer);
+      textFlushTimer = null;
+    }
+  };
   const makeEl = (tag, cls, text) => {
     const e = document.createElement(tag);
     if (cls) e.className = cls;
     if (text) e.textContent = text;
     return e;
   };
+
+  function ensureStreamTextNode() {
+    if (!streamTextNode || !streamTextNode.parentNode) {
+      streamTextNode = document.createTextNode('');
+      append(streamTextNode);
+    }
+    return streamTextNode;
+  }
+
+  function flushBufferedText() {
+    if (!bufferedText) return;
+    ensureStreamTextNode().textContent += bufferedText;
+    bufferedText = '';
+    out.scrollTop = out.scrollHeight;
+  }
+
+  function scheduleTextFlush() {
+    if (textFlushTimer !== null) return;
+    textFlushTimer = window.setTimeout(() => {
+      textFlushTimer = null;
+      flushBufferedText();
+    }, 33);
+  }
 
   function timeAgo(iso) {
     if (!iso) return 'unknown';
@@ -450,13 +483,24 @@ textarea::placeholder { color: var(--fg-muted); }
   }
 
   function handleEvent(d) {
-    if (d.type === 'text') append(makeEl('span', '', d.content));
-    else if (d.type === 'tool') append(makeEl('span', 'tool-badge', d.name));
-    else if (d.type === 'tool_error') append(makeEl('span', 'err-line', '[' + d.name + '] ' + d.message));
+    if (d.type === 'text') {
+      bufferedText += d.content;
+      scheduleTextFlush();
+    }
+    else if (d.type === 'tool') {
+      flushBufferedText();
+      append(makeEl('span', 'tool-badge', d.name));
+    }
+    else if (d.type === 'tool_error') {
+      flushBufferedText();
+      append(makeEl('span', 'err-line', '[' + d.name + '] ' + d.message));
+    }
     else if (d.type === 'done') {
+      flushBufferedText();
       append(makeEl('span', 'done-line', 'Done (' + (d.duration_ms / 1000).toFixed(1) + 's)'));
       setRunning(false); fetchThreads();
     } else if (d.type === 'error') {
+      flushBufferedText();
       append(makeEl('span', 'err-block', d.message));
       setRunning(false);
     }
@@ -477,9 +521,9 @@ textarea::placeholder { color: var(--fg-muted); }
       }
       const reader = res.body.getReader(), dec = new TextDecoder();
       let buf = '';
-      for (;;) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
+	      for (;;) {
+	        const chunk = await reader.read();
+	        if (chunk.done) break;
         buf += dec.decode(chunk.value, { stream: true });
         const lines = buf.split('\n');
         buf = lines.pop();
@@ -487,18 +531,19 @@ textarea::placeholder { color: var(--fg-muted); }
           if (lines[i].indexOf('data: ') === 0) {
             try { handleEvent(JSON.parse(lines[i].slice(6))); } catch(x) {}
           }
-        }
-      }
-    } catch(e) {
-      if (e.name !== 'AbortError') handleEvent({ type: 'error', message: e.message });
-    }
-    ctrl = null; setRunning(false);
-  }
+	        }
+	      }
+	      flushBufferedText();
+	    } catch(e) {
+	      if (e.name !== 'AbortError') handleEvent({ type: 'error', message: e.message });
+	    }
+	    ctrl = null; setRunning(false);
+	  }
 
   runBtn.addEventListener('click', () => {
     const text = pr.value.trim();
     if (!text) return;
-    out.innerHTML = '';
+    resetOutput();
     const payload = { prompt: text };
     if (activeThread) payload.thread_id = activeThread;
     streamSSE('/api/research', {
@@ -1015,6 +1060,13 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_agents()
         elif path == "/api/agents/models":
             self._handle_agents_models()
+        elif path == "/api/patterns":
+            self._handle_patterns()
+        elif path.startswith("/api/patterns/") and path.endswith("/preflight"):
+            pattern_name = path[len("/api/patterns/"):-len("/preflight")]
+            self._handle_pattern_preflight(pattern_name)
+        elif path == "/api/patterns/current":
+            self._handle_pattern_current()
         elif path == "/api/skills":
             self._handle_list_skills()
         elif path == "/api/ollama/info":
@@ -1032,6 +1084,15 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         else:
             self._json_response({"error": "Not found"}, 404)
 
+    def do_PUT(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        if path.startswith("/api/agents/") and path.endswith("/prompt"):
+            role = path[len("/api/agents/"):-len("/prompt")]
+            self._handle_agent_prompt_put(role)
+        else:
+            self._json_response({"error": "Not found"}, 404)
+
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
@@ -1044,8 +1105,16 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_model_select()
         elif path == "/api/models/pull":
             self._handle_model_pull()
+        elif path == "/api/models/install":
+            self._handle_model_install()
         elif path == "/api/models/warmup":
             self._handle_warmup_start()
+        elif path == "/api/cloud/estimate":
+            self._handle_cloud_estimate()
+        elif path == "/api/evals/run":
+            self._handle_evals_run()
+        elif path == "/api/patterns/active":
+            self._handle_pattern_active_set()
         elif path == "/api/skills/refactor":
             self._handle_skill_refactor()
         elif path == "/api/skills/new":
@@ -1088,7 +1157,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
 
     def _cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def _json_response(self, data: dict, status: int = 200):
@@ -1244,7 +1313,12 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         profile_name = body.get("profile") or self._default_profile
         agent = body.get("agent")  # Optional: pin to a single agent
         cwd_override = body.get("cwd")  # Optional: per-project working dir
-        self._handle_research_request(prompt, thread_id, profile_name, agent, cwd_override)
+        pattern = body.get("pattern")  # Optional: coordination pattern (F15)
+        provider = body.get("provider")  # Optional: runner provider
+        self._handle_research_request(
+            prompt, thread_id, profile_name, agent, cwd_override,
+            pattern=pattern, provider=provider,
+        )
 
     def _handle_research_request(
         self,
@@ -1253,6 +1327,9 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         profile_name: str | None,
         agent: str | None = None,
         cwd_override: str | None = None,
+        *,
+        pattern: str | None = None,
+        provider: str | None = None,
     ):
         if not isinstance(prompt, str) or not prompt.strip():
             self._json_response({"error": "No prompt provided"}, 400)
@@ -1262,10 +1339,31 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._json_response({"error": "thread_id must be a string"}, 400)
             return
 
+        # Thread pattern pinning (F15): once a thread is pinned to a
+        # pattern + provider at creation, a different pattern/provider
+        # yields a 409 conflict so the UI can prompt the user to start a
+        # new thread instead of silently mutating the existing one.
+        if thread_id:
+            from localsmartz import threads as _threads
+
+            workdir = cwd_override if isinstance(cwd_override, str) and cwd_override else str(Path.cwd())
+            conflict = _threads.check_pattern(thread_id, workdir, pattern, provider)
+            if conflict is not None:
+                self._json_response(conflict, 409)
+                return
+
         self._start_sse()
 
         try:
-            self._stream_research(prompt.strip(), profile_name, thread_id, agent, cwd_override)
+            self._stream_research(
+                prompt.strip(),
+                profile_name,
+                thread_id,
+                agent,
+                cwd_override,
+                pattern=pattern,
+                provider=provider,
+            )
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
@@ -1289,10 +1387,11 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         from localsmartz.profiles import get_profile
         from localsmartz.ollama import (
             check_server,
+            ensure_model_ready,
+            is_model_loaded,
             list_models,
             model_available,
             resolve_available_model,
-            warmup_model,
         )
 
         if not check_server():
@@ -1325,16 +1424,19 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             if msg:
                 self._send_event({"type": "text", "content": f"[note] {msg}\n\n"})
 
-        # Warm the model into Ollama VRAM before we spin up the agent graph.
-        # Ollama short-circuits when the model is already resident, so this
-        # is cheap on the hot path and eliminates the "~30s silent Thinking…"
-        # window on the first query after app launch.
-        self._send_event({
-            "type": "status",
-            "stage": "loading_model",
-            "model": model,
-        })
-        warm_ok, warm_ms, warm_err = warmup_model(model, keep_alive="30m")
+        # Warm the model into Ollama VRAM before we spin up the agent graph,
+        # but skip the network round-trip when the model is already resident.
+        already_loaded = is_model_loaded(model)
+        if not already_loaded:
+            self._send_event({
+                "type": "status",
+                "stage": "loading_model",
+                "model": model,
+            })
+        warm_ok, warm_ms, warm_err, already_loaded = ensure_model_ready(
+            model,
+            keep_alive="30m",
+        )
         if not warm_ok:
             # Non-fatal: the subsequent stream call will also try to load
             # the model. Surface the warning so the user knows if something
@@ -1343,12 +1445,15 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                 "type": "text",
                 "content": f"[warmup] {warm_err}\n\n",
             })
-        self._send_event({
+        ready_event = {
             "type": "status",
             "stage": "ready",
             "model": model,
             "warmup_ms": warm_ms,
-        })
+        }
+        if already_loaded:
+            ready_event["resident"] = True
+        self._send_event(ready_event)
 
         return profile, model, model_override, cwd
 
@@ -1830,6 +1935,9 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         thread_id: str | None,
         focus_agent: str | None = None,
         cwd_override: str | None = None,
+        *,
+        pattern: str | None = None,
+        provider: str | None = None,
     ):
         """Run research agent and emit SSE events.
 
@@ -1840,7 +1948,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         4. ``_run_full_agent`` — legacy DeepAgents prompt-driven path
            (opt-in via LOCALSMARTZ_PIPELINE=orchestrator or focus_agent).
         """
-        from localsmartz.profiles import is_fast_path
+        from localsmartz.routing import select_research_runtime
         from localsmartz.threads import create_thread
 
         model_override = LocalSmartzHandler._model_override or _saved_model_override(Path.cwd())
@@ -1863,19 +1971,23 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         for subdir in ["threads", "artifacts", "memory", "scripts", "reports"]:
             (storage / subdir).mkdir(parents=True, exist_ok=True)
 
-        # Create thread if specified
+        # Create thread if specified. Pattern/provider are pinned at first
+        # creation (F15) — subsequent runs reuse the pin; cross-pattern
+        # runs against an existing pinned thread are rejected upstream in
+        # ``_handle_research_request`` with a 409 before we get here.
         if thread_id:
-            create_thread(thread_id, str(cwd), title=prompt[:60])
+            create_thread(
+                thread_id,
+                str(cwd),
+                title=prompt[:60],
+                pattern=pattern,
+                provider=provider,
+            )
+
+        route = select_research_runtime(prompt, focus_agent=focus_agent)
 
         # ── Fast path ─────────────────────────────────────────────────────
-        # Trivial prompts (short, no research verbs, <=2 sentences) skip the
-        # DeepAgents graph entirely — one direct ChatOllama stream.
-        # Also taken when the user pinned the Planner agent for a trivial
-        # prompt: Planner's whole job is decomposition, and forcing a small
-        # model to emit write_todos for a one-liner triggers tool-call
-        # hallucinations like `repo_browser.write_todos`. Answer directly.
-        allow_fast_path = focus_agent is None or focus_agent == "planner"
-        if allow_fast_path and is_fast_path(prompt):
+        if route == "fast_path":
             self._run_fast_path(
                 prompt=prompt,
                 profile=profile,
@@ -1888,13 +2000,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             return
 
         # ── Graph pipeline (NEW DEFAULT) ──────────────────────────────────
-        # The deterministic LangGraph pipeline is active by default. Set
-        # LOCALSMARTZ_PIPELINE=orchestrator to opt into the legacy
-        # DeepAgents prompt-driven path. Focus mode bypasses the graph —
-        # scoping to a single role only makes sense with the main-agent
-        # code path in agent.py, not the multi-node graph.
-        from localsmartz import pipeline as _pipeline
-        if focus_agent is None and _pipeline.is_enabled():
+        if route == "graph_pipeline":
             self._run_graph_pipeline(
                 prompt=prompt,
                 profile=profile,
@@ -2445,6 +2551,227 @@ Return ONLY the JSON, no prose, no code fences."""
             self._json_response({"error": f"Invalid value: {exc}"}, 400)
             return
         self._json_response({"ok": True, "agent": agent_name, "model": model})
+
+    @_json_body
+    def _handle_agent_prompt_put(self, role: str, *, body):
+        """PUT /api/agents/<role>/prompt body {"system_focus": "..."} — persist to .md.
+
+        Writes ``src/localsmartz/agents/prompts/<role>.md``. Returns 400 if the
+        role name contains path traversal or the body is missing/empty.
+        """
+        role = (role or "").strip()
+        if not role or "/" in role or ".." in role or "\\" in role:
+            self._json_response({"error": "invalid role name"}, 400)
+            return
+
+        focus = body.get("system_focus")
+        if not isinstance(focus, str) or not focus.strip():
+            self._json_response({"error": "system_focus (non-empty string) required"}, 400)
+            return
+
+        from localsmartz.agents import definitions as agent_defs
+
+        prompts_dir = agent_defs._PROMPTS_DIR  # type: ignore[attr-defined]
+        prompts_dir.mkdir(parents=True, exist_ok=True)
+        path = prompts_dir / f"{role}.md"
+        try:
+            path.write_text(focus, encoding="utf-8")
+        except OSError as exc:
+            self._json_response({"error": f"write failed: {exc}"}, 500)
+            return
+        self._json_response({"ok": True, "role": role, "bytes": len(focus)})
+
+    # ── Patterns (Phase 2) ───────────────────────────────────────────────
+
+    def _handle_patterns(self):
+        """GET /api/patterns — list registered coordination patterns."""
+        from localsmartz.patterns import REGISTRY
+
+        rows = [
+            {
+                "name": name,
+                "description": spec["description"],
+                "required_roles": list(spec["required_roles"]),
+            }
+            for name, spec in REGISTRY.items()
+        ]
+        self._json_response({"patterns": rows})
+
+    def _handle_pattern_current(self):
+        """GET /api/patterns/current — return the active pattern + provider.
+
+        Reads ``.localsmartz/config.json`` in the server's CWD directly —
+        bypassing ``load_config``'s ``planning_model`` gate, since a project
+        can legitimately have ``pattern`` + ``provider`` set before any
+        model selection has happened (new project flow, first-run picker
+        hasn't completed). Defaults when absent:
+        ``{"pattern": "single", "provider": "ollama"}``.
+        """
+        cfg_path = Path.cwd() / ".localsmartz" / "config.json"
+        cfg: dict = {}
+        if cfg_path.exists():
+            try:
+                data = json.loads(cfg_path.read_text())
+                if isinstance(data, dict):
+                    cfg = data
+            except (json.JSONDecodeError, OSError):
+                cfg = {}
+        self._json_response({
+            "pattern": cfg.get("pattern") or "single",
+            "provider": cfg.get("provider") or "ollama",
+        })
+
+    @_json_body
+    def _handle_pattern_active_set(self, *, body):
+        """POST /api/patterns/active {pattern, provider} — persist to config.json.
+
+        Writes through ``save_config`` so existing keys are preserved.
+        The PatternTab UI calls this on Save. New threads pick up the
+        values the next time they're created; existing threads keep
+        their pinned values (F15).
+        """
+        from localsmartz.config import save_config
+        from localsmartz.patterns import REGISTRY
+
+        pattern = body.get("pattern")
+        provider = body.get("provider")
+        if not isinstance(pattern, str) or pattern not in REGISTRY:
+            self._json_response(
+                {"error": f"unknown pattern: {pattern!r}. "
+                          f"Known: {sorted(REGISTRY.keys())}"},
+                400,
+            )
+            return
+        if not isinstance(provider, str) or provider not in {
+            "ollama", "anthropic", "openai", "groq"
+        }:
+            self._json_response(
+                {"error": f"unknown provider: {provider!r}"}, 400
+            )
+            return
+        try:
+            save_config(Path.cwd(), {"pattern": pattern, "provider": provider})
+        except Exception as exc:  # noqa: BLE001
+            self._json_response({"error": f"write failed: {exc}"}, 500)
+            return
+        self._json_response({"ok": True, "pattern": pattern, "provider": provider})
+
+    def _handle_pattern_preflight(self, pattern_name: str):
+        """GET /api/patterns/<name>/preflight — is this pattern runnable?"""
+        from localsmartz.models import preflight
+        from localsmartz.profiles import detect_tier, get_profile
+
+        profile = get_profile(self._default_profile)
+        tier_info = detect_tier()
+        profile_ext = {**profile, "tier": tier_info["tier"]}
+        result = preflight.check(pattern_name, profile_ext)
+        self._json_response({"pattern": pattern_name, **result})
+
+    # ── Cost estimate (Phase 2) ──────────────────────────────────────────
+
+    @_json_body
+    def _handle_cloud_estimate(self, *, body):
+        """POST /api/cloud/estimate {model, prompt, pattern?, max_iterations?}."""
+        from localsmartz.cost import estimate_cost_usd
+
+        model = body.get("model", "")
+        prompt = body.get("prompt", "")
+        pattern = body.get("pattern", "single")
+        max_iter = int(body.get("max_iterations", 1) or 1)
+        if not isinstance(model, str) or not model.strip():
+            self._json_response({"error": "model required"}, 400)
+            return
+        if not isinstance(prompt, str):
+            self._json_response({"error": "prompt must be a string"}, 400)
+            return
+        est = estimate_cost_usd(
+            model=model.strip(),
+            prompt=prompt,
+            pattern=pattern,
+            max_iterations=max_iter,
+        )
+        self._json_response(est)
+
+    # ── Golden-task eval runner (Phase 2, Item 6) ────────────────────────
+
+    @_json_body
+    def _handle_evals_run(self, *, body):
+        """POST /api/evals/run {provider, model?} — run the golden-task suite.
+
+        Returns::
+
+            {
+                "provider": "ollama",
+                "model": "qwen3.5:9b-q4_K_M",
+                "pass": 2,
+                "fail": 1,
+                "results": [{"task", "ok", "latency_ms", "reply", "error"}, ...]
+            }
+
+        Emits an OTel root span ``ls.eval.run`` with
+        ``ls.eval.provider`` + ``ls.eval.pass`` + ``ls.eval.fail`` attrs so
+        Phoenix can show the eval tree alongside the pattern runs.
+        """
+        from localsmartz.benchmarking import (
+            run_golden_on_provider, benchmark_to_dict,
+        )
+        from localsmartz.observability import get_tracer
+
+        provider = body.get("provider", "ollama")
+        model = body.get("model")
+        if not isinstance(provider, str) or not provider.strip():
+            self._json_response({"error": "provider required"}, 400)
+            return
+        if model is not None and not isinstance(model, str):
+            self._json_response({"error": "model must be a string"}, 400)
+            return
+
+        tracer = get_tracer("localsmartz.serve.evals")
+        with tracer.start_as_current_span("ls.eval.run") as span:
+            span.set_attribute("ls.eval.provider", provider)
+            if isinstance(model, str) and model.strip():
+                span.set_attribute("ls.eval.model", model.strip())
+            try:
+                result = run_golden_on_provider(
+                    provider.strip(),
+                    model=(model.strip() if isinstance(model, str) and model.strip() else None),
+                )
+            except Exception as exc:  # noqa: BLE001
+                span.record_exception(exc)
+                self._json_response({"error": str(exc)}, 500)
+                return
+            span.set_attribute("ls.eval.pass", result.pass_count)
+            span.set_attribute("ls.eval.fail", result.fail_count)
+        self._json_response(benchmark_to_dict(result))
+
+    # ── Model install SSE (Phase 1.5) ────────────────────────────────────
+
+    @_json_body
+    def _handle_model_install(self, *, body):
+        """POST /api/models/install {name} — stream install events as SSE."""
+        from localsmartz.models.install import install as install_model
+
+        name = body.get("name", "")
+        if not isinstance(name, str) or not name.strip():
+            self._json_response({"error": "name required"}, 400)
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self._cors_headers()
+        self.end_headers()
+
+        try:
+            for event in install_model(name.strip()):
+                payload = json.dumps(event)
+                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+                if event.get("type") in ("done", "error"):
+                    break
+        except Exception as exc:  # noqa: BLE001
+            payload = json.dumps({"type": "error", "message": str(exc)})
+            self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
 
     def _handle_list_skills(self):
         """Return installed skills (name + description + plugin)."""

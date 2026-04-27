@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from localsmartz.serve import LocalSmartzHandler
+from localsmartz.serve import LocalSmartzHandler, _UI_HTML
 from http.server import HTTPServer
 
 
@@ -95,6 +95,15 @@ def test_ui_trailing_slash(server):
     status, ctype, body = _get_raw(server, "/")
     assert status == 200
     assert "<title>Local Smartz</title>" in body
+
+
+def test_ui_uses_buffered_text_flush_for_streaming():
+    """Regression guard: the embedded web UI should batch streamed text
+    writes instead of appending one DOM node per chunk."""
+    assert "let streamTextNode = null, bufferedText = '', textFlushTimer = null;" in _UI_HTML
+    assert "function flushBufferedText()" in _UI_HTML
+    assert "function scheduleTextFlush()" in _UI_HTML
+    assert "bufferedText += d.content;" in _UI_HTML
 
 
 # ── Health endpoint ──

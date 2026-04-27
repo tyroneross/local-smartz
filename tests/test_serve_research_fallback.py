@@ -116,3 +116,34 @@ def test_research_still_errors_when_no_fallback_exists(monkeypatch):
     error_events = [e for e in handler.events if e.get("type") == "error"]
     assert error_events, "expected an error event when no fallback is available"
     assert "ollama pull llama3.1:70b" in error_events[0]["message"]
+
+
+def test_preflight_model_skips_loading_event_when_model_already_loaded(monkeypatch):
+    """Hot-path requests should emit ready directly when the model is resident."""
+    handler = _FakeHandler()
+
+    fake_profile = {
+        "name": "lite",
+        "planning_model": "qwen3:8b-q4_K_M",
+        "execution_model": "qwen3:8b-q4_K_M",
+        "max_turns": 5,
+    }
+    monkeypatch.setattr("localsmartz.ollama.check_server", lambda: True)
+    monkeypatch.setattr("localsmartz.ollama.model_available", lambda _m: True)
+    monkeypatch.setattr(
+        "localsmartz.profiles.get_profile",
+        lambda *_a, **_k: fake_profile,
+    )
+    monkeypatch.setattr("localsmartz.ollama.is_model_loaded", lambda _m: True)
+    monkeypatch.setattr(
+        "localsmartz.ollama.ensure_model_ready",
+        lambda *_a, **_k: (True, 0, None, True),
+    )
+
+    result = handler._preflight_model("lite", None)
+
+    assert result is not None
+    status_events = [e for e in handler.events if e.get("type") == "status"]
+    assert [e.get("stage") for e in status_events] == ["ready"]
+    assert status_events[0]["warmup_ms"] == 0
+    assert status_events[0]["resident"] is True

@@ -117,6 +117,22 @@ def list_models_with_size() -> list[tuple[str, float]]:
         return []
 
 
+def _model_variant_key(model_name: str) -> tuple[str, str]:
+    """Return a coarse identity key for flexible model matching."""
+    base = model_name.split(":")[0] if ":" in model_name else model_name
+    variant = model_name.split(":")[1].split("-")[0] if ":" in model_name else ""
+    return base, variant
+
+
+def _model_name_matches(requested: str, candidate: str) -> bool:
+    """True when two Ollama model names refer to the same family/size."""
+    if not requested or not candidate:
+        return False
+    if requested == candidate:
+        return True
+    return _model_variant_key(requested) == _model_variant_key(candidate)
+
+
 def model_available(model_name: str) -> bool:
     """Check if a specific model is pulled in Ollama.
 
@@ -125,15 +141,8 @@ def model_available(model_name: str) -> bool:
     - Base family: 'qwen3:8b-q4_K_M' matches if 'qwen3:8b' is pulled
     """
     available = list_models()
-    if model_name in available:
-        return True
-    # Check if any pulled model shares the same base
-    model_base = model_name.split(":")[0] if ":" in model_name else model_name
-    model_variant = model_name.split(":")[1].split("-")[0] if ":" in model_name else ""
     for m in available:
-        m_base = m.split(":")[0] if ":" in m else m
-        m_variant = m.split(":")[1].split("-")[0] if ":" in m else ""
-        if m_base == model_base and m_variant == model_variant:
+        if _model_name_matches(model_name, m):
             return True
     return False
 
@@ -191,6 +200,44 @@ def warmup_model(
     except Exception as exc:  # noqa: BLE001 — broad catch, we surface via return
         elapsed_ms = int((time.time() - start) * 1000)
         return False, elapsed_ms, f"Warmup failed: {exc}"
+
+
+def is_model_loaded(model_name: str) -> bool:
+    """True when ``model_name`` is already resident in Ollama VRAM.
+
+    Uses ``/api/ps`` and the same family/variant matching semantics as
+    ``model_available`` so callers can skip no-op warmup requests on the
+    hot path.
+    """
+    if not model_name:
+        return False
+    for running in list_running_models():
+        if not isinstance(running, dict):
+            continue
+        running_name = running.get("name") or running.get("model")
+        if isinstance(running_name, str) and _model_name_matches(model_name, running_name):
+            return True
+    return False
+
+
+def ensure_model_ready(
+    model_name: str,
+    keep_alive: str = "30m",
+    timeout: float = 300.0,
+) -> tuple[bool, int, str | None, bool]:
+    """Ensure the model is ready for use, skipping warmup when already loaded.
+
+    Returns:
+        ``(ok, duration_ms, error_message, already_loaded)``
+    """
+    if is_model_loaded(model_name):
+        return True, 0, None, True
+    ok, duration_ms, err = warmup_model(
+        model_name,
+        keep_alive=keep_alive,
+        timeout=timeout,
+    )
+    return ok, duration_ms, err, False
 
 
 def evict_model(

@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 
 import httpx
 
-from localsmartz.ollama import evict_model, warmup_model
+from localsmartz.ollama import ensure_model_ready, evict_model, is_model_loaded, warmup_model
 
 
 def test_warmup_success():
@@ -96,6 +96,30 @@ def test_warmup_keep_alive_minus_one_pins_indefinitely():
     _, kwargs = mock_post.call_args
     body = kwargs.get("json") or {}
     assert body["keep_alive"] == "-1"
+
+
+def test_is_model_loaded_matches_running_models():
+    """Resident-model detection should match either ``name`` or ``model``."""
+    running = [
+        {"name": "qwen3:8b"},
+        {"model": "llama3.2:3b-instruct-q4_K_M"},
+    ]
+    with patch("localsmartz.ollama.list_running_models", return_value=running):
+        assert is_model_loaded("qwen3:8b-q4_K_M") is True
+        assert is_model_loaded("llama3.2:3b") is True
+        assert is_model_loaded("gpt-oss:20b") is False
+
+
+def test_ensure_model_ready_skips_warmup_when_already_loaded():
+    """Hot-path requests should not reissue /api/generate warmups."""
+    with patch("localsmartz.ollama.list_running_models", return_value=[{"name": "qwen3:8b"}]), \
+         patch("localsmartz.ollama.warmup_model") as warmup:
+        ok, duration_ms, err, already_loaded = ensure_model_ready("qwen3:8b-q4_K_M")
+    assert ok is True
+    assert duration_ms == 0
+    assert err is None
+    assert already_loaded is True
+    warmup.assert_not_called()
 
 
 def test_evict_sends_keep_alive_zero():

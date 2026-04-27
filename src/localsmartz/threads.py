@@ -47,13 +47,28 @@ def _lock_file(path: Path):
     return FileLock(path)
 
 
-def create_thread(thread_id: str, cwd: str, title: str) -> Path:
+def create_thread(
+    thread_id: str,
+    cwd: str,
+    title: str,
+    *,
+    pattern: str | None = None,
+    provider: str | None = None,
+) -> Path:
     """Create a new thread with the given ID and title.
 
     Args:
         thread_id: Unique identifier for the thread
         cwd: Current working directory (project root)
         title: Human-readable title for the thread
+        pattern: Optional coordination pattern pinned at creation (F15).
+            Once pinned, attempts to run the thread under a different
+            pattern return 409 Conflict — callers must spawn a new
+            thread to switch. ``None`` on existing threads means
+            "unpinned", which accepts any pattern.
+        provider: Optional runner provider pinned at creation (ollama,
+            anthropic, openai, groq). Same one-way lock semantics as
+            ``pattern``.
 
     Returns:
         Path to the thread directory
@@ -65,6 +80,26 @@ def create_thread(thread_id: str, cwd: str, title: str) -> Path:
     messages_file = thread_path / "messages.jsonl"
     if not messages_file.exists():
         messages_file.touch()
+
+    # Persist per-thread pin config at `<thread_dir>/config.json`.
+    # Using a sidecar file (not index.json) keeps index reads cheap and
+    # avoids rewriting every thread's metadata on a pin change.
+    if pattern is not None or provider is not None:
+        cfg_file = thread_path / "config.json"
+        cfg = {}
+        if cfg_file.exists():
+            try:
+                cfg = json.loads(cfg_file.read_text())
+                if not isinstance(cfg, dict):
+                    cfg = {}
+            except (json.JSONDecodeError, OSError):
+                cfg = {}
+        if pattern is not None:
+            cfg["pattern"] = pattern
+        if provider is not None:
+            cfg["provider"] = provider
+        cfg.setdefault("pinned_at", time.time())
+        cfg_file.write_text(json.dumps(cfg, indent=2))
 
     # Update index.json
     index_file = _thread_dir(cwd) / "index.json"
@@ -78,21 +113,115 @@ def create_thread(thread_id: str, cwd: str, title: str) -> Path:
         # Check if thread already exists
         existing = next((t for t in index["threads"] if t["id"] == thread_id), None)
         if not existing:
-            index["threads"].append({
+            entry = {
                 "id": thread_id,
                 "title": title,
                 "created_at": time.time(),
                 "updated_at": time.time(),
-                "entry_count": 0
-            })
+                "entry_count": 0,
+            }
+            if pattern is not None:
+                entry["pattern"] = pattern
+            if provider is not None:
+                entry["provider"] = provider
+            index["threads"].append(entry)
         else:
             existing["title"] = title
             existing["updated_at"] = time.time()
+            # Honor the one-way pin: if pattern/provider were set before,
+            # leave them; if they were unset and caller now provides one,
+            # record it. (Swap is enforced at run-time via check_pattern.)
+            if pattern is not None and not existing.get("pattern"):
+                existing["pattern"] = pattern
+            if provider is not None and not existing.get("provider"):
+                existing["provider"] = provider
 
         with open(index_file, 'w') as f:
             json.dump(index, f, indent=2)
 
     return thread_path
+
+
+def get_thread_config(thread_id: str, cwd: str) -> dict:
+    """Return the pin config for ``thread_id`` or ``{}`` if unpinned / missing.
+
+    Reads the ``<thread_dir>/config.json`` sidecar first; falls back to
+    fields on the index entry (backfill path for threads pinned in-place).
+    """
+    cfg_file = _thread_dir(cwd) / thread_id / "config.json"
+    if cfg_file.exists():
+        try:
+            data = json.loads(cfg_file.read_text())
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    # Fallback to index entry
+    entry = get_thread(thread_id, cwd)
+    if not entry:
+        return {}
+    out = {}
+    if entry.get("pattern"):
+        out["pattern"] = entry["pattern"]
+    if entry.get("provider"):
+        out["provider"] = entry["provider"]
+    return out
+
+
+def check_pattern(
+    thread_id: str,
+    cwd: str,
+    requested_pattern: str | None,
+    requested_provider: str | None = None,
+) -> dict | None:
+    """Return ``None`` when the requested pattern/provider match the pin,
+    else return a conflict payload suitable for a 409 response.
+
+    If the thread isn't pinned yet, returns ``None`` (caller should pin
+    on first run). If ``requested_pattern``/``requested_provider`` are
+    ``None``, they're treated as "no preference" and skipped.
+
+    Conflict payload shape::
+
+        {
+            "error": "pattern_mismatch",
+            "message": "...",
+            "thread_id": ..., "pinned": {"pattern": ..., "provider": ...},
+            "requested": {"pattern": ..., "provider": ...},
+            "suggestion": "Switching pattern will start a new thread.",
+        }
+    """
+    cfg = get_thread_config(thread_id, cwd)
+    if not cfg:
+        return None  # unpinned — caller should pin on first run
+
+    pinned_pattern = cfg.get("pattern")
+    pinned_provider = cfg.get("provider")
+
+    mismatch = False
+    if requested_pattern and pinned_pattern and requested_pattern != pinned_pattern:
+        mismatch = True
+    if requested_provider and pinned_provider and requested_provider != pinned_provider:
+        mismatch = True
+
+    if not mismatch:
+        return None
+
+    return {
+        "error": "pattern_mismatch",
+        "message": (
+            f"Thread is pinned to pattern={pinned_pattern!r} "
+            f"provider={pinned_provider!r}; requested "
+            f"pattern={requested_pattern!r} provider={requested_provider!r}."
+        ),
+        "thread_id": thread_id,
+        "pinned": {"pattern": pinned_pattern, "provider": pinned_provider},
+        "requested": {
+            "pattern": requested_pattern,
+            "provider": requested_provider,
+        },
+        "suggestion": "Switching pattern will start a new thread.",
+    }
 
 
 def load_context(thread_id: str, cwd: str) -> str | None:
@@ -120,7 +249,9 @@ def append_entry(
     turns: int,
     rationale: str | None = None,
     tools_used: list[str] | None = None,
-    scripts: list[str] | None = None
+    scripts: list[str] | None = None,
+    *,
+    kind: str = "entry",
 ) -> None:
     """Append an entry to the thread's messages.jsonl.
 
@@ -134,6 +265,11 @@ def append_entry(
         rationale: Optional reasoning/approach description
         tools_used: Optional list of tool names used
         scripts: Optional list of script paths executed
+        kind: Entry classification tag (S3, Phase 3). Default ``"entry"``
+            preserves back-compat with all existing callers. Used by the
+            reflection pattern to tag a row as ``"reflection"``; future
+            patterns may add ``"worker_output"`` etc. Stored in the JSONL
+            record so downstream readers can filter.
     """
     thread_path = _thread_dir(cwd) / thread_id
     if not thread_path.exists():
@@ -143,6 +279,7 @@ def append_entry(
 
     entry = {
         "timestamp": time.time(),
+        "kind": kind,
         "query": query,
         "summary": summary,
         "artifacts": artifacts,

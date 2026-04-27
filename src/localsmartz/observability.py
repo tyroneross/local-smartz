@@ -42,6 +42,57 @@ def is_observability_enabled() -> bool:
     return val in ("1", "true", "yes", "on")
 
 
+def probe_collector(endpoint: str | None = None, timeout: float = 1.0) -> bool:
+    """Return True if a Phoenix-style OTLP collector is reachable.
+
+    Used at startup to enable observability automatically without a CLI flag.
+    Probes the base URL (``/v1/traces`` trimmed to root) with a 1-second HEAD
+    so we don't block the main process on a long DNS lookup.
+    """
+    try:
+        resolved = endpoint or DEFAULT_OTLP_ENDPOINT
+        # Strip ``/v1/traces`` suffix to hit the Phoenix health root.
+        base = resolved.rstrip("/")
+        if base.endswith("/v1/traces"):
+            base = base[: -len("/v1/traces")]
+
+        import httpx  # local import: heavy
+
+        with httpx.Client(timeout=timeout) as client:
+            # Prefer HEAD; fall back to GET on 405.
+            try:
+                resp = client.head(base)
+            except httpx.HTTPError:
+                return False
+            if resp.status_code == 405:
+                try:
+                    resp = client.get(base)
+                except httpx.HTTPError:
+                    return False
+            return 200 <= resp.status_code < 500
+    except Exception:  # noqa: BLE001 — probe must never crash
+        return False
+
+
+def auto_setup_if_reachable(
+    *,
+    endpoint: str | None = None,
+    service_name: str | None = None,
+) -> bool:
+    """Turn observability on whenever a collector is reachable.
+
+    Called by ``__main__.py`` at startup so Phoenix users get traces out of
+    the box without passing ``--observe``. Explicit opt-out is still honored
+    via ``LOCALSMARTZ_OBSERVE=0``.
+    """
+    val = os.environ.get("LOCALSMARTZ_OBSERVE", "").lower().strip()
+    if val in ("0", "false", "no", "off"):
+        return False  # User said no — respect it.
+    if not probe_collector(endpoint):
+        return False
+    return setup_observability(endpoint=endpoint, service_name=service_name)
+
+
 def setup_observability(
     *,
     endpoint: str | None = None,
@@ -134,6 +185,7 @@ def status() -> dict:
         "endpoint": DEFAULT_OTLP_ENDPOINT,
         "service_name": DEFAULT_SERVICE_NAME,
         "env_override": is_observability_enabled(),
+        "collector_reachable": probe_collector(),
         "phoenix_install_hint": (
             "Run Phoenix locally:\n"
             "  docker run -p 6006:6006 arizephoenix/phoenix\n"

@@ -281,17 +281,25 @@ def test_list_agents_preserves_legacy_keys(fake_home):
 # ── system_focus exposed to UI (Settings → Agents read-only viewer) ──────
 
 def test_list_agents_exposes_system_focus(fake_home):
-    """Every agent dict includes `system_focus` as a string. The Swift
-    Settings → Agents tab renders this verbatim so users can inspect the
-    role's actual system prompt without reading Python source."""
-    from localsmartz.profiles import AGENT_ROLES
+    """Every agent dict includes `system_focus` as a non-empty string.
+
+    The Swift Settings → Agents tab renders this verbatim so users can
+    inspect (and edit, via PUT /api/agents/<role>/prompt) what each role
+    is being told. Post 2026-04-23, `system_focus` is sourced via
+    ``get_role_prompt`` which prefers the per-role ``.md`` file at
+    ``agents/prompts/<role>.md`` over the legacy dict — so PUT edits
+    land in the UI without a restart."""
+    from localsmartz.profiles import AGENT_ROLES, get_role_prompt
 
     profile = get_profile("full")
     for a in list_agents(profile):
         assert "system_focus" in a, f"{a['name']} missing system_focus"
         assert isinstance(a["system_focus"], str)
-        # Matches the AGENT_ROLES source of truth for each exposed role.
-        expected = AGENT_ROLES.get(a["name"], {}).get("system_focus", "")
+        # Whatever ``get_role_prompt`` currently returns is the authoritative
+        # source. The dict is only a fallback.
+        expected = get_role_prompt(a["name"]) or AGENT_ROLES.get(a["name"], {}).get(
+            "system_focus", ""
+        )
         assert a["system_focus"] == expected
 
 

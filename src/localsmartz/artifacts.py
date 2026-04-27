@@ -117,6 +117,26 @@ def register(
         with open(index_file, 'w') as f:
             json.dump(index, f, indent=2)
 
+    # S2 (Phase 3): emit an ``ls.artifact.register`` span for Phoenix.
+    # Best-effort: if the OTel SDK isn't initialized, the default no-op
+    # tracer is a silent no-op. Attrs intentionally exclude the full path
+    # to avoid leaking PII; the basename is enough for trace-UI readability.
+    try:
+        from localsmartz.observability import get_tracer as _get_tracer
+
+        tracer = _get_tracer("localsmartz.artifacts")
+        with tracer.start_as_current_span("ls.artifact.register") as span:
+            span.set_attribute("ls.artifact.id", artifact["id"])
+            span.set_attribute("ls.artifact.format", format)
+            span.set_attribute("ls.artifact.thread_id", thread_id or "")
+            try:
+                basename = Path(path).name
+            except Exception:  # noqa: BLE001
+                basename = ""
+            span.set_attribute("ls.artifact.path_basename", basename)
+    except Exception:  # noqa: BLE001 — tracing must never break registration
+        pass
+
     return artifact
 
 

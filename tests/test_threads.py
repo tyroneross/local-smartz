@@ -121,3 +121,39 @@ def test_get_thread_not_found():
     with tempfile.TemporaryDirectory() as tmp:
         thread = get_thread("nonexistent", tmp)
         assert thread is None
+
+
+def test_append_entry_default_kind_entry():
+    """S3 (Phase 3): unspecified ``kind`` defaults to ``'entry'`` — back-compat."""
+    with tempfile.TemporaryDirectory() as tmp:
+        create_thread("t-1", tmp, "Test")
+        append_entry("t-1", tmp, "q", "s", [], 1)
+
+        messages = Path(tmp) / ".localsmartz" / "threads" / "t-1" / "messages.jsonl"
+        lines = messages.read_text().strip().splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record.get("kind") == "entry"
+
+
+def test_append_entry_reflection_kind_roundtrips():
+    """S3 (Phase 3): kind='reflection' persists in JSONL and is readable."""
+    with tempfile.TemporaryDirectory() as tmp:
+        create_thread("t-refl", tmp, "Reflection test")
+        append_entry(
+            "t-refl",
+            tmp,
+            query="what is 15% of 2400?",
+            summary="primary answered; reflector scored 0.8",
+            artifacts=[],
+            turns=2,
+            kind="reflection",
+        )
+
+        messages = Path(tmp) / ".localsmartz" / "threads" / "t-refl" / "messages.jsonl"
+        lines = messages.read_text().strip().splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record.get("kind") == "reflection"
+        assert record.get("query") == "what is 15% of 2400?"
+        assert record.get("turns") == 2

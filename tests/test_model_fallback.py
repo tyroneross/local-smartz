@@ -74,6 +74,11 @@ def test_preflight_mutates_profile_to_fallback(monkeypatch, capsys):
         "localsmartz.ollama.list_models_with_size",
         lambda: [("qwen3:8b-q4_K_M", 5.2), ("gpt-oss:120b", 65.0)],
     )
+    monkeypatch.setattr("localsmartz.ollama.is_model_loaded", lambda _m: False)
+    monkeypatch.setattr(
+        "localsmartz.ollama.ensure_model_ready",
+        lambda *_a, **_k: (True, 0, None, False),
+    )
     ok = main_mod._preflight(profile)
     assert ok is True
     assert profile["planning_model"] == "gpt-oss:120b"

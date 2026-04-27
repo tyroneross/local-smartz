@@ -1,18 +1,53 @@
 import SwiftUI
 
-// MARK: - Agents tab (read-only viewer)
+// MARK: - Agents tab (editable — 2026-04-23 phase-2 follow-up)
 //
-// Track D2: surface every configured agent role in Settings so users can see
-// title, effective model, tool allow-list, and the role's system_focus prompt
-// without reading Python source. Purely informational — edit mode is a
-// deferred follow-up and there are no write affordances here.
+// D2 shipped a read-only viewer; this pass promotes it to an editor with a
+// per-agent model picker (pulls from /api/models/catalog?tier=<tier>) and a
+// system_focus markdown textarea that PUTs to /api/agents/<role>/prompt.
+// The agent/{role}/model override still uses the existing
+// POST /api/agents/<name>/model endpoint. Cancel reverts to baseline.
+
+// MARK: - Catalog model shape for the picker
+// Reuses the backend /api/models/catalog envelope used by ModelsTab.
+
+fileprivate struct AgentModelOption: Decodable, Identifiable, Hashable {
+    let name: String
+    let ramClass: String?
+    let installed: Bool
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case ramClass = "ram_class"
+        case installed
+    }
+}
+
+fileprivate struct AgentCatalogResponse: Decodable {
+    let catalog: [AgentModelOption]
+    let current: String
+}
 
 @MainActor
-private final class AgentsVM: ObservableObject {
+fileprivate final class AgentsVM: ObservableObject {
     @Published var agents: [AgentInfo] = []
     @Published var profile: String?
     @Published var loading = false
     @Published var error: String?
+    @Published var saving = false
+    @Published var saveError: String?
+
+    @Published var catalog: [AgentModelOption] = []
+
+    /// Draft edits keyed by agent name. Populated from the loaded agent
+    /// on enter-edit and cleared on Save or Cancel.
+    @Published var draftModel: [String: String] = [:]
+    @Published var draftPrompt: [String: String] = [:]
+
+    /// Name of the agent currently in edit mode. Only one at a time to
+    /// keep the surface small and the Save/Cancel affordance obvious.
+    @Published var editingAgent: String?
 
     func refresh() async {
         loading = true
@@ -23,6 +58,11 @@ private final class AgentsVM: ObservableObject {
             error = "Backend not reachable. Is the main window open?"
             return
         }
+        await loadAgents(base: base)
+        await loadCatalog(base: base)
+    }
+
+    private func loadAgents(base: String) async {
         guard let url = URL(string: "\(base)/api/agents") else {
             error = "Invalid agents URL."
             return
@@ -39,6 +79,102 @@ private final class AgentsVM: ObservableObject {
         } catch {
             self.error = "Could not load agents: \(error.localizedDescription)"
         }
+    }
+
+    private func loadCatalog(base: String) async {
+        guard let url = URL(string: "\(base)/api/models/catalog") else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let resp = try JSONDecoder().decode(AgentCatalogResponse.self, from: data)
+            // Only installed models are valid picker choices — picking an
+            // uninstalled model would fail at run time. ModelsTab handles
+            // installs separately.
+            self.catalog = resp.catalog.filter { $0.installed }
+        } catch {
+            // Non-fatal — picker just falls back to the single current model.
+        }
+    }
+
+    func beginEdit(_ agent: AgentInfo) {
+        editingAgent = agent.name
+        draftModel[agent.name] = agent.model ?? ""
+        draftPrompt[agent.name] = agent.systemFocus ?? ""
+        saveError = nil
+    }
+
+    func cancelEdit() {
+        if let name = editingAgent {
+            draftModel.removeValue(forKey: name)
+            draftPrompt.removeValue(forKey: name)
+        }
+        editingAgent = nil
+        saveError = nil
+    }
+
+    /// PUT /api/agents/<role>/prompt + POST /api/agents/<name>/model.
+    /// Two endpoints so a user can tweak one without the other.
+    func save(_ agent: AgentInfo) async {
+        guard let base = await SettingsBackend.discover() else {
+            saveError = "Backend not reachable."
+            return
+        }
+        saving = true
+        defer { saving = false }
+        saveError = nil
+
+        let name = agent.name
+        let newModel = (draftModel[name] ?? "").trimmingCharacters(in: .whitespaces)
+        let newPrompt = draftPrompt[name] ?? ""
+
+        // Model override: persist via POST /api/agents/<name>/model only
+        // when the draft differs from the loaded value. Empty string means
+        // "don't change".
+        if !newModel.isEmpty && newModel != (agent.model ?? "") {
+            let url = URL(string: "\(base)/api/agents/\(name)/model")!
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": newModel])
+            do {
+                let (_, resp) = try await URLSession.shared.data(for: req)
+                if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
+                    saveError = "Model update failed (HTTP \(http.statusCode))"
+                    return
+                }
+            } catch {
+                saveError = "Model update failed: \(error.localizedDescription)"
+                return
+            }
+        }
+
+        // System prompt: PUT /api/agents/<role>/prompt when non-empty and
+        // differs. The endpoint writes the markdown file and the next
+        // /api/agents read surfaces it — no restart needed.
+        if !newPrompt.isEmpty && newPrompt != (agent.systemFocus ?? "") {
+            let url = URL(string: "\(base)/api/agents/\(name)/prompt")!
+            var req = URLRequest(url: url)
+            req.httpMethod = "PUT"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(
+                withJSONObject: ["system_focus": newPrompt]
+            )
+            do {
+                let (_, resp) = try await URLSession.shared.data(for: req)
+                if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
+                    saveError = "Prompt update failed (HTTP \(http.statusCode))"
+                    return
+                }
+            } catch {
+                saveError = "Prompt update failed: \(error.localizedDescription)"
+                return
+            }
+        }
+
+        // Clear draft state + refresh so the card shows the new values.
+        draftModel.removeValue(forKey: name)
+        draftPrompt.removeValue(forKey: name)
+        editingAgent = nil
+        await refresh()
     }
 }
 
@@ -68,7 +204,28 @@ struct AgentsTab: View {
                 } else {
                     ForEach(Array(vm.agents.enumerated()), id: \.element.id) { idx, agent in
                         if idx > 0 { Divider().padding(.vertical, 4) }
-                        AgentCard(agent: agent)
+                        AgentCard(
+                            agent: agent,
+                            catalog: vm.catalog,
+                            isEditing: vm.editingAgent == agent.name,
+                            draftModel: Binding(
+                                get: { vm.draftModel[agent.name] ?? "" },
+                                set: { vm.draftModel[agent.name] = $0 }
+                            ),
+                            draftPrompt: Binding(
+                                get: { vm.draftPrompt[agent.name] ?? "" },
+                                set: { vm.draftPrompt[agent.name] = $0 }
+                            ),
+                            saving: vm.saving,
+                            onEdit: { vm.beginEdit(agent) },
+                            onCancel: { vm.cancelEdit() },
+                            onSave: { Task { await vm.save(agent) } }
+                        )
+                    }
+                    if let err = vm.saveError {
+                        Text(err)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.red)
                     }
                 }
             }
@@ -120,20 +277,31 @@ struct AgentsTab: View {
     }
 }
 
-// MARK: - Per-agent card
+// MARK: - Per-agent card (read + edit modes)
 
 private struct AgentCard: View {
     let agent: AgentInfo
+    let catalog: [AgentModelOption]
+    let isEditing: Bool
+    @Binding var draftModel: String
+    @Binding var draftPrompt: String
+    let saving: Bool
+    let onEdit: () -> Void
+    let onCancel: () -> Void
+    let onSave: () -> Void
+
     @State private var promptExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // Header row: title + model (mono, muted)
+            // Header row: title + model
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(agent.title)
                     .font(.system(size: 13, weight: .medium))
                 Spacer(minLength: 8)
-                if let model = agent.model, !model.isEmpty {
+                if isEditing {
+                    EmptyView()  // picker rendered in edit section
+                } else if let model = agent.model, !model.isEmpty {
                     Text(model)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)
@@ -142,6 +310,11 @@ private struct AgentCard: View {
                     Text("—")
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.tertiary)
+                }
+                if !isEditing {
+                    Button("Edit") { onEdit() }
+                        .controlSize(.small)
+                        .buttonStyle(.borderless)
                 }
             }
 
@@ -153,7 +326,7 @@ private struct AgentCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            // Tool allow-list
+            // Tool allow-list (read-only — editing tools is out of scope here)
             if let tools = agent.tools, !tools.isEmpty {
                 ToolsList(tools: tools)
             } else {
@@ -162,8 +335,10 @@ private struct AgentCard: View {
                     .foregroundStyle(.tertiary)
             }
 
-            // System prompt disclosure — only if backend sent one
-            if let focus = agent.systemFocus, !focus.isEmpty {
+            // Edit mode: model picker + system_focus editor + Save / Cancel
+            if isEditing {
+                editControls
+            } else if let focus = agent.systemFocus, !focus.isEmpty {
                 DisclosureGroup(isExpanded: $promptExpanded) {
                     Text(focus)
                         .font(.system(size: 11, design: .monospaced))
@@ -180,6 +355,68 @@ private struct AgentCard: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    // Edit controls: compact form stacked below the card header.
+    @ViewBuilder
+    private var editControls: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Model picker — shows "installed only" models. Falls back to
+            // a plain text field when the catalog is empty.
+            if catalog.isEmpty {
+                TextField("Model", text: $draftModel)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+            } else {
+                Picker("Model", selection: $draftModel) {
+                    // Ensure the currently-saved model is always pickable,
+                    // even if no longer in the installed catalog.
+                    if !catalog.contains(where: { $0.name == draftModel }),
+                       !draftModel.isEmpty {
+                        Text(draftModel).tag(draftModel)
+                    }
+                    ForEach(catalog) { opt in
+                        Text(opt.name).tag(opt.name)
+                    }
+                }
+                .pickerStyle(.menu)
+                .controlSize(.small)
+            }
+
+            // System focus — markdown textarea. TextEditor fills vertical
+            // space and is bordered to match SettingsTabsForm's visual
+            // rhythm (single stroke, no pill).
+            Text("System prompt (markdown)")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            TextEditor(text: $draftPrompt)
+                .font(.system(size: 11, design: .monospaced))
+                .frame(minHeight: 120)
+                .padding(6)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
+                )
+
+            HStack {
+                Spacer()
+                Button("Cancel") { onCancel() }
+                    .controlSize(.small)
+                    .disabled(saving)
+                Button("Save") { onSave() }
+                    .controlSize(.small)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(saving || draftPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if saving {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Saving…")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
     }
 }
 

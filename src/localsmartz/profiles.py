@@ -126,6 +126,38 @@ AGENT_ROLES = {
 }
 
 
+def get_role_prompt(role: str) -> str:
+    """Return the system prompt for ``role``, preferring ``agents/prompts/<role>.md``.
+
+    Load order:
+      1. ``src/localsmartz/agents/prompts/<role>.md`` (if present).
+      2. ``AGENT_ROLES[role]["system_focus"]`` (legacy fallback).
+      3. Empty string.
+
+    Lets us migrate role prompts to per-file ``.md`` for UI editability
+    (AgentsTab) without breaking callers that still read the dict.
+    """
+    try:
+        from localsmartz.agents.definitions import load_prompt as _load_prompt
+
+        try:
+            body = _load_prompt(role).strip()
+            if body:
+                return body
+        except Exception:
+            # Any error during load — fall through to dict.
+            pass
+    except Exception:
+        pass
+
+    meta = AGENT_ROLES.get(role)
+    if isinstance(meta, dict):
+        focus = meta.get("system_focus")
+        if isinstance(focus, str):
+            return focus
+    return ""
+
+
 def agent_tool_names(role: str) -> list[str]:
     """Return the tool names allowed for a given role, or an empty list if
     the role isn't defined. Used both by the agent builder and by ``/api/agents``
@@ -300,12 +332,14 @@ def list_agents(profile: dict) -> list[dict]:
             # sidebar can render "Planner uses: write_todos" without the
             # Swift app having to know about profile internals.
             "tools": agent_tool_names(name),
-            # Full role-specific system prompt — surfaced read-only in the
-            # Settings → Agents tab so users can inspect what each agent is
-            # actually being told. Empty string when the role has no custom
-            # focus prompt (rather than None) so consumers can treat it as
-            # a plain string.
-            "system_focus": meta.get("system_focus", ""),
+            # Full role-specific system prompt — surfaced to the
+            # Settings → Agents tab so users can inspect (and, via the
+            # PUT /api/agents/<role>/prompt endpoint, edit) what each agent
+            # is actually being told. Prefers the .md file under
+            # ``agents/prompts/<role>.md`` so PUTs land in the UI without a
+            # restart; falls back to the legacy dict string. Empty string
+            # when neither exists.
+            "system_focus": get_role_prompt(name) or meta.get("system_focus", ""),
         })
     return out
 
@@ -349,31 +383,86 @@ def detect_profile() -> str:
     Returns "full" if >= 64GB RAM, "lite" otherwise.
     """
     try:
-        system = platform.system()
+        ram_bytes = _detect_ram_bytes()
+        if ram_bytes is None:
+            return "lite"
+        ram_gb = ram_bytes / (1024 ** 3)
+        return "full" if ram_gb >= 64 else "lite"
+    except Exception:
+        return "lite"
 
-        if system == "Darwin":  # macOS
+
+def _detect_ram_bytes() -> int | None:
+    """Return installed RAM in bytes, or None on unknown OS / failure."""
+    try:
+        system = platform.system()
+        if system == "Darwin":
             result = subprocess.run(
                 ["sysctl", "-n", "hw.memsize"],
                 capture_output=True,
                 text=True,
                 check=True,
             )
-            ram_bytes = int(result.stdout.strip())
-        elif system == "Linux":
-            import os
-            ram_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-        else:
-            # Unknown system, default to lite
-            return "lite"
-
-        # Convert to GB
-        ram_gb = ram_bytes / (1024 ** 3)
-
-        return "full" if ram_gb >= 64 else "lite"
-
+            return int(result.stdout.strip())
+        if system == "Linux":
+            import os as _os
+            return _os.sysconf("SC_PAGE_SIZE") * _os.sysconf("SC_PHYS_PAGES")
+        return None
     except Exception:
-        # On error, default to lite profile
-        return "lite"
+        return None
+
+
+def _detect_gpu_vram_gb() -> int:
+    """Best-effort VRAM detection. Returns 0 when unknown.
+
+    On Apple Silicon the GPU shares system RAM (unified memory), so we return
+    0 rather than guessing — the RAM tier alone is the right signal for
+    pattern gating. On discrete-GPU Linux/Windows (not the primary target)
+    we also return 0; extend later if needed.
+    """
+    return 0
+
+
+def detect_tier() -> dict:
+    """Extended hardware-tier detection used by the pattern registry.
+
+    Returns:
+        {"tier": "mini" | "standard" | "full",
+         "ram_gb": int,
+         "gpu_vram_gb": int,
+         "legacy_profile": "full" | "lite"}
+
+    Cutoffs (from research doc §Hardware tiers):
+      - mini:     <32 GB  (24GB M4 floor)
+      - standard: 32..95 GB
+      - full:     >=96 GB (128GB+ target)
+
+    The 96-GB boundary is chosen so 96-128GB Pro machines land on "full"
+    (they can run a 70B+ model). The legacy two-way {lite, full} profile
+    is kept for backward compatibility with existing code paths.
+    """
+    ram_bytes = _detect_ram_bytes()
+    if ram_bytes is None:
+        return {
+            "tier": "mini",
+            "ram_gb": 0,
+            "gpu_vram_gb": 0,
+            "legacy_profile": "lite",
+        }
+    ram_gb = int(ram_bytes / (1024 ** 3))
+    if ram_gb >= 96:
+        tier = "full"
+    elif ram_gb >= 32:
+        tier = "standard"
+    else:
+        tier = "mini"
+    legacy = "full" if ram_gb >= 64 else "lite"
+    return {
+        "tier": tier,
+        "ram_gb": ram_gb,
+        "gpu_vram_gb": _detect_gpu_vram_gb(),
+        "legacy_profile": legacy,
+    }
 
 
 def get_profile(name: str | None = None, model_override: str | None = None) -> dict:

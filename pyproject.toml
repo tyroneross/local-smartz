@@ -35,10 +35,28 @@ dependencies = [
     "openinference-instrumentation-langchain>=0.1.0",
     # Secret storage — Keychain on macOS, secret-tool on Linux, file fallback.
     "keyring>=24.0.0",
+    # Cloud provider SDKs (Phase 2). Imports are guarded in
+    # runners/__init__.py so an offline wheel without these still works.
+    "anthropic>=0.40",
+    "openai>=1.50",
+    # LangChain adapters so DeepAgents / create_deep_agent can accept
+    # cloud providers via provider-swap dispatch. Anthropic pulls
+    # in langchain-anthropic; OpenAI/Groq share langchain-openai with a
+    # different base_url. Both are imported lazily under provider
+    # branches so offline installs still resolve.
+    "langchain-anthropic>=0.3",
+    "langchain-openai>=0.3",
 ]
 
 [project.scripts]
 localsmartz = "localsmartz.__main__:main"
+localsmartz-benchmark = "localsmartz.benchmarking:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/localsmartz"]
+
+[dependency-groups]
+dev = [
+    "arize-phoenix>=14.5.0",
+    "pytest>=9.0.3",
+]

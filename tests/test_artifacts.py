@@ -69,3 +69,54 @@ def test_register_duplicate_updates():
         artifacts = list_artifacts(tmp)
         assert len(artifacts) == 1
         assert artifacts[0]["title"] == "V2"
+
+
+def test_register_emits_artifact_span():
+    """S2 (Phase 3): artifacts.register emits ls.artifact.register span.
+
+    Attaches a SimpleSpanProcessor with an in-memory exporter to whatever
+    TracerProvider is already installed (or installs a fresh one if none
+    is set). OTel forbids *overriding* an existing provider at the global
+    level, so we attach rather than replace.
+    """
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    current = trace.get_tracer_provider()
+    exporter = InMemorySpanExporter()
+
+    # If the current provider is the no-op default, install a real one.
+    # Else attach an extra processor so we observe spans without stomping.
+    if not isinstance(current, TracerProvider):
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+    else:
+        current.add_span_processor(SimpleSpanProcessor(exporter))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        register(
+            path="/tmp/worker-output.md",
+            format="markdown",
+            title="Worker A output",
+            cwd=tmp,
+            thread_id="thread-42",
+        )
+
+    spans = exporter.get_finished_spans()
+    artifact_spans = [s for s in spans if s.name == "ls.artifact.register"]
+    assert artifact_spans, (
+        f"expected at least one ls.artifact.register span; got {[s.name for s in spans]}"
+    )
+    span = artifact_spans[0]
+    attrs = dict(span.attributes)
+    assert attrs.get("ls.artifact.format") == "markdown"
+    assert attrs.get("ls.artifact.thread_id") == "thread-42"
+    assert attrs.get("ls.artifact.path_basename") == "worker-output.md"
+    assert attrs.get("ls.artifact.id"), (
+        f"ls.artifact.id attr missing; got {attrs!r}"
+    )

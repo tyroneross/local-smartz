@@ -42,6 +42,24 @@ The script:
    localsmartz --check      # verify
    ```
 
+### Dev setup
+
+For local validation and observability tooling:
+
+```bash
+uv sync --dev
+.venv/bin/python -m pytest
+.venv/bin/python -m localsmartz.benchmarking --prompt "What is AI?" --runs 3
+```
+
+The `dev` dependency group includes:
+- `pytest` for the repo test suite
+- `arize-phoenix` for the local tracing UI/collector
+
+The included `scripts/run-phoenix.sh` helper sets `PHOENIX_WORKING_DIR` to
+`.localsmartz/phoenix` automatically so Phoenix can run even when `~/.phoenix`
+is unavailable or sandboxed.
+
 ### Cross-Mac install
 
 Installing `localsmartz` on a fresh Mac:
@@ -93,6 +111,11 @@ localsmartz
 # Web UI
 localsmartz --serve
 # Open http://localhost:11435
+
+# Local tracing with Phoenix + OpenTelemetry
+scripts/run-phoenix.sh
+localsmartz --observe --serve
+# Open http://localhost:6006 for traces
 ```
 
 ## Usage
@@ -133,6 +156,47 @@ The web UI provides:
 - **Folder management** — configure which directories the agent can access
 - **Thread sidebar** — view and resume past research sessions
 - **SSE streaming** — real-time output as the agent works
+
+### Observability
+
+OpenTelemetry exporters ship in the base install. Phoenix is included in the
+repo's `dev` dependency group so local tracing stays opt-in and doesn't bloat
+the runtime install path.
+
+```bash
+uv sync --dev
+scripts/run-phoenix.sh
+localsmartz --observe "Compare local model orchestration patterns"
+```
+
+Defaults:
+- Phoenix UI: `http://localhost:6006`
+- OTLP traces endpoint: `http://localhost:6006/v1/traces`
+- Override endpoint with `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
+
+### Benchmarking
+
+Use the built-in benchmark harness to measure startup time, first SSE event,
+first text token, and end-to-end request duration.
+
+```bash
+uv sync --dev
+.venv/bin/python -m localsmartz.benchmarking \
+  --prompt "Compare local model orchestration patterns" \
+  --runs 3
+
+# A/B the role-agent cache
+.venv/bin/python -m localsmartz.benchmarking \
+  --prompt "Compare local model orchestration patterns" \
+  --runs 3 \
+  --disable-role-cache
+```
+
+Or after reinstalling the editable package:
+
+```bash
+localsmartz-benchmark --prompt "Compare local model orchestration patterns" --runs 3
+```
 
 ### macOS App
 

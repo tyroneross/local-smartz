@@ -196,10 +196,19 @@ You are Local Smartz, a local-first research assistant. You answer questions usi
 """
 
 
-def _create_model(profile: dict, role: str, *, model_name: str | None = None) -> ChatOllama:
-    """Create a ChatOllama instance for the given profile and role.
+def _create_model(profile: dict, role: str, *, model_name: str | None = None):
+    """Create a bare chat model for the given profile and role.
 
-    Returns a bare ``ChatOllama`` (NOT wrapped in ``with_retry``). Wrapping
+    Provider dispatch (Phase 2): reads the project-local config's
+    ``provider`` key. ``ollama`` (default) → ``ChatOllama``. ``anthropic``
+    → ``ChatAnthropic`` (reads key from keyring). ``openai`` / ``groq``
+    → ``ChatOpenAI`` with the appropriate ``base_url`` + key.
+
+    Return type is intentionally ``Any``-ish: the caller only relies on
+    ``.bind_tools()`` + ``.ainvoke()`` which every LangChain chat model
+    implements.
+
+    Returns a bare model (NOT wrapped in ``with_retry``). Wrapping
     produces a ``RunnableRetry`` which (a) is unhashable and blows up inside
     ``create_deep_agent``'s model cache with ``unhashable type: 'RunnableRetry'``
     and (b) strips ``bind_tools`` so specialists silently lose their tool
@@ -210,12 +219,61 @@ def _create_model(profile: dict, role: str, *, model_name: str | None = None) ->
 
     If ``model_name`` is passed, it overrides the role lookup.
     """
-    import httpx  # local import: heavy, only needed for the timeout struct
+    provider = _active_provider()
     name = model_name or get_model(profile, role)
+
+    if provider == "ollama":
+        return _create_ollama_model(name)
+    if provider == "anthropic":
+        return _create_anthropic_model(name)
+    if provider in ("openai", "groq"):
+        return _create_openai_compat_model(name, provider=provider)
+    # Unknown provider → fall back to ollama. Never crash the agent graph
+    # on a stray config key.
+    return _create_ollama_model(name)
+
+
+def _active_provider() -> str:
+    """Return the active provider string for this process's CWD.
+
+    Reads ``.localsmartz/config.json``'s ``provider`` key. Defaults to
+    ``ollama`` when missing or on any read error — the research flow is
+    local-first and must never break for a config miss.
+    """
+    try:
+        from localsmartz.config import load_config
+
+        cfg = load_config(Path.cwd()) or {}
+        p = cfg.get("provider")
+        if isinstance(p, str) and p.strip():
+            return p.strip().lower()
+    except Exception:  # noqa: BLE001 — provider detection is non-fatal
+        pass
+    return "ollama"
+
+
+def _create_ollama_model(name: str) -> ChatOllama:
+    """Build a bare ChatOllama. qwen3.5 family auto-injects ``reasoning: false``
+    (F22 — see ``runners/local_ollama.py::_should_disable_reasoning``)."""
+    import httpx  # local import: heavy, only needed for the timeout struct
+
+    # Reuse the F22 registry check from runners/local_ollama — keeping a
+    # single source of truth avoids drift between the runner and the
+    # legacy agent path.
+    try:
+        from localsmartz.runners.local_ollama import _should_disable_reasoning
+
+        model_kwargs: dict | None = None
+        if _should_disable_reasoning(name):
+            model_kwargs = {"reasoning": False}
+    except Exception:  # noqa: BLE001
+        model_kwargs = None
+
     return ChatOllama(
         model=name,
         temperature=0,  # Deterministic for reliable tool calling
         num_ctx=4096,  # Conservative context window for memory
+        model_kwargs=model_kwargs,
         client_kwargs={
             "timeout": httpx.Timeout(
                 connect=5.0,
@@ -225,6 +283,70 @@ def _create_model(profile: dict, role: str, *, model_name: str | None = None) ->
             ),
         },
     )
+
+
+def _create_anthropic_model(name: str):
+    """Build a bare ChatAnthropic. Reads the key from the keyring/secrets store."""
+    from langchain_anthropic import ChatAnthropic  # lazy — cloud path only
+
+    api_key = _cloud_api_key("anthropic")
+    return ChatAnthropic(
+        model=name,
+        temperature=0,
+        api_key=api_key,
+        timeout=600.0,
+    )
+
+
+def _create_openai_compat_model(name: str, *, provider: str):
+    """Build a bare ChatOpenAI. ``provider`` is ``openai`` or ``groq``.
+
+    Groq points at ``https://api.groq.com/openai/v1``; OpenAI uses the SDK
+    default. Keys come from the keyring under the provider-scoped name.
+    """
+    from langchain_openai import ChatOpenAI  # lazy — cloud path only
+
+    api_key = _cloud_api_key(provider)
+    kwargs: dict = {
+        "model": name,
+        "temperature": 0,
+        "api_key": api_key,
+        "timeout": 600.0,
+    }
+    if provider == "groq":
+        kwargs["base_url"] = "https://api.groq.com/openai/v1"
+    return ChatOpenAI(**kwargs)
+
+
+def _cloud_api_key(provider: str) -> str | None:
+    """Fetch a provider API key from the secrets store.
+
+    Tries ``localsmartz.secrets.get`` first (keychain on macOS with a
+    file fallback). Falls back to the provider-specific env var
+    (``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``, ``GROQ_API_KEY``).
+    Returns ``None`` if no key is found — the downstream SDK will then
+    raise an auth error the caller can surface to the UI.
+    """
+    try:
+        from localsmartz import secrets as _secrets
+
+        val = _secrets.get(f"{provider}_api_key")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    import os as _os
+
+    env = {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "groq": "GROQ_API_KEY",
+    }.get(provider)
+    if env:
+        val = _os.environ.get(env)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
 
 
 # Short system prompt for trivial prompts — keeps the fast-path tiny so

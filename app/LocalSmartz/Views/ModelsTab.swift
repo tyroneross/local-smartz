@@ -70,6 +70,15 @@ final class ModelsViewModel: ObservableObject {
     @Published var error: String?
     @Published var busyModel: String?           // model currently pulling/removing
     @Published var pullProgress: [String: String] = [:]  // last line per model
+    /// Install progress in [0.0, 1.0] per model — feeds the ProgressView bar.
+    /// Populated from /api/models/install SSE ``progress`` events
+    /// (completed / total). Keyed by model name; cleared on done/error.
+    @Published var pullFraction: [String: Double] = [:]
+    /// Live disk-usage delta captured at install start and updated after
+    /// each /api/ollama/info refresh. Displayed as "+X.X GB on disk" next
+    /// to the progress bar.
+    @Published var diskBaselineBytes: [String: Int] = [:]
+    @Published var diskNowBytes: Int = 0
     @Published var detectedRAMGB: Int?
 
     /// Port range the Mac app's backend uses. We probe to find the running one.
@@ -141,22 +150,90 @@ final class ModelsViewModel: ObservableObject {
         }
     }
 
+    /// Install via /api/models/install (the new SSE endpoint with
+    /// structured progress events). Renders a live progress bar +
+    /// disk-usage delta. Falls back to the legacy /api/models/pull path
+    /// automatically if install returns a non-2xx — keeps older backends
+    /// working.
     func pull(_ model: String) async {
-        guard let base = baseURL,
-              let url = URL(string: "\(base)/api/models/pull") else { return }
+        guard let base = baseURL else { return }
         busyModel = model
         pullProgress[model] = "Starting..."
+        pullFraction[model] = 0.0
+        diskBaselineBytes[model] = info?.totalSizeBytes ?? 0
         defer { busyModel = nil }
 
+        // Primary path: /api/models/install (structured progress).
+        let installURL = URL(string: "\(base)/api/models/install")!
+        var req = URLRequest(url: installURL)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": model])
+
+        do {
+            let (stream, resp) = try await URLSession.shared.bytes(for: req)
+            if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
+                // Fallback to legacy pull endpoint if install isn't
+                // available — older backend builds.
+                await legacyPull(model: model, base: base)
+                return
+            }
+            for try await line in stream.lines {
+                guard line.hasPrefix("data: ") else { continue }
+                let payload = String(line.dropFirst(6))
+                guard let data = payload.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let kind = obj["type"] as? String
+                else { continue }
+
+                switch kind {
+                case "status":
+                    if let text = obj["text"] as? String {
+                        pullProgress[model] = text
+                    }
+                case "progress":
+                    if let completed = obj["completed"] as? Int,
+                       let total = obj["total"] as? Int, total > 0 {
+                        let frac = Double(completed) / Double(total)
+                        pullFraction[model] = frac
+                        let mb = Double(completed) / 1_000_000
+                        let totalMB = Double(total) / 1_000_000
+                        pullProgress[model] = String(
+                            format: "%.0f / %.0f MB", mb, totalMB
+                        )
+                    }
+                case "done":
+                    pullFraction[model] = 1.0
+                    pullProgress[model] = "Downloaded ✓"
+                case "error":
+                    let msg = obj["message"] as? String ?? "unknown error"
+                    pullProgress[model] = "Error: \(msg)"
+                    pullFraction[model] = nil
+                default:
+                    break
+                }
+            }
+            await refresh()
+            // Record the post-install disk snapshot for the delta label.
+            if let total = info?.totalSizeBytes { diskNowBytes = total }
+        } catch {
+            pullProgress[model] = "Error: \(error.localizedDescription)"
+            pullFraction[model] = nil
+        }
+    }
+
+    /// Legacy path kept for back-compat with older backends that only
+    /// expose /api/models/pull.
+    private func legacyPull(model: String, base: String) async {
+        let url = URL(string: "\(base)/api/models/pull")!
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model])
-
         do {
             let (stream, _) = try await URLSession.shared.bytes(for: req)
             for try await line in stream.lines {
-                // SSE lines: "data: {...}"
                 guard line.hasPrefix("data: ") else { continue }
                 let payload = String(line.dropFirst(6))
                 if let data = payload.data(using: .utf8),
@@ -165,6 +242,7 @@ final class ModelsViewModel: ObservableObject {
                         pullProgress[model] = ln
                     } else if let kind = obj["type"] as? String, kind == "done" {
                         pullProgress[model] = "Downloaded ✓"
+                        pullFraction[model] = 1.0
                     } else if let kind = obj["type"] as? String, kind == "error",
                               let msg = obj["message"] as? String {
                         pullProgress[model] = "Error: \(msg)"
@@ -494,11 +572,29 @@ struct ModelsTab: View {
             }
 
             if let progress = vm.pullProgress[model.name], vm.busyModel == model.name || progress == "Downloaded ✓" {
-                Text(progress)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(progress.hasPrefix("Error") ? .red : .secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        if let frac = vm.pullFraction[model.name],
+                           vm.busyModel == model.name {
+                            ProgressView(value: frac)
+                                .progressViewStyle(.linear)
+                                .frame(maxWidth: 240)
+                        }
+                        Text(progress)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(progress.hasPrefix("Error") ? .red : .secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    if let baseline = vm.diskBaselineBytes[model.name],
+                       vm.diskNowBytes > baseline {
+                        Text(
+                            "+\(String(format: "%.1f", Double(vm.diskNowBytes - baseline) / 1_000_000_000)) GB on disk"
+                        )
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                    }
+                }
             }
         }
         .padding(.vertical, 4)
