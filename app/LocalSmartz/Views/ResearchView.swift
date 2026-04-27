@@ -84,6 +84,12 @@ struct ResearchView: View {
     @State private var patternConflictQuery: String?
     @State private var patternConflictMessage: String = ""
 
+    /// Prompts typed while a run is in progress. The first entry is
+    /// auto-dispatched when `isStreaming` flips to false.
+    @State private var queuedPrompts: [String] = []
+    /// Controls the queue popover triggered from the count badge.
+    @State private var showQueuePopover = false
+
     /// Composer height controlled by drag handle; persisted across launches.
     @State private var composerHeight: CGFloat = {
         let saved = UserDefaults.standard.double(forKey: "composerHeight")
@@ -205,6 +211,62 @@ struct ResearchView: View {
                         .onHover { hovering in
                             if hovering { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
                         }
+                    // Queue indicator — visible only when prompts are waiting.
+                    if !queuedPrompts.isEmpty {
+                        HStack(spacing: 6) {
+                            Button {
+                                showQueuePopover = true
+                            } label: {
+                                Text("\(queuedPrompts.count) queued")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .popover(isPresented: $showQueuePopover, arrowEdge: .bottom) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("Queued prompts")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                    ForEach(Array(queuedPrompts.enumerated()), id: \.offset) { idx, q in
+                                        HStack(spacing: 6) {
+                                            Text(q)
+                                                .font(.system(size: 11))
+                                                .lineLimit(2)
+                                            Spacer()
+                                            Button {
+                                                queuedPrompts.remove(at: idx)
+                                            } label: {
+                                                Image(systemName: "xmark.circle.fill")
+                                                    .font(.system(size: 11))
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                    }
+                                }
+                                .padding(12)
+                                .frame(minWidth: 240, maxWidth: 320)
+                            }
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 4)
+                    }
+                    // Fix 4: Prospective model hint — shown while composing,
+                    // hidden during streaming or when input is empty.
+                    if !prompt.trimmingCharacters(in: .whitespaces).isEmpty && !isStreaming {
+                        HStack(spacing: 0) {
+                            Text("→ next: ")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                            Text(prospectiveModel)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 2)
+                    }
                     inputBar
                 }
                 .frame(height: composerHeight)
@@ -730,8 +792,23 @@ struct ResearchView: View {
             // empty once fetchModels() returns with an empty list.
             return currentModel
         }
-        if availableModels.isEmpty { return "Loading…" }
+        if availableModels.isEmpty {
+            // Both empty — avoid indefinite "Loading…" by falling back to
+            // the profile chip so the toolbar always shows something useful.
+            return appState.profile.uppercased()
+        }
         return "Pick a model"
+    }
+
+    /// The model that will fire for the next query. Prefers a focused agent's
+    /// per-agent model override over the global currentModel.
+    private var prospectiveModel: String {
+        if let agentName = focusAgent,
+           let agentModel = agents.first(where: { $0.name == agentName })?.model,
+           !agentModel.isEmpty {
+            return agentModel
+        }
+        return currentModel.isEmpty ? modelPickerLabel : currentModel
     }
 
     // MARK: - Empty state
@@ -1021,9 +1098,16 @@ struct ResearchView: View {
     }
 
     private func runResearch() {
+        let trimmed = prompt.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        // If a run is in flight, queue rather than no-op.
+        if isStreaming {
+            queuedPrompts.append(trimmed)
+            prompt = ""
+            return
+        }
         guard canRun else { return }
-        let query = prompt.trimmingCharacters(in: .whitespaces)
-        runResearch(query: query, bypassRAMCheck: false)
+        runResearch(query: trimmed, bypassRAMCheck: false)
     }
 
     /// Core research dispatch. The public zero-arg ``runResearch()`` calls
@@ -1124,6 +1208,15 @@ struct ResearchView: View {
             researchTask = nil
             await refreshStatus()
             await fetchThreads()
+            // Drain the queue — pop and fire the next prompt, if any.
+            if !queuedPrompts.isEmpty {
+                let next = queuedPrompts.removeFirst()
+                // Small async hop so the UI settles between runs.
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1s
+                    runResearch(query: next, bypassRAMCheck: false)
+                }
+            }
         }
     }
 
@@ -1206,6 +1299,12 @@ struct ResearchView: View {
             // if the next query triggers a reload.
             if let model, !model.isEmpty {
                 appState.warmupModelName = model
+                // Populate toolbar model name from the first status event
+                // that carries a model. Gate behind !isSwitchingModel so we
+                // don't stomp a picker selection the user just made.
+                if currentModel.isEmpty && !isSwitchingModel {
+                    currentModel = model
+                }
             }
             if stage == "loading_model" {
                 appState.modelWarmup = .loading

@@ -77,6 +77,7 @@ struct ThreadListView: View {
                         title: "All agents",
                         summary: "Default multi-step flow",
                         tools: nil,
+                        modelName: nil,
                         isSelected: focusAgent == nil
                     ) {
                         focusAgent = nil
@@ -91,6 +92,7 @@ struct ThreadListView: View {
                             // calm. Tool list is nil for "All agents" since
                             // its tool surface is the union of everything.
                             tools: focusAgent == agent.name ? agent.tools : nil,
+                            modelName: agent.model,
                             isSelected: focusAgent == agent.name
                         ) {
                             focusAgent = (focusAgent == agent.name ? nil : agent.name)
@@ -143,6 +145,7 @@ struct ThreadListView: View {
         let title: String
         let summary: String
         let tools: [String]?
+        let modelName: String?
         let isSelected: Bool
         let onTap: () -> Void
 
@@ -160,6 +163,13 @@ struct ThreadListView: View {
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
+                        if let model = modelName, !model.isEmpty {
+                            Text(model)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .padding(.leading, 24)
+                                .padding(.top, 1)
+                        }
                     }
                     Spacer(minLength: 0)
                 }
