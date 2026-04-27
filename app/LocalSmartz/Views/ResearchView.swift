@@ -793,15 +793,11 @@ struct ResearchView: View {
         // configured model isn't pulled in Ollama, `currentModel` can point
         // to something not in `availableModels` — show "Pick a model" so
         // the toolbar never renders a blank label.
-        if !currentModel.isEmpty, availableModels.contains(currentModel) {
-            return currentModel
-        }
-        if !currentModel.isEmpty, availableModels.isEmpty {
-            // Haven't loaded the list yet but backend reports a current
-            // model. Show it rather than "Loading…" so the label isn't
-            // empty once fetchModels() returns with an empty list.
-            return currentModel
-        }
+        // Prefer currentModel whenever it's set — refreshStatus()'s 30s poll
+        // populates it from /api/status's effective_model on launch, so the
+        // toolbar reflects the active model without waiting for fetchModels()
+        // OR an SSE .status event from a query.
+        if !currentModel.isEmpty { return currentModel }
         if availableModels.isEmpty {
             // Both empty — avoid indefinite "Loading…" by falling back to
             // the profile chip so the toolbar always shows something useful.
@@ -1500,6 +1496,15 @@ struct ResearchView: View {
             let status = try JSONDecoder().decode(BackendStatusResponse.self, from: data)
             appState.profile = status.profile
 
+            // Populate currentModel from /api/status's effective_model whenever the
+            // poll runs — covers the cold-start race where fetchModels hasn't yet
+            // populated availableModels, so the toolbar can render the model name
+            // immediately without waiting for the first SSE .status event.
+            if currentModel.isEmpty, !isSwitchingModel,
+               let em = status.effectiveModel, !em.isEmpty {
+                currentModel = em
+            }
+
             if !status.ollama.running {
                 appState.ollamaStatus = .offline
             } else if status.ready {
@@ -1657,6 +1662,7 @@ private struct BackendStatusResponse: Decodable {
     let ready: Bool
     let missingModels: [String]
     let ollama: OllamaState
+    let effectiveModel: String?
 
     struct OllamaState: Decodable {
         let running: Bool
@@ -1667,6 +1673,7 @@ private struct BackendStatusResponse: Decodable {
         case ready
         case missingModels = "missing_models"
         case ollama
+        case effectiveModel = "effective_model"
     }
 }
 
