@@ -138,7 +138,7 @@ struct ResearchView: View {
                 if let banner = savedQueryBanner {
                     HStack(spacing: 8) {
                         Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: 11))
+                            .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                         Text(banner)
                             .font(.caption)
@@ -218,26 +218,26 @@ struct ResearchView: View {
                                 showQueuePopover = true
                             } label: {
                                 Text("\(queuedPrompts.count) queued")
-                                    .font(.system(size: 11))
+                                    .font(.system(size: 13))
                                     .foregroundStyle(.secondary)
                             }
                             .buttonStyle(.plain)
                             .popover(isPresented: $showQueuePopover, arrowEdge: .bottom) {
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text("Queued prompts")
-                                        .font(.system(size: 11, weight: .semibold))
+                                        .font(.system(size: 13, weight: .semibold))
                                         .foregroundStyle(.secondary)
                                     ForEach(Array(queuedPrompts.enumerated()), id: \.offset) { idx, q in
                                         HStack(spacing: 6) {
                                             Text(q)
-                                                .font(.system(size: 11))
+                                                .font(.system(size: 13))
                                                 .lineLimit(2)
                                             Spacer()
                                             Button {
                                                 queuedPrompts.remove(at: idx)
                                             } label: {
                                                 Image(systemName: "xmark.circle.fill")
-                                                    .font(.system(size: 11))
+                                                    .font(.system(size: 13))
                                                     .foregroundStyle(.secondary)
                                             }
                                             .buttonStyle(.plain)
@@ -257,10 +257,10 @@ struct ResearchView: View {
                     if !prompt.trimmingCharacters(in: .whitespaces).isEmpty && !isStreaming {
                         HStack(spacing: 0) {
                             Text("→ next: ")
-                                .font(.system(size: 11))
+                                .font(.system(size: 13))
                                 .foregroundStyle(.secondary)
                             Text(prospectiveModel)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(size: 13, design: .monospaced))
                                 .foregroundStyle(.secondary)
                             Spacer()
                         }
@@ -424,12 +424,12 @@ struct ResearchView: View {
     private var costConfirmSheet: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Cloud run — confirm cost")
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 16, weight: .semibold))
             Text(
                 "This request will run against the \(currentProvider) API, not a "
                 + "local model. Estimated cost for this query:"
             )
-            .font(.system(size: 12))
+            .font(.system(size: 14))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
 
@@ -440,18 +440,18 @@ struct ResearchView: View {
                 } else {
                     ProgressView().controlSize(.small)
                     Text("Estimating…")
-                        .font(.system(size: 12))
+                        .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
             if !pendingCostRateKnown {
                 Text("Rate not found in table — cost may be off. (\(pendingCostRateDate))")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.orange)
             } else if !pendingCostRateDate.isEmpty {
                 Text("Rates dated \(pendingCostRateDate).")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.tertiary)
             }
             HStack {
@@ -578,12 +578,16 @@ struct ResearchView: View {
         }
     }
 
-    /// Read detected RAM via /api/status so the menu fit chip matches
-    /// what ModelsTab and InstallModelSheet show.
+    /// Read detected RAM and effective_model via /api/status so the menu fit chip
+    /// and toolbar model name are both populated before the first query.
     private func fetchRam() async {
         struct StatusResp: Decodable {
             let ramGB: Int?
-            enum CodingKeys: String, CodingKey { case ramGB = "ram_gb" }
+            let effectiveModel: String?
+            enum CodingKeys: String, CodingKey {
+                case ramGB = "ram_gb"
+                case effectiveModel = "effective_model"
+            }
         }
         guard backend.isRunning,
               let url = URL(string: "\(backend.baseURL)/api/status") else { return }
@@ -592,6 +596,12 @@ struct ResearchView: View {
             let decoded = try JSONDecoder().decode(StatusResp.self, from: data)
             if let gb = decoded.ramGB, gb > 0 {
                 detectedRamGB = gb
+            }
+            // Populate currentModel from effective_model on launch so the toolbar
+            // shows the real model name before the first query fires an SSE .status event.
+            if currentModel.isEmpty, !isSwitchingModel,
+               let em = decoded.effectiveModel, !em.isEmpty {
+                currentModel = em
             }
         } catch {
             // non-fatal — chips just hide
@@ -659,7 +669,7 @@ struct ResearchView: View {
             // already says "Local Smartz", no need to repeat it.
             if !currentTitle.isEmpty {
                 Text(currentTitle)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 16, weight: .semibold))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -673,7 +683,7 @@ struct ResearchView: View {
 
                 // Calm Precision Rule 9: status/profile is text only, no badge.
                 Text(appState.profile.uppercased())
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .tracking(0.5)
                     .foregroundStyle(.secondary)
 
@@ -682,13 +692,13 @@ struct ResearchView: View {
                         .fill(ollamaColor)
                         .frame(width: 7, height: 7)
                     Text(ollamaLabel)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(ollamaColor)
                 }
 
                 if let ms = durationMs {
                     Text(formatDuration(ms))
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                 }
@@ -750,13 +760,13 @@ struct ResearchView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "cpu")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
                 Text("Model:")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 Text(modelPickerLabel)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
@@ -829,7 +839,7 @@ struct ResearchView: View {
             if let action = emptyStateAction {
                 Button(action: action.handler) {
                     Label(action.title, systemImage: action.icon)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 15, weight: .medium))
                         .padding(.horizontal, 8)
                 }
                 .controlSize(.regular)
@@ -925,7 +935,7 @@ struct ResearchView: View {
                         Image(systemName: "stop.circle.fill")
                             .font(.title3)
                         Text("Stop")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 14, weight: .medium))
                     }
                     .foregroundStyle(.red)
                 }
@@ -992,13 +1002,13 @@ struct ResearchView: View {
                     .controlSize(.large)
                 VStack(spacing: 4) {
                     Text("Loading model")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.primary)
                     Text(appState.warmupModelName.isEmpty ? " " : appState.warmupModelName)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.system(size: 14, design: .monospaced))
                         .foregroundStyle(.secondary)
                     Text("Ollama is loading the model into memory. This only happens on first use.")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 320)
@@ -1533,7 +1543,7 @@ struct ResearchView: View {
 
                 if !trimmed.isEmpty {
                     Text("Folder: ~/Desktop/\(sanitized)/")
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 13, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)

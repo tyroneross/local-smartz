@@ -199,7 +199,7 @@ struct AgentsTab: View {
                     .padding(.vertical, 20)
                 } else if vm.agents.isEmpty {
                     Text("No agents found for the active profile.")
-                        .font(.system(size: 12))
+                        .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(Array(vm.agents.enumerated()), id: \.element.id) { idx, agent in
@@ -224,7 +224,7 @@ struct AgentsTab: View {
                     }
                     if let err = vm.saveError {
                         Text(err)
-                            .font(.system(size: 11))
+                            .font(.system(size: 13))
                             .foregroundStyle(.red)
                     }
                 }
@@ -239,10 +239,10 @@ struct AgentsTab: View {
         HStack {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Agents")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 15, weight: .medium))
                 if let profile = vm.profile {
                     Text("Profile: \(profile)")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -263,7 +263,7 @@ struct AgentsTab: View {
     private func errorView(_ message: String) -> some View {
         VStack(spacing: 8) {
             Text(message)
-                .font(.system(size: 12))
+                .font(.system(size: 14))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             Button("Retry") {
@@ -297,18 +297,18 @@ private struct AgentCard: View {
             // Header row: title + model
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(agent.title)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 15, weight: .medium))
                 Spacer(minLength: 8)
                 if isEditing {
                     EmptyView()  // picker rendered in edit section
                 } else if let model = agent.model, !model.isEmpty {
                     Text(model)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 13, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                 } else {
                     Text("—")
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 13, design: .monospaced))
                         .foregroundStyle(.tertiary)
                 }
                 if !isEditing {
@@ -321,7 +321,7 @@ private struct AgentCard: View {
             // Summary
             if !agent.summary.isEmpty {
                 Text(agent.summary)
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -331,7 +331,7 @@ private struct AgentCard: View {
                 ToolsList(tools: tools)
             } else {
                 Text("Tools: (role inherits only DeepAgents built-ins)")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.tertiary)
             }
 
@@ -341,14 +341,14 @@ private struct AgentCard: View {
             } else if let focus = agent.systemFocus, !focus.isEmpty {
                 DisclosureGroup(isExpanded: $promptExpanded) {
                     Text(focus)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 13, design: .monospaced))
                         .foregroundStyle(.primary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, 4)
                 } label: {
                     Text("System prompt")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
                 .accessibilityLabel("Toggle system prompt for \(agent.title)")
@@ -366,7 +366,7 @@ private struct AgentCard: View {
             if catalog.isEmpty {
                 TextField("Model", text: $draftModel)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.system(size: 14, design: .monospaced))
             } else {
                 Picker("Model", selection: $draftModel) {
                     // Ensure the currently-saved model is always pickable,
@@ -387,10 +387,10 @@ private struct AgentCard: View {
             // space and is bordered to match SettingsTabsForm's visual
             // rhythm (single stroke, no pill).
             Text("System prompt (markdown)")
-                .font(.system(size: 11))
+                .font(.system(size: 13))
                 .foregroundStyle(.secondary)
             TextEditor(text: $draftPrompt)
-                .font(.system(size: 11, design: .monospaced))
+                .font(.system(size: 13, design: .monospaced))
                 .frame(minHeight: 120)
                 .padding(6)
                 .overlay(
@@ -412,7 +412,7 @@ private struct AgentCard: View {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
                     Text("Saving…")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -430,11 +430,11 @@ private struct ToolsList: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Tools")
-                .font(.system(size: 11))
+                .font(.system(size: 13))
                 .foregroundStyle(.secondary)
             WrappingHStack(items: tools) { tool in
                 Text(tool)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 13, design: .monospaced))
                     .foregroundStyle(.primary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)

@@ -158,14 +158,14 @@ struct ThreadListView: View {
                         .foregroundStyle(isSelected ? Color.accentColor : .secondary)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(title)
-                            .font(.system(size: 13, weight: .medium))
+                            .font(.system(size: 15, weight: .medium))
                         Text(summary)
-                            .font(.system(size: 11))
+                            .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                         if let model = modelName, !model.isEmpty {
                             Text(model)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(size: 13, design: .monospaced))
                                 .foregroundStyle(.secondary)
                                 .padding(.leading, 24)
                                 .padding(.top, 1)
@@ -180,7 +180,7 @@ struct ThreadListView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(tools, id: \.self) { name in
                             Text(name)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(size: 13, design: .monospaced))
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -234,11 +234,11 @@ struct ThreadListView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(Self.truncate(saved.query, max: 80))
-                                .font(.system(size: 12))
+                                .font(.system(size: 14))
                                 .lineLimit(1)
                                 .foregroundStyle(.primary)
                             Text(saved.timestamp, style: .relative)
-                                .font(.system(size: 10))
+                                .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -251,10 +251,10 @@ struct ThreadListView: View {
         } label: {
             VStack(alignment: .leading, spacing: 1) {
                 Text(project.name)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 15, weight: .medium))
                     .lineLimit(1)
                 Text(project.createdAt, style: .relative)
-                    .font(.system(size: 10))
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
             .contextMenu {

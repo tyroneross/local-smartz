@@ -29,9 +29,9 @@ struct MainView: View {
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: mode.systemImage)
-                            .font(.system(size: 11, weight: appState.mode == mode ? .semibold : .regular))
+                            .font(.system(size: 13, weight: appState.mode == mode ? .semibold : .regular))
                         Text(mode.label)
-                            .font(.system(size: 12, weight: appState.mode == mode ? .semibold : .regular))
+                            .font(.system(size: 14, weight: appState.mode == mode ? .semibold : .regular))
                     }
                     .foregroundStyle(appState.mode == mode ? Color.primary : .secondary)
                     .padding(.vertical, 6)

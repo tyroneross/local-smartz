@@ -130,7 +130,7 @@ struct PatternTab: View {
             SettingsTabsForm {
                 HStack {
                     Text("Coordination pattern")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 15, weight: .medium))
                     Spacer()
                     Button {
                         Task { await vm.refresh() }
@@ -145,7 +145,7 @@ struct PatternTab: View {
 
                 if let err = vm.error {
                     Text(err)
-                        .font(.system(size: 12))
+                        .font(.system(size: 14))
                         .foregroundStyle(.red)
                 }
 
@@ -153,7 +153,7 @@ struct PatternTab: View {
                     "Pattern controls how agents collaborate on a research query. "
                     + "Switching pattern mid-thread is blocked — it starts a new thread."
                 )
-                .font(.system(size: 11))
+                .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -178,12 +178,12 @@ struct PatternTab: View {
                 if let p = vm.patterns.first(where: { $0.name == vm.selectedPattern }) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(p.description)
-                            .font(.system(size: 11))
+                            .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         if !p.requiredRoles.isEmpty {
                             Text("Required roles: \(p.requiredRoles.joined(separator: ", "))")
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(size: 13, design: .monospaced))
                                 .foregroundStyle(.tertiary)
                         }
                     }
@@ -205,19 +205,19 @@ struct PatternTab: View {
                         "Cloud provider: runs will prompt for cost confirmation "
                         + "before each query (estimate shown in USD)."
                     )
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if let err = vm.saveError {
                     Text(err)
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.red)
                 }
                 if let msg = vm.lastSavedMessage {
                     Text(msg)
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.green)
                 }
 

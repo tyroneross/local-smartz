@@ -52,7 +52,7 @@ struct SettingsTabsRow<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.system(size: 13))
+                .font(.system(size: 15))
                 .foregroundStyle(.secondary)
             content()
         }
@@ -116,7 +116,7 @@ struct TelemetryTab: View {
             SettingsTabsForm {
                 HStack {
                     Text("Observability")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 15, weight: .medium))
                     Spacer()
                     Button {
                         Task { await vm.refresh() }
@@ -131,20 +131,20 @@ struct TelemetryTab: View {
 
                 if let err = vm.error {
                     Text(err)
-                        .font(.system(size: 12))
+                        .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                 } else if let info = vm.info {
                     statusRow(info: info)
                     Divider().padding(.vertical, 2)
                     SettingsTabsRow("Endpoint") {
                         Text(info.endpoint)
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(.system(size: 14, design: .monospaced))
                             .textSelection(.enabled)
                     }
                     Divider().padding(.vertical, 2)
                     SettingsTabsRow("Service name") {
                         Text(info.serviceName)
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(.system(size: 14, design: .monospaced))
                             .textSelection(.enabled)
                     }
                     Divider().padding(.vertical, 2)
@@ -155,12 +155,12 @@ struct TelemetryTab: View {
                                 .controlSize(.small)
                             if vm.observeEnabled != (vm.info?.enabled ?? false) {
                                 Text("Restart the app for changes to take effect")
-                                    .font(.system(size: 11))
+                                    .font(.system(size: 13))
                                     .foregroundStyle(.secondary)
                             }
                             if info.envOverride {
                                 Text("Currently overridden by environment variable")
-                                    .font(.system(size: 11))
+                                    .font(.system(size: 13))
                                     .foregroundStyle(.secondary)
                             }
                         }
@@ -175,7 +175,7 @@ struct TelemetryTab: View {
                             }
                             .controlSize(.small)
                             Text("http://localhost:6006")
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(size: 13, design: .monospaced))
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -184,7 +184,7 @@ struct TelemetryTab: View {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
                                 Text(info.phoenixInstallHint)
-                                    .font(.system(size: 12, design: .monospaced))
+                                    .font(.system(size: 14, design: .monospaced))
                                     .textSelection(.enabled)
                                     .fixedSize(horizontal: false, vertical: true)
                                 Spacer()
@@ -205,7 +205,7 @@ struct TelemetryTab: View {
                         .controlSize(.small)
                 } else {
                     Text("Loading…")
-                        .font(.system(size: 12))
+                        .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -222,10 +222,10 @@ struct TelemetryTab: View {
                     .frame(width: 8, height: 8)
                 if info.enabled {
                     Text("Tracing enabled (sending to \(info.endpoint))")
-                        .font(.system(size: 12))
+                        .font(.system(size: 14))
                 } else {
                     Text("Tracing disabled")
-                        .font(.system(size: 12))
+                        .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -336,7 +336,7 @@ struct ApiKeysTab: View {
             SettingsTabsForm {
                 HStack {
                     Text("API keys")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 15, weight: .medium))
                     Spacer()
                     Button {
                         Task { await vm.refresh() }
@@ -351,13 +351,13 @@ struct ApiKeysTab: View {
 
                 if let err = vm.error {
                     Text(err)
-                        .font(.system(size: 12))
+                        .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                 }
 
                 if !vm.presets.isEmpty {
                     Text("Built-in providers")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .padding(.top, 2)
                     ForEach(Array(vm.presets.enumerated()), id: \.element.id) { idx, entry in
@@ -369,7 +369,7 @@ struct ApiKeysTab: View {
                 if !vm.custom.isEmpty {
                     Divider().padding(.vertical, 2)
                     Text("Custom")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                     ForEach(Array(vm.custom.enumerated()), id: \.element.id) { idx, entry in
                         if idx > 0 { Divider() }
@@ -434,10 +434,10 @@ struct ApiKeysTab: View {
         HStack(alignment: .center, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.provider)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 15, weight: .medium))
                 if entry.preset, let envVar = entry.envVar {
                     Text("env: \(envVar)")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -445,10 +445,10 @@ struct ApiKeysTab: View {
             if entry.set {
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("••••\(entry.lastFour ?? "")")
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.system(size: 14, design: .monospaced))
                     if let source = entry.source {
                         Text("Source: \(source)")
-                            .font(.system(size: 11))
+                            .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -457,7 +457,7 @@ struct ApiKeysTab: View {
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(.secondary)
-                .font(.system(size: 12))
+                .font(.system(size: 14))
             } else {
                 Button("Set…") {
                     sheet = .existing(entry.provider)
@@ -490,12 +490,12 @@ private struct SecretEditorSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: 16, weight: .medium))
 
             if !providerLocked {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Provider name")
-                        .font(.system(size: 12))
+                        .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                     TextField("e.g. openai", text: $provider)
                         .textFieldStyle(.roundedBorder)
@@ -504,11 +504,11 @@ private struct SecretEditorSheet: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("API key")
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                 SecureField("Paste key", text: $value)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.system(size: 14, design: .monospaced))
             }
 
             HStack {
@@ -667,7 +667,7 @@ struct DebugTab: View {
         .overlay(alignment: .top) {
             if let toast = vm.toast {
                 Text(toast)
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(
@@ -694,7 +694,7 @@ struct DebugTab: View {
                     vm.levelFilter = f
                 } label: {
                     Text(f.rawValue)
-                        .font(.system(size: 11, weight: vm.levelFilter == f ? .medium : .regular))
+                        .font(.system(size: 13, weight: vm.levelFilter == f ? .medium : .regular))
                         .foregroundStyle(vm.levelFilter == f ? .primary : .secondary)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
@@ -756,7 +756,7 @@ struct DebugTab: View {
             Toggle("Auto-scroll", isOn: $autoScroll)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
-                .font(.system(size: 11))
+                .font(.system(size: 13))
             Spacer()
             Button("Send feedback…") {
                 showFeedback = true
@@ -793,21 +793,21 @@ private struct LogRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Text(tsText)
-                .font(.system(size: 10, design: .monospaced))
+                .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(width: 62, alignment: .leading)
             Text(entry.level.uppercased())
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
                 .foregroundStyle(levelColor)
                 .frame(width: 44, alignment: .leading)
             Text(entry.source)
-                .font(.system(size: 10, design: .monospaced))
+                .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(width: 80, alignment: .leading)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Text(entry.message)
-                .font(.system(size: 11, design: .monospaced))
+                .font(.system(size: 13, design: .monospaced))
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
@@ -827,11 +827,11 @@ private struct FeedbackSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Send feedback")
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: 16, weight: .medium))
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Title")
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                 TextField("Short summary", text: $title)
                     .textFieldStyle(.roundedBorder)
@@ -839,10 +839,10 @@ private struct FeedbackSheet: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Description")
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                 TextEditor(text: $description)
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .frame(height: 120)
                     .overlay(
                         RoundedRectangle(cornerRadius: 4)

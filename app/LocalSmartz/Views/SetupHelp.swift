@@ -59,7 +59,7 @@ struct SetupHelpPopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(help.title)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 16, weight: .semibold))
 
             section("What it is", help.what)
             section("Why it's needed", help.why)
@@ -73,10 +73,10 @@ struct SetupHelpPopover: View {
     private func section(_ label: String, _ body: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.secondary)
             Text(body)
-                .font(.system(size: 12))
+                .font(.system(size: 14))
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -103,13 +103,13 @@ struct StepRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(title)
-                        .font(.system(size: 14, weight: .medium))
+                        .font(.system(size: 16, weight: .medium))
                     if help != nil {
                         Button {
                             showHelp.toggle()
                         } label: {
                             Image(systemName: "info.circle")
-                                .font(.system(size: 12))
+                                .font(.system(size: 14))
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.borderless)
@@ -134,7 +134,7 @@ struct StepRow: View {
             if let label = changeLabel, let onChange = onChange {
                 Button(label, action: onChange)
                     .buttonStyle(.borderless)
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("\(label) \(title)")
             }

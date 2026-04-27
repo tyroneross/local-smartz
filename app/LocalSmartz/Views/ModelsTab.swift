@@ -338,7 +338,7 @@ struct ModelsTab: View {
 
             if let error = vm.error {
                 Text(error)
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .foregroundStyle(.red)
                     .padding(.horizontal, 20)
             }
@@ -351,7 +351,7 @@ struct ModelsTab: View {
             } else if vm.catalog.isEmpty {
                 Spacer()
                 Text("Start the main window to load the catalog.")
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
                 Spacer()
@@ -363,14 +363,14 @@ struct ModelsTab: View {
                         }
                     } header: {
                         Text("Ollama models")
-                            .font(.system(size: 11).smallCaps())
+                            .font(.system(size: 13).smallCaps())
                             .foregroundStyle(.secondary)
                     }
                     Section {
                         customPullRow
                     } header: {
                         Text("Add a model")
-                            .font(.system(size: 11).smallCaps())
+                            .font(.system(size: 13).smallCaps())
                             .foregroundStyle(.secondary)
                     }
                     if let info = vm.info {
@@ -378,7 +378,7 @@ struct ModelsTab: View {
                             ollamaInfoRows(info)
                         } header: {
                             Text("Ollama storage")
-                                .font(.system(size: 11).smallCaps())
+                                .font(.system(size: 13).smallCaps())
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -414,7 +414,7 @@ struct ModelsTab: View {
     private var header: some View {
         HStack {
             Text("Models and Ollama storage")
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 15, weight: .medium))
             Spacer()
             Button {
                 Task { await vm.refresh() }
@@ -437,42 +437,42 @@ struct ModelsTab: View {
         HStack(spacing: 8) {
             if ramGBOverride > 0 {
                 Text("Override: \(ramGBOverride) GB")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 Text("·")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 Button("Reset") {
                     ramGBOverride = 0
                 }
                 .buttonStyle(.borderless)
-                .font(.system(size: 11))
+                .font(.system(size: 13))
             } else if let ram = vm.detectedRAMGB {
                 Text("Detected RAM: \(ram) GB")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 Text("·")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 Button("Set manually…") {
                     overrideDraft = ramGBOverride > 0 ? String(ramGBOverride) : String(ram)
                     showOverrideSheet = true
                 }
                 .buttonStyle(.borderless)
-                .font(.system(size: 11))
+                .font(.system(size: 13))
             } else {
                 Text("RAM not detected")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 Text("·")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 Button("Set manually…") {
                     overrideDraft = ""
                     showOverrideSheet = true
                 }
                 .buttonStyle(.borderless)
-                .font(.system(size: 11))
+                .font(.system(size: 13))
             }
             Spacer()
         }
@@ -482,16 +482,16 @@ struct ModelsTab: View {
     private var overrideSheet: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Set RAM override")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: 15, weight: .semibold))
             Text("Used only for the local recommendation chips. Does not change backend behavior.")
-                .font(.system(size: 11))
+                .font(.system(size: 13))
                 .foregroundStyle(.secondary)
             HStack {
                 TextField("GB", text: $overrideDraft)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 100)
                 Text("GB")
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .foregroundStyle(.secondary)
             }
             HStack {
@@ -520,7 +520,7 @@ struct ModelsTab: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Text(model.name)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 15, weight: .medium))
                 if model.current {
                     Text("ACTIVE")
                         .font(.system(size: 9, weight: .semibold))
@@ -551,22 +551,22 @@ struct ModelsTab: View {
 
             HStack(spacing: 8) {
                 Text(sizeText(model))
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 if let cls = model.ramClass, cls != "custom" {
                     Text("·")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                     Text(cls)
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
                 if let note = model.note {
                     Text("·")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                     Text(note)
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -583,7 +583,7 @@ struct ModelsTab: View {
                                 .frame(maxWidth: 240)
                         }
                         Text(progress)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.system(size: 13, design: .monospaced))
                             .foregroundStyle(progress.hasPrefix("Error") ? .red : .secondary)
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -593,7 +593,7 @@ struct ModelsTab: View {
                         Text(
                             "+\(String(format: "%.1f", Double(vm.diskNowBytes - baseline) / 1_000_000_000)) GB on disk"
                         )
-                        .font(.system(size: 10))
+                        .font(.system(size: 12))
                         .foregroundStyle(.tertiary)
                     }
                 }
@@ -611,7 +611,7 @@ struct ModelsTab: View {
             HStack(spacing: 8) {
                 TextField("model-name:tag  (e.g. mistral:7b)", text: $customModelInput)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.system(size: 14, design: .monospaced))
                     .disableAutocorrection(true)
                     .onSubmit { submitCustomPull() }
                 Button("Install") {
@@ -621,15 +621,15 @@ struct ModelsTab: View {
             }
             HStack(spacing: 6) {
                 Text("Browse names at")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 Link("ollama.com/library", destination: URL(string: "https://ollama.com/library")!)
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
             }
             if let progress = vm.pullProgress[customTrimmed],
                vm.busyModel == customTrimmed || progress == "Downloaded ✓" {
                 Text(progress)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 13, design: .monospaced))
                     .foregroundStyle(progress.hasPrefix("Error") ? .red : .secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -650,7 +650,7 @@ struct ModelsTab: View {
 
     private func fitChip(_ fit: RAMFit) -> some View {
         Text(fit.label)
-            .font(.system(size: 10, weight: .medium))
+            .font(.system(size: 12, weight: .medium))
             .foregroundStyle(fit.color)
     }
 
@@ -666,34 +666,34 @@ struct ModelsTab: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("Path")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 Text(info.modelsPath)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 13, design: .monospaced))
                     .textSelection(.enabled)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
             HStack {
                 Text("Source")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 Text(info.source == "OLLAMA_MODELS" ? "OLLAMA_MODELS env var" : "Default (~/.ollama/models)")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
             }
             HStack {
                 Text("Total size")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 Text(formatBytes(info.totalSizeBytes))
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
             }
             HStack {
                 Text("Models on disk")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 Text("\(info.modelCount)")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
             }
         }
         .padding(.vertical, 2)

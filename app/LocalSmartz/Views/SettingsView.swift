@@ -112,7 +112,7 @@ struct SettingsView: View {
         HStack {
             if vm.hasChanges {
                 Text("Unsaved changes")
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -154,7 +154,7 @@ private struct GeneralTab: View {
                         isOn: $vm.settings.warnBeforeLargeModels
                     )
                     Text("Show a confirmation when the selected model's size exceeds detected system RAM.")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -168,7 +168,7 @@ private struct GeneralTab: View {
                     .pickerStyle(.menu)
                     .labelsHidden()
                     Text("Graph mode is more reliable on small models (qwen3:8b), enforcing a fact-check loop structurally. Orchestrator mode is simpler and slightly faster on trivial queries.")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -195,7 +195,7 @@ private struct PythonTab: View {
                         Button("Detect…") { detectPython() }
                             .controlSize(.small)
                         Text("Runs `/usr/bin/env which python3`")
-                            .font(.system(size: 11))
+                            .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -239,7 +239,7 @@ private struct PluginsTab: View {
                     List(selection: $selection) {
                         ForEach(vm.settings.pluginPaths, id: \.self) { path in
                             Text(path)
-                                .font(.system(size: 12, design: .monospaced))
+                                .font(.system(size: 14, design: .monospaced))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                                 .tag(path)
@@ -275,11 +275,11 @@ private struct PluginsTab: View {
             LabeledRow("Active skills") {
                 if vm.settings.activeSkills.isEmpty {
                     Text("None")
-                        .font(.system(size: 12))
+                        .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                 } else {
                     Text(vm.settings.activeSkills.joined(separator: ", "))
-                        .font(.system(size: 12))
+                        .font(.system(size: 14))
                         .foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -324,7 +324,7 @@ private struct AboutTab: View {
         SettingsForm {
             LabeledRow("Version") {
                 Text(version)
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
             }
             Divider().padding(.vertical, 2)
             LabeledRow("Repository") {
@@ -332,19 +332,19 @@ private struct AboutTab: View {
                     "github.com/tyroneross/local-smartz",
                     destination: URL(string: "https://github.com/tyroneross/local-smartz")!
                 )
-                .font(.system(size: 12))
+                .font(.system(size: 14))
             }
             Divider().padding(.vertical, 2)
             LabeledRow("License") {
                 Text("MIT")
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
             }
             Divider().padding(.vertical, 2)
             LabeledRow("Setup") {
                 Button("Reset setup wizard…") {
                     confirmReset = true
                 }
-                .font(.system(size: 12))
+                .font(.system(size: 14))
                 .confirmationDialog(
                     "Reset setup?",
                     isPresented: $confirmReset,
@@ -395,7 +395,7 @@ private struct LabeledRow<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.system(size: 13))
+                .font(.system(size: 15))
                 .foregroundStyle(.secondary)
             content()
         }
@@ -412,7 +412,7 @@ private struct PathPickerField: View {
         HStack(spacing: 6) {
             TextField(placeholder, text: $path)
                 .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(size: 14, design: .monospaced))
             Button("Choose…") { openPicker() }
                 .controlSize(.small)
         }

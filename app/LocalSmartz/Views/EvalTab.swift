@@ -89,7 +89,7 @@ struct EvalTab: View {
                     + "chosen provider. Use after configuring a new cloud provider "
                     + "or switching the local model to catch wiring regressions."
                 )
-                .font(.system(size: 11))
+                .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -107,7 +107,7 @@ struct EvalTab: View {
                 SettingsTabsRow("Model (optional)") {
                     TextField("default for provider", text: $vm.model)
                         .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.system(size: 14, design: .monospaced))
                 }
 
                 HStack {
@@ -121,7 +121,7 @@ struct EvalTab: View {
 
                 if let err = vm.error {
                     Text(err)
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.red)
                 }
 
@@ -130,13 +130,13 @@ struct EvalTab: View {
 
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Text("\(r.provider) · \(r.model)")
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(.system(size: 14, design: .monospaced))
                             .foregroundStyle(.secondary)
                         Text("\(r.pass) passed")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 14, weight: .medium))
                             .foregroundStyle(.green)
                         Text("\(r.fail) failed")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 14, weight: .medium))
                             .foregroundStyle(r.fail > 0 ? Color.red : Color.secondary)
                     }
 
@@ -147,20 +147,20 @@ struct EvalTab: View {
                                     .foregroundStyle(t.ok ? .green : .red)
                                     .accessibilityLabel(t.ok ? "Passed" : "Failed")
                                 Text(t.task)
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(.system(size: 14, weight: .medium))
                                 Spacer()
                                 Text("\(t.latencyMs) ms")
-                                    .font(.system(size: 11))
+                                    .font(.system(size: 13))
                                     .foregroundStyle(.tertiary)
                             }
                             if let err = t.error, !err.isEmpty {
                                 Text("Error: \(err)")
-                                    .font(.system(size: 11, design: .monospaced))
+                                    .font(.system(size: 13, design: .monospaced))
                                     .foregroundStyle(.red)
                                     .fixedSize(horizontal: false, vertical: true)
                             } else if !t.reply.isEmpty {
                                 Text(t.reply)
-                                    .font(.system(size: 11, design: .monospaced))
+                                    .font(.system(size: 13, design: .monospaced))
                                     .foregroundStyle(.secondary)
                                     .lineLimit(3)
                                     .truncationMode(.tail)
@@ -177,7 +177,7 @@ struct EvalTab: View {
     private var header: some View {
         HStack {
             Text("Eval suite")
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 15, weight: .medium))
             Spacer()
         }
     }

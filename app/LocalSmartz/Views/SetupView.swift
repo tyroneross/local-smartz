@@ -47,7 +47,7 @@ struct SetupView: View {
                 Text("Local Smartz")
                     .font(.system(size: 20, weight: .semibold))
                 Text("Local-first research powered by Ollama")
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .foregroundStyle(.secondary)
             }
             .padding(.top, 4)
@@ -142,7 +142,7 @@ struct SetupView: View {
                 completeSetup()
             } label: {
                 Text("Get Started")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: 16, weight: .medium))
                     .frame(minWidth: 140)
                     .padding(.vertical, 4)
             }
@@ -228,7 +228,7 @@ struct SetupView: View {
     private func helpBlock(_ label: String, _ body: String, mono: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.secondary)
             Text(body)
                 .font(mono ? .system(size: 12, design: .monospaced) : .system(size: 12))
@@ -261,7 +261,7 @@ struct SetupView: View {
     private var missingModelsPrompt: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Required models are not installed yet.")
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: 16, weight: .medium))
 
             if let ram = ramGB {
                 Text("Detected \(ram) GB RAM. Downloads may take several minutes.")
