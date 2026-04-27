@@ -30,7 +30,22 @@ def test_recommended_sets_match_research_doc() -> None:
     standard = [r["name"] for r in recommended_for_tier("standard")]
     assert "qwen3.5:9b" in standard and "qwen3.5:27b" in standard
     full = [r["name"] for r in recommended_for_tier("full")]
-    assert set(full) == {"qwen3.5:9b", "qwen3.5:122b", "qwen3-next:80b"}
+    assert {"qwen3.5:9b", "qwen3.5:122b", "qwen3-next:80b"} <= set(full)
+
+
+def test_recommended_set_standard_includes_gemma4() -> None:
+    names = [r["name"] for r in recommended_for_tier("standard")]
+    assert "gemma4:26b" in names
+
+
+def test_recommended_set_full_includes_gemma4() -> None:
+    names = [r["name"] for r in recommended_for_tier("full")]
+    assert "gemma4:26b" in names
+
+
+def test_recommended_set_mini_excludes_gemma4() -> None:
+    names = [r["name"] for r in recommended_for_tier("mini")]
+    assert "gemma4:26b" not in names
 
 
 def test_tier_inherits_downward() -> None:

@@ -56,3 +56,33 @@ def find_hooks_file(plugin_root: Path) -> Path | None:
 def find_mcp_file(plugin_root: Path) -> Path | None:
     candidate = plugin_root / ".mcp.json"
     return candidate if candidate.is_file() else None
+
+
+def find_agent_files(plugin_root: Path) -> list[Path]:
+    """Return all agent .md files under a plugin root.
+
+    Walks two locations:
+    - ``<plugin_root>/agents/*.md``          (root-level agents)
+    - ``<plugin_root>/skills/*/agents/*.md`` (skill-nested sub-agents)
+
+    Returns absolute paths, sorted for determinism.
+    """
+    result: list[Path] = []
+    # Root-level agents/
+    root_agents = plugin_root / "agents"
+    if root_agents.is_dir():
+        for p in root_agents.glob("*.md"):
+            if p.is_file():
+                result.append(p)
+    # Skill-nested agents/
+    skills_dir = plugin_root / "skills"
+    if skills_dir.is_dir():
+        for skill_candidate in skills_dir.iterdir():
+            if not skill_candidate.is_dir():
+                continue
+            nested = skill_candidate / "agents"
+            if nested.is_dir():
+                for p in nested.glob("*.md"):
+                    if p.is_file():
+                        result.append(p)
+    return sorted(result)

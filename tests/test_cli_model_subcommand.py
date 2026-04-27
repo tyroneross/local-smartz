@@ -27,6 +27,21 @@ def test_list_when_ollama_unreachable_returns_error(capsys, monkeypatch) -> None
     assert "not running" in err.lower()
 
 
+def test_add_already_installed_prints_role_suggestions(capsys, monkeypatch) -> None:
+    """model add of an already-installed catalog model prints suggested assign lines."""
+
+    def _fake_install(name):
+        # Simulate Ollama returning immediately (already present) — rc 0, no events.
+        return iter([{"type": "done", "duration_ms": 0, "bytes": 0}])
+
+    monkeypatch.setattr("localsmartz.models.install.install", _fake_install)
+    rc = model_cli.main(["add", "gemma4:26b"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Suggested: localsmartz model assign vision gemma4:26b" in out
+    assert "Suggested: localsmartz model assign strong gemma4:26b" in out
+
+
 def test_doctor_runs_cleanly(capsys, monkeypatch) -> None:
     monkeypatch.setattr("localsmartz.ollama.check_server", lambda: True)
     monkeypatch.setattr("localsmartz.ollama.get_version", lambda: "0.99.0")

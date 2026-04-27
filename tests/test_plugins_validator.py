@@ -225,7 +225,8 @@ def test_command_missing_allowed_tools(tmp_path):
     p = tmp_path / "cmd.md"
     p.write_text('---\ndescription: "x"\n---\nbody')
     r = validate_command_md(p)
-    assert "MISSING_ALLOWED_TOOLS" in _codes(r)
+    # G9: allowed-tools is optional — code renamed to ALLOWED_TOOLS_RECOMMENDED
+    assert "ALLOWED_TOOLS_RECOMMENDED" in _codes(r)
 
 
 def test_command_ok(tmp_path):

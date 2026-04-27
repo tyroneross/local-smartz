@@ -54,7 +54,20 @@ def _cmd_add(args: argparse.Namespace) -> int:
     rc = _install_with_progress(args.name)
     if rc == 0 and args.role:
         _assign_role(args.role, args.name)
+    if rc == 0:
+        _print_role_suggestions(args.name)
     return rc
+
+
+def _print_role_suggestions(name: str) -> None:
+    """If the model is in the catalog, print one suggested assign line per role."""
+    from localsmartz.models.catalog import CATALOG
+
+    for rec in CATALOG:
+        if rec["name"] == name:
+            for role in rec.get("roles", []):
+                print(f"Suggested: localsmartz model assign {role} {name}")
+            break
 
 
 def _cmd_remove(args: argparse.Namespace) -> int:

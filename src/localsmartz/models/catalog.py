@@ -284,13 +284,17 @@ def recommended_for_tier(tier: str) -> list[ModelRec]:
     Mini gets the minimum viable set (1 primary + optional router).
     Standard adds a 27B strong executor.
     Full adds the 122B + 80B reasoning critic.
+
+    gemma4:26b is included at standard+ as a native-reasoning vision-capable
+    strong-tool-call alternative; smaller than qwen3.5:122b (faster
+    co-residency) and complements the gpt-oss family.
     """
     if tier == "mini":
         names = ["qwen3.5:9b"]
     elif tier == "standard":
-        names = ["qwen3.5:9b", "qwen3.5:27b"]
+        names = ["qwen3.5:9b", "qwen3.5:27b", "gemma4:26b"]
     elif tier == "full":
-        names = ["qwen3.5:9b", "qwen3.5:122b", "qwen3-next:80b"]
+        names = ["qwen3.5:9b", "qwen3.5:122b", "qwen3-next:80b", "gemma4:26b"]
     else:
         names = ["qwen3.5:9b"]
 

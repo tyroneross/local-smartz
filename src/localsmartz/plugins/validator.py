@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from localsmartz.plugins.discovery import (
+    find_agent_files,
     find_command_files,
     find_hooks_file,
     find_mcp_file,
@@ -163,7 +164,8 @@ def validate_plugin_json(path: Path) -> ValidationReport:
 
     author = data.get("author")
     if author is None:
-        report.add(_err("MISSING_AUTHOR", "plugin.json missing 'author'", path))
+        # G2: author is optional per spec — downgrade to warning
+        report.add(_warn("AUTHOR_RECOMMENDED", "plugin.json missing 'author' (recommended)", path))
     elif not isinstance(author, dict) or not str(author.get("name", "")).strip():
         report.add(_err("INVALID_AUTHOR", "author.name must be non-empty string", path))
 
@@ -202,7 +204,8 @@ def validate_skill_md(path: Path) -> ValidationReport:
 
     name = data.get("name")
     if not name:
-        report.add(_err("MISSING_NAME", "SKILL.md frontmatter missing 'name'", path))
+        # G5: name is optional per spec — downgrade to warning; callers fall back to filename
+        report.add(_warn("NAME_RECOMMENDED", "SKILL.md frontmatter missing 'name' (recommended)", path))
     elif not _NAME_RE.match(name):
         report.add(
             _err("INVALID_NAME", f"skill name must match ^[a-z0-9-]+$, got {name!r}", path)
@@ -282,11 +285,12 @@ def validate_command_md(path: Path) -> ValidationReport:
 
     tools_raw = data.get("allowed-tools")
     if not tools_raw:
-        report.add(_err("MISSING_ALLOWED_TOOLS", "command missing 'allowed-tools'", path))
+        # G9: allowed-tools is optional per spec — downgrade to warning
+        report.add(_warn("ALLOWED_TOOLS_RECOMMENDED", "command missing 'allowed-tools' (recommended)", path))
     else:
         tools = [t.strip() for t in tools_raw.split(",") if t.strip()]
         if not tools:
-            report.add(_err("MISSING_ALLOWED_TOOLS", "allowed-tools is empty", path))
+            report.add(_warn("ALLOWED_TOOLS_RECOMMENDED", "allowed-tools is empty", path))
 
     return report
 
@@ -417,6 +421,109 @@ def validate_mcp_json(path: Path) -> ValidationReport:
 
 
 # ---------------------------------------------------------------------------
+# Agent files (agents/<name>.md)
+# ---------------------------------------------------------------------------
+
+_VALID_MODEL_ALIASES = {"inherit", "opus", "sonnet", "haiku"}
+_MODEL_ID_RE = re.compile(r"^claude-(opus|sonnet|haiku)-\d+(-\d+)?$")
+_VALID_EFFORT = {"low", "medium", "high"}
+
+
+def validate_agent_md(path: Path) -> ValidationReport:
+    """Validate a sub-agent definition file (agents/<name>.md).
+
+    Required frontmatter: name (kebab-case), description (non-empty).
+    Optional frontmatter: model, effort, maxTurns, disallowedTools.
+    Body must be non-empty after stripping whitespace.
+    """
+    report = ValidationReport(ok=True)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        report.add(_err("UNREADABLE_FILE", f"Cannot read agent file: {e}", path))
+        return report
+
+    data, body, err = parse_frontmatter(text)
+    if data is None:
+        if err:
+            report.add(_err("MALFORMED_YAML", f"agent frontmatter: {err}", path))
+        else:
+            report.add(_err("MISSING_FRONTMATTER", "agent file missing YAML frontmatter", path))
+        return report
+
+    # Required: name
+    name = data.get("name", "").strip()
+    if not name:
+        report.add(_err("MISSING_NAME", "agent frontmatter missing 'name'", path))
+    elif not _NAME_RE.match(name):
+        report.add(_err("INVALID_NAME", f"agent name must be kebab-case, got {name!r}", path))
+
+    # Required: description
+    description = data.get("description", "").strip()
+    if not description:
+        report.add(_err("MISSING_DESCRIPTION", "agent frontmatter missing 'description'", path))
+
+    # Optional: model — warn on type mismatch, don't error on absence
+    model = data.get("model")
+    if model is not None:
+        model = model.strip()
+        if model not in _VALID_MODEL_ALIASES and not _MODEL_ID_RE.match(model):
+            report.add(
+                _err(
+                    "INVALID_MODEL",
+                    f"agent 'model' must be an alias (inherit/opus/sonnet/haiku) "
+                    f"or full model id matching ^claude-(opus|sonnet|haiku)-N(-N)?$, got {model!r}",
+                    path,
+                )
+            )
+
+    # Optional: effort
+    effort = data.get("effort")
+    if effort is not None:
+        if effort.strip() not in _VALID_EFFORT:
+            report.add(
+                _warn(
+                    "INVALID_EFFORT",
+                    f"agent 'effort' must be one of {sorted(_VALID_EFFORT)}, got {effort!r}",
+                    path,
+                )
+            )
+
+    # Optional: maxTurns — parse_frontmatter returns string; coerce here
+    max_turns_raw = data.get("maxTurns")
+    if max_turns_raw is not None:
+        try:
+            max_turns = int(max_turns_raw)
+            if max_turns <= 0:
+                raise ValueError("not positive")
+        except (ValueError, TypeError):
+            report.add(
+                _warn(
+                    "INVALID_MAX_TURNS",
+                    f"agent 'maxTurns' must be a positive integer, got {max_turns_raw!r}",
+                    path,
+                )
+            )
+
+    # Optional: disallowedTools — must be non-empty string if present
+    disallowed = data.get("disallowedTools")
+    if disallowed is not None and not disallowed.strip():
+        report.add(
+            _warn(
+                "INVALID_DISALLOWED_TOOLS",
+                "agent 'disallowedTools' must be a non-empty string if present",
+                path,
+            )
+        )
+
+    # Body must be non-empty
+    if not body.strip():
+        report.add(_err("AGENT_BODY_EMPTY", "agent body (system prompt) must not be empty", path))
+
+    return report
+
+
+# ---------------------------------------------------------------------------
 # Whole-plugin validation
 # ---------------------------------------------------------------------------
 
@@ -447,6 +554,9 @@ def validate_plugin(plugin_root: Path) -> ValidationReport:
 
     for cmd_path in find_command_files(plugin_root):
         report.extend(validate_command_md(cmd_path))
+
+    for agent_path in find_agent_files(plugin_root):
+        report.extend(validate_agent_md(agent_path))
 
     hooks = find_hooks_file(plugin_root)
     if hooks is not None:
