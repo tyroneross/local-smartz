@@ -145,6 +145,7 @@ struct EvalTab: View {
                             HStack(spacing: 8) {
                                 Image(systemName: t.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
                                     .foregroundStyle(t.ok ? .green : .red)
+                                    .accessibilityLabel(t.ok ? "Passed" : "Failed")
                                 Text(t.task)
                                     .font(.system(size: 12, weight: .medium))
                                 Spacer()
@@ -156,8 +157,7 @@ struct EvalTab: View {
                                 Text("Error: \(err)")
                                     .font(.system(size: 11, design: .monospaced))
                                     .foregroundStyle(.red)
-                                    .lineLimit(2)
-                                    .truncationMode(.tail)
+                                    .fixedSize(horizontal: false, vertical: true)
                             } else if !t.reply.isEmpty {
                                 Text(t.reply)
                                     .font(.system(size: 11, design: .monospaced))

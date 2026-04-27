@@ -150,6 +150,7 @@ struct SetupView: View {
             .controlSize(.large)
             .disabled(!canCompleteSetup)
             .keyboardShortcut(.defaultAction)
+            .accessibilityLabel("Get Started")
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
@@ -217,6 +218,7 @@ struct SetupView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
+                .accessibilityLabel("Open file picker to choose Python interpreter")
             }
         }
         .padding(24)
@@ -443,7 +445,10 @@ struct SetupView: View {
         } catch {
             statusChecked = true
             statusText = ""
-            errorText = "Could not check model status: \(error.localizedDescription)"
+            // Phrase this as a model-status failure, not an Ollama failure.
+            // ollamaReady may already be true (Ollama IS running); the failure
+            // is the temp backend for model-readiness checks, not Ollama itself.
+            errorText = "Could not check model status (the setup helper could not start): \(error.localizedDescription)"
         }
     }
 

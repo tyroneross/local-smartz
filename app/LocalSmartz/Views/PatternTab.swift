@@ -139,6 +139,8 @@ struct PatternTab: View {
                     }
                     .controlSize(.small)
                     .disabled(vm.loading)
+                    .accessibilityLabel("Refresh patterns")
+                    .help("Refresh patterns")
                 }
 
                 if let err = vm.error {

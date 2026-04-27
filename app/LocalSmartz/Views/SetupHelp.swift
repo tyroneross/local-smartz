@@ -113,6 +113,8 @@ struct StepRow: View {
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.borderless)
+                        .accessibilityLabel("Help for \(title)")
+                        .help("About \(title)")
                         .popover(isPresented: $showHelp, arrowEdge: .top) {
                             if let help = help {
                                 SetupHelpPopover(help: help)
@@ -134,6 +136,7 @@ struct StepRow: View {
                     .buttonStyle(.borderless)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
+                    .accessibilityLabel("\(label) \(title)")
             }
         }
         .padding(.vertical, 10)

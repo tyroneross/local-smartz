@@ -815,6 +815,7 @@ struct ResearchView: View {
                 .opacity(canRun ? 1.0 : 0.3)
                 .keyboardShortcut(.return, modifiers: .command)
                 .help("Send (⌘↩)")
+                .accessibilityLabel("Send research query")
             }
         }
         .padding(.horizontal, 16)

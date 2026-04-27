@@ -423,6 +423,8 @@ struct ModelsTab: View {
             }
             .buttonStyle(.borderless)
             .disabled(vm.loading)
+            .accessibilityLabel("Refresh model list")
+            .help("Refresh model list")
         }
         .padding(.horizontal, 20)
         .padding(.top, 8)
