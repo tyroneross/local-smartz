@@ -84,6 +84,12 @@ struct ResearchView: View {
     @State private var patternConflictQuery: String?
     @State private var patternConflictMessage: String = ""
 
+    /// Composer height controlled by drag handle; persisted across launches.
+    @State private var composerHeight: CGFloat = {
+        let saved = UserDefaults.standard.double(forKey: "composerHeight")
+        return saved > 0 ? CGFloat(saved) : 80
+    }()
+
     private let sseClient = SSEClient()
 
     var body: some View {
@@ -176,8 +182,32 @@ struct ResearchView: View {
 
                 Divider()
 
-                // Input bar
-                inputBar
+                // Input bar — drag handle on top allows user to resize
+                VStack(spacing: 0) {
+                    // Drag handle: invisible fat hit area + thin visible line
+                    Rectangle()
+                        .fill(Color.secondary.opacity(0.001))
+                        .frame(height: 6)
+                        .overlay(
+                            Rectangle()
+                                .fill(Color.secondary.opacity(0.3))
+                                .frame(height: 1),
+                            alignment: .center
+                        )
+                        .gesture(
+                            DragGesture()
+                                .onChanged { gesture in
+                                    let newHeight = composerHeight - gesture.translation.height
+                                    composerHeight = max(48, min(400, newHeight))
+                                    UserDefaults.standard.set(Double(composerHeight), forKey: "composerHeight")
+                                }
+                        )
+                        .onHover { hovering in
+                            if hovering { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+                        }
+                    inputBar
+                }
+                .frame(height: composerHeight)
             }
             // Loading overlay — blocks input until the planning model is
             // resident in Ollama VRAM. Without this, the first query on
@@ -785,12 +815,32 @@ struct ResearchView: View {
     // MARK: - Input bar
 
     private var inputBar: some View {
-        HStack(spacing: 8) {
-            TextField(inputPlaceholder, text: $prompt)
-                .textFieldStyle(.plain)
-                .font(.body)
-                .onSubmit { if canRun { runResearch() } }
-                .disabled(false)  // typeable while streaming so user can queue thoughts
+        HStack(alignment: .bottom, spacing: 8) {
+            // Multiline field — grows up to 10 lines naturally, scrollable
+            // inside the resized composer container when composerHeight > 120.
+            Group {
+                if composerHeight > 120 {
+                    ScrollView(.vertical, showsIndicators: false) {
+                        TextField(inputPlaceholder, text: $prompt, axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .font(.body)
+                            .lineLimit(1...10)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .onSubmit { if canRun { runResearch() } }
+                            .disabled(false)  // typeable while streaming so user can queue thoughts
+                    }
+                } else {
+                    TextField(inputPlaceholder, text: $prompt, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .font(.body)
+                        .lineLimit(1...10)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .onSubmit { if canRun { runResearch() } }
+                        .disabled(false)  // typeable while streaming so user can queue thoughts
+                }
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 8)
 
             if isStreaming {
                 Button(action: cancelResearch) {
@@ -805,6 +855,7 @@ struct ResearchView: View {
                 .buttonStyle(.borderless)
                 .keyboardShortcut(".", modifiers: .command)
                 .help("Stop the current research (⌘.)")
+                .padding(.bottom, 8)
             } else {
                 Button(action: runResearch) {
                     Image(systemName: "arrow.up.circle.fill")
@@ -818,10 +869,18 @@ struct ResearchView: View {
                 .keyboardShortcut(.return, modifiers: .command)
                 .help("Send (⌘↩)")
                 .accessibilityLabel("Send research query")
+                .padding(.bottom, 8)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(.regularMaterial)
+                .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 1)
+        )
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
     }
 
     private var inputPlaceholder: String {

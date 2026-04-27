@@ -183,6 +183,10 @@ PROFILES = {
         # Execution still uses a strong 32B coder model for heavy lifting.
         # Users can override via the toolbar picker or `localsmartz --model`.
         "planning_model": "qwen3:8b-q4_K_M",
+        # fast_model: used by fast_path_stream so trivial queries never touch
+        # the heavy 32B execution model. Explicit here so get_model("fast")
+        # can return it without scanning the agents dict.
+        "fast_model": "qwen3:8b-q4_K_M",
         "execution_model": "qwen2.5-coder:32b-instruct-q5_K_M",
         "agents": {
             "planner": {
@@ -222,6 +226,8 @@ PROFILES = {
     },
     "lite": {
         "planning_model": "qwen3:8b-q4_K_M",
+        # lite profile: fast and planning are the same model (8b only).
+        "fast_model": "qwen3:8b-q4_K_M",
         "execution_model": "qwen3:8b-q4_K_M",
         "agents": {
             "planner": {
@@ -545,19 +551,29 @@ def is_fast_path(prompt: str) -> bool:
     return True
 
 
-def get_model(profile: dict, role: str) -> str:
+def get_model(profile: dict, role: str) -> str | None:
     """Get model string for a specific role.
 
     Args:
         profile: Profile configuration dict
-        role: Either "planning" or "execution"
+        role: "planning", "execution", or "fast".
+              "fast" returns ``fast_model`` when present; falls back to
+              ``planning_model`` so legacy profiles without the key still work.
+              Returns None only when the profile is missing the key entirely
+              and no fallback exists (currently not possible for built-in
+              profiles).
 
     Returns:
-        Model string for the requested role
+        Model string for the requested role, or None if the role key is absent
+        and there is no sensible fallback (callers should handle None).
     """
     if role == "planning":
         return profile["planning_model"]
     elif role == "execution":
         return profile["execution_model"]
+    elif role == "fast":
+        # Prefer explicit fast_model; fall back to planning_model so callers
+        # don't break on profiles that predate this key.
+        return profile.get("fast_model") or profile.get("planning_model")
     else:
-        raise ValueError(f"Unknown role: {role}. Expected 'planning' or 'execution'")
+        raise ValueError(f"Unknown role: {role}. Expected 'planning', 'execution', or 'fast'")

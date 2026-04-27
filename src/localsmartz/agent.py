@@ -381,8 +381,12 @@ def fast_path_stream(
     """
     import time as _time
 
-    # Pick model: explicit override wins, else profile planning model.
-    model_name = model_override or get_model(profile, "planning")
+    # Pick model: explicit override wins, then 'fast' role, then planning fallback.
+    if model_override:
+        model_name = model_override
+    else:
+        fast_role = get_model(profile, "fast")
+        model_name = fast_role if fast_role else get_model(profile, "planning")
 
     start = _time.time()
     # Subtle marker so the user knows a fast-path was selected.
@@ -396,6 +400,9 @@ def fast_path_stream(
         model=model_name,
         temperature=0,
         num_ctx=2048,  # Tight: fast-path prompts are always short.
+        # keep_alive: hold the fast model in VRAM 30 min after each call so
+        # warm repeat queries get near-zero load latency.
+        keep_alive="30m",
         # Match the main-agent timeout discipline — never let the UI hang
         # waiting on an unresponsive local model.
         client_kwargs={
