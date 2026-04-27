@@ -9,6 +9,9 @@ build/
 .bookmark/
 *.xcodeproj/
 .dmg-staging/
+*.dmg
+*.dmg.tmp
+*.app
 .env
 
 # >>> NavGator safety guard (auto-managed)

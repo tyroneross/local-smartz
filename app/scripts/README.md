@@ -4,13 +4,13 @@ Helper scripts for packaging Local Smartz as a self-contained macOS .app.
 
 ## embed-python.sh
 
-Downloads a self-contained Python 3.12 distribution from
+Downloads a self-contained Python 3.14.4 distribution from
 [python-build-standalone](https://github.com/astral-sh/python-build-standalone)
 and extracts it into `app/build/embedded-python/`. The tarball is cached under
 `app/build/cache/` so repeat runs are fast.
 
 Detects host arch (arm64 / x86_64), pins the PBS release tag inside the script,
-and verifies SHA256 when real hashes are configured (see TODO in the script).
+and verifies SHA256 for the pinned tarball.
 
 Invoke directly:
 

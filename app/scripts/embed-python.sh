@@ -1,6 +1,6 @@
 #!/bin/bash
 # embed-python.sh
-# Download and extract a self-contained Python 3.12 (python-build-standalone)
+# Download and extract a self-contained Python (python-build-standalone)
 # into app/build/embedded-python/ so it can be copied into the .app bundle.
 #
 # No external deps beyond: bash, curl, shasum, tar, uname.
@@ -8,16 +8,19 @@ set -euo pipefail
 
 # ---- Config ---------------------------------------------------------------
 
-# TAG:ASSUMED - python-build-standalone release tag. Pinned to a recent stable
-# release. Bump this (and the SHA256s below) when updating.
+# python-build-standalone release tag. Pinned to the latest stable Python
+# verified on 2026-04-27:
+#   Python.org latest stable: 3.14.4, released 2026-04-07.
+#   PBS latest release: 20260414.
 # Verify latest at: https://github.com/astral-sh/python-build-standalone/releases
-PBS_TAG="20240814"
-PY_VERSION="3.12.5"
+PBS_TAG="20260414"
+PY_VERSION="3.14.4"
 
 # SHA256 hashes for the install_only tarballs for PBS_TAG.
-# Source: https://github.com/astral-sh/python-build-standalone/releases/download/20240814/cpython-3.12.5+20240814-{arch}-apple-darwin-install_only.tar.gz.sha256
-PBS_SHA256_ARM64="6943873ffcede238280a8fc0dbd4916c9bff54cf6a759352f86077c556c0c3a5"
-PBS_SHA256_X86_64="4c7619c25c037d377eebe8c7b98e6c818276b55714536ea82be2325d5e8ad572"
+# Source: GitHub release asset digest for
+# cpython-3.14.4+20260414-{arch}-apple-darwin-install_only.tar.gz
+PBS_SHA256_ARM64="8b7865e511b17093e090449bf71eb52933c17d45ad5257ddeacaffbb2c7239df"
+PBS_SHA256_X86_64="9ecb2b942e6698c04af10a63a3d73c0b2e8d8e11ce44933fbffe8651bef4577d"
 
 # ---- Paths ----------------------------------------------------------------
 
@@ -62,9 +65,18 @@ echo "  Embed target : ${EMBED_DIR}"
 
 EMBED_PY_BIN="${EMBED_DIR}/bin/python3"
 if [ -x "${EMBED_PY_BIN}" ]; then
-    echo "  -> Already extracted at ${EMBED_DIR} (reusing)"
-    echo "${EMBED_DIR}"
-    exit 0
+    EXISTING_VERSION="$("${EMBED_PY_BIN}" - <<'PY'
+import sys
+print(".".join(map(str, sys.version_info[:3])))
+PY
+)"
+    if [ "${EXISTING_VERSION}" = "${PY_VERSION}" ]; then
+        echo "  -> Already extracted at ${EMBED_DIR} (reusing)"
+        echo "${EMBED_DIR}"
+        exit 0
+    fi
+    echo "  -> Existing embedded Python is ${EXISTING_VERSION}; replacing with ${PY_VERSION}"
+    rm -rf "${EMBED_DIR}"
 fi
 
 # ---- Download (cached) ----------------------------------------------------

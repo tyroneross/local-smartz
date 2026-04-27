@@ -59,7 +59,7 @@ struct SetupView: View {
                     detail: pythonPath.isEmpty ? "Detecting..." : pythonPath,
                     done: !pythonPath.isEmpty,
                     help: SetupHelp.python,
-                    changeLabel: pythonPath.isEmpty ? nil : "Change…",
+                    changeLabel: pythonPath.isEmpty ? "Choose…" : "Change…",
                     onChange: { showPythonChangeConfirm = true }
                 )
                 Divider()
@@ -193,7 +193,7 @@ struct SetupView: View {
 
                 helpBlock(
                     "What you need in the replacement Python",
-                    "• Python 3.12 or later.\n• `localsmartz` package importable: verify with `python3 -c \"import localsmartz\"`.\n• If missing, run `pip install -e <path-to-local-smartz-repo>` in that Python first."
+                    "• Python 3.12 or later. The packaged app bundles Python 3.14.4.\n• `localsmartz` package importable: verify with `python3 -c \"import localsmartz\"`.\n• If missing, run `pip install -e <path-to-local-smartz-repo>` in that Python first."
                 )
 
                 helpBlock(
@@ -346,25 +346,28 @@ struct SetupView: View {
         for path in candidates {
             guard FileManager.default.fileExists(atPath: path),
                   await verifyPython(path) else { continue }
+            statusText = "Checking Local Smartz in \(shortPath(path))..."
             // Prefer a Python where `import localsmartz` actually works.
             if await pythonImportsLocalsmartz(path) {
                 pythonPath = path
                 break
             }
-            // Fall back to "first valid Python" if nothing we find has the module.
-            if pythonPath.isEmpty { pythonPath = path }
         }
 
         if pythonPath.isEmpty {
             let result = await runCommand("/usr/bin/env", arguments: ["which", "python3"])
             let path = result.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !path.isEmpty && FileManager.default.fileExists(atPath: path) {
+            if !path.isEmpty,
+               FileManager.default.fileExists(atPath: path),
+               await verifyPython(path),
+               await pythonImportsLocalsmartz(path) {
                 pythonPath = path
             }
         }
 
         if pythonPath.isEmpty {
-            statusText = "Python 3 not found. Use 'Choose Python...' to locate it."
+            statusText = ""
+            errorText = "No usable Python was found. The packaged app should include bundled Python 3.14.4; otherwise choose a Python 3.12+ interpreter with `localsmartz` installed."
             return
         }
 
@@ -372,9 +375,12 @@ struct SetupView: View {
     }
 
     private func pythonImportsLocalsmartz(_ python: String) async -> Bool {
-        let output = await runCommand(python, arguments: ["-c", "import localsmartz"])
-        // A clean import produces no stdout/stderr; errors surface as text.
-        return output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let result = await runCommandResult(
+            python,
+            arguments: ["-c", "import localsmartz"],
+            timeoutSeconds: 10
+        )
+        return result.exitCode == 0 && !result.timedOut
     }
 
     private func validateEnvironment() async {
@@ -388,13 +394,18 @@ struct SetupView: View {
     }
 
     private func checkLocalSmartz() async {
-        let versionOutput = await runCommand(
+        let result = await runCommandResult(
             pythonPath,
-            arguments: ["-m", "localsmartz", "--version"]
+            arguments: ["-m", "localsmartz", "--version"],
+            timeoutSeconds: 10
         )
-        localsmartzReady = versionOutput.contains("localsmartz")
+        localsmartzReady = result.exitCode == 0 && result.output.contains("localsmartz")
         if !localsmartzReady {
-            errorText = "Local Smartz is not installed in this Python environment. Install it there, then try again."
+            if result.timedOut {
+                errorText = "Local Smartz check timed out in the selected Python. Choose the bundled Python or another Python 3.12+ environment with `localsmartz` installed."
+            } else {
+                errorText = "Local Smartz is not installed in this Python environment. Choose the bundled Python or install it there, then try again."
+            }
             statusText = ""
             return
         }
@@ -595,11 +606,28 @@ struct SetupView: View {
     // MARK: - Shell
 
     private func verifyPython(_ path: String) async -> Bool {
-        let result = await runCommand(path, arguments: ["--version"])
-        return result.contains("Python 3")
+        statusText = "Checking Python at \(shortPath(path))..."
+        let result = await runCommandResult(path, arguments: ["--version"], timeoutSeconds: 5)
+        guard result.exitCode == 0, !result.timedOut else { return false }
+        return isSupportedPythonVersion(result.output)
     }
 
     private func runCommand(_ command: String, arguments: [String]) async -> String {
+        let result = await runCommandResult(command, arguments: arguments)
+        return result.output
+    }
+
+    private struct CommandResult {
+        let output: String
+        let exitCode: Int32?
+        let timedOut: Bool
+    }
+
+    private func runCommandResult(
+        _ command: String,
+        arguments: [String],
+        timeoutSeconds: TimeInterval = 8
+    ) async -> CommandResult {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
@@ -610,14 +638,54 @@ struct SetupView: View {
                 process.standardError = pipe
                 do {
                     try process.run()
-                    process.waitUntilExit()
+                    let group = DispatchGroup()
+                    group.enter()
+                    DispatchQueue.global(qos: .utility).async {
+                        process.waitUntilExit()
+                        group.leave()
+                    }
+                    let timedOut = group.wait(timeout: .now() + timeoutSeconds) == .timedOut
+                    if timedOut {
+                        process.terminate()
+                        _ = group.wait(timeout: .now() + 1)
+                    }
                     let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    continuation.resume(returning: String(data: data, encoding: .utf8) ?? "")
+                    continuation.resume(
+                        returning: CommandResult(
+                            output: String(data: data, encoding: .utf8) ?? "",
+                            exitCode: timedOut ? nil : process.terminationStatus,
+                            timedOut: timedOut
+                        )
+                    )
                 } catch {
-                    continuation.resume(returning: "")
+                    continuation.resume(
+                        returning: CommandResult(output: "", exitCode: nil, timedOut: false)
+                    )
                 }
             }
         }
+    }
+
+    private func isSupportedPythonVersion(_ output: String) -> Bool {
+        let pieces = output
+            .split(whereSeparator: { !$0.isNumber && $0 != "." })
+            .map(String.init)
+        guard let version = pieces.first(where: { $0.first?.isNumber == true }) else {
+            return false
+        }
+        let parts = version.split(separator: ".").compactMap { Int($0) }
+        guard parts.count >= 2 else { return false }
+        let major = parts[0]
+        let minor = parts[1]
+        return major > 3 || (major == 3 && minor >= 12)
+    }
+
+    private func shortPath(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home) {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
     }
 
     private func defaultWorkspaceDirectory() -> String {
@@ -664,6 +732,7 @@ private final class TempBackend {
         // Force unbuffered output so the log file fills in real time.
         var env = ProcessInfo.processInfo.environment
         env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         proc.environment = env
 
         // Route stdout+stderr to the shared backend log file (same path as

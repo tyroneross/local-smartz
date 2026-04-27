@@ -141,6 +141,9 @@ class BackendManager: ObservableObject {
         // Force line-buffered output so every crash message reaches the log
         // file immediately — critical for post-mortem on silent child exits.
         env["PYTHONUNBUFFERED"] = "1"
+        // The packaged app runs Python from inside a signed .app bundle.
+        // Avoid writing __pycache__ files into sealed Resources at launch.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
 
         process.environment = env
 

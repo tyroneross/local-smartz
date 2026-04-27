@@ -53,6 +53,8 @@ localsmartz = "localsmartz.__main__:main"
 local-smartz = "localsmartz.__main__:main"
 localsmartz-benchmark = "localsmartz.benchmarking:main"
 localsmartz-model-eval = "localsmartz.model_eval:main"
+localsmartz-agent-role-doe = "localsmartz.agent_role_doe:main"
+localsmartz-server-timing = "localsmartz.server_timing:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/localsmartz"]

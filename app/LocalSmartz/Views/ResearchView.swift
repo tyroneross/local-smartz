@@ -16,6 +16,7 @@ struct ResearchView: View {
     @State private var errorMessage: String?
     @State private var availableModels: [String] = []
     @State private var currentModel: String = ""
+    @State private var profilePlanningModel: String = ""
     @State private var isSwitchingModel = false
     @State private var researchTask: Task<Void, Never>?
     @State private var agents: [AgentInfo] = []
@@ -89,6 +90,9 @@ struct ResearchView: View {
     @State private var queuedPrompts: [String] = []
     /// Controls the queue popover triggered from the count badge.
     @State private var showQueuePopover = false
+    /// Controls the toolbar model picker popover. A popover keeps the visible
+    /// label in SwiftUI so the toolbar cannot drift from currentModel.
+    @State private var showModelPickerPopover = false
 
     /// Composer height controlled by drag handle; persisted across launches.
     @State private var composerHeight: CGFloat = {
@@ -583,9 +587,11 @@ struct ResearchView: View {
     private func fetchRam() async {
         struct StatusResp: Decodable {
             let ramGB: Int?
+            let planningModel: String?
             let effectiveModel: String?
             enum CodingKeys: String, CodingKey {
                 case ramGB = "ram_gb"
+                case planningModel = "planning_model"
                 case effectiveModel = "effective_model"
             }
         }
@@ -597,10 +603,12 @@ struct ResearchView: View {
             if let gb = decoded.ramGB, gb > 0 {
                 detectedRamGB = gb
             }
-            // Populate currentModel from effective_model on launch so the toolbar
-            // shows the real model name before the first query fires an SSE .status event.
-            if currentModel.isEmpty, !isSwitchingModel,
-               let em = decoded.effectiveModel, !em.isEmpty {
+            if let planning = decoded.planningModel, !planning.isEmpty {
+                profilePlanningModel = planning
+            }
+            // Keep the toolbar tied to the backend's effective model, even
+            // if an earlier /api/models poll briefly rendered the profile.
+            if !isSwitchingModel, let em = decoded.effectiveModel, !em.isEmpty {
                 currentModel = em
             }
         } catch {
@@ -703,83 +711,108 @@ struct ResearchView: View {
     }
 
     private var modelPicker: some View {
-        Menu {
-            if availableModels.isEmpty {
-                Text("No models loaded")
-            } else {
-                Section("Active model") {
-                    ForEach(availableModels, id: \.self) { name in
-                        Button {
-                            Task { await switchModel(to: name) }
-                        } label: {
-                            HStack {
-                                Image(systemName: name == currentModel ? "checkmark.circle.fill" : "circle")
-                                Text(name)
-                            }
-                        }
-                        .disabled(isStreaming || isSwitchingModel)
-                    }
-                }
-            }
-            if !installableCatalog.isEmpty {
-                Section("Available to install") {
-                    ForEach(installableCatalog) { model in
-                        // Native macOS Menu items render plain text from
-                        // Button labels (Image/HStack work but are clipped).
-                        // Encode the fit chip and size into the label string
-                        // itself so every row is one tappable unit.
-                        Button {
-                            Task { await installFromMenu(model) }
-                        } label: {
-                            Text(menuRowLabel(for: model))
-                        }
-                        .disabled(pullingModels.contains(model.name)
-                                  || isStreaming
-                                  || isSwitchingModel)
-                    }
-                }
-            }
-            Divider()
-            Button {
-                showInstallSheet = true
-            } label: {
-                Label("Install by name…", systemImage: "plus.circle")
-            }
-            Button("Refresh list") {
-                Task {
-                    await fetchModels()
-                    await fetchCatalog()
-                }
-            }
+        Button {
+            showModelPickerPopover.toggle()
         } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "cpu")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Text("Model:")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                Text(modelPickerLabel)
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
-            )
-            .foregroundStyle(.primary)
-            .contentShape(Rectangle())
+            modelPickerChrome
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
+        .id("model-picker-\(modelPickerLabel)")
         .fixedSize()
         .disabled(isStreaming || isSwitchingModel)
+        .popover(isPresented: $showModelPickerPopover, arrowEdge: .bottom) {
+            modelPickerPopover
+        }
         .help(currentModel.isEmpty ? "Pick a model" : "Current: \(currentModel) — click to switch")
+        .accessibilityLabel("Model: \(modelPickerLabel)")
+    }
+
+    private var modelPickerPopover: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if availableModels.isEmpty {
+                Text("No models loaded")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Active model")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                ForEach(availableModels, id: \.self) { name in
+                    modelRow(name: name, selected: name == currentModel) {
+                        showModelPickerPopover = false
+                        Task { await switchModel(to: name) }
+                    }
+                    .disabled(isStreaming || isSwitchingModel)
+                }
+            }
+
+            if !installableCatalog.isEmpty {
+                Divider()
+                Text("Available to install")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                ForEach(installableCatalog) { model in
+                    modelRow(
+                        name: menuRowLabel(for: model),
+                        selected: false,
+                        icon: pullingModels.contains(model.name) ? "clock" : "arrow.down.circle"
+                    ) {
+                        showModelPickerPopover = false
+                        Task { await installFromMenu(model) }
+                    }
+                    .disabled(pullingModels.contains(model.name)
+                              || isStreaming
+                              || isSwitchingModel)
+                }
+            }
+
+            Divider()
+            HStack {
+                Button {
+                    showModelPickerPopover = false
+                    showInstallSheet = true
+                } label: {
+                    Label("Install by name...", systemImage: "plus.circle")
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button("Refresh") {
+                    Task {
+                        await fetchModels()
+                        await fetchCatalog()
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            .font(.system(size: 13))
+        }
+        .padding(12)
+        .frame(minWidth: 300, maxWidth: 380)
+    }
+
+    private func modelRow(
+        name: String,
+        selected: Bool,
+        icon: String? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon ?? (selected ? "checkmark.circle.fill" : "circle"))
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                Text(name)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(name)
     }
 
     private var modelPickerLabel: String {
@@ -792,12 +825,69 @@ struct ResearchView: View {
         // toolbar reflects the active model without waiting for fetchModels()
         // OR an SSE .status event from a query.
         if !currentModel.isEmpty { return currentModel }
+        if !appState.warmupModelName.isEmpty { return appState.warmupModelName }
+        if !profilePlanningModel.isEmpty { return profilePlanningModel }
+        if let defaultModel = defaultPlanningModel(for: appState.profile) {
+            return defaultModel
+        }
         if availableModels.isEmpty {
-            // Both empty — avoid indefinite "Loading…" by falling back to
-            // the profile chip so the toolbar always shows something useful.
-            return appState.profile.uppercased()
+            return "Loading models…"
         }
         return "Pick a model"
+    }
+
+    private var modelPickerChrome: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "cpu")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text("Model:")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+            Text(compactModelLabel(modelPickerLabel))
+                .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(modelPickerLabel)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(width: modelPickerWidth, height: 30, alignment: .leading)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
+        )
+        .foregroundStyle(.primary)
+    }
+
+    private var modelPickerWidth: CGFloat {
+        let visibleCount = min(max(compactModelLabel(modelPickerLabel).count, 12), 28)
+        return CGFloat(92 + visibleCount * 7)
+    }
+
+    private func compactModelLabel(_ name: String) -> String {
+        if name.count <= 26 { return name }
+        if let colon = name.firstIndex(of: ":") {
+            let base = String(name[..<colon])
+            let tag = String(name[colon...])
+            let shortBase = base.count > 18 ? String(base.prefix(18)) + "..." : base
+            return shortBase + tag
+        }
+        return String(name.prefix(23)) + "..."
+    }
+
+    private func defaultPlanningModel(for profile: String) -> String? {
+        switch profile.lowercased() {
+        case "full":
+            return "gpt-oss:20b"
+        case "lite":
+            return "qwen3:8b-q4_K_M"
+        default:
+            return nil
+        }
     }
 
     /// The model that will fire for the next query. Prefers a focused agent's
@@ -1400,10 +1490,10 @@ struct ResearchView: View {
             // toolbar never shows a blank label.
             if !decoded.current.isEmpty, availableModels.contains(decoded.current) {
                 currentModel = decoded.current
-            } else if let fallback = pickFallback(from: decoded.models) {
+            } else if currentModel.isEmpty, let fallback = pickFallback(from: decoded.models) {
                 currentModel = ""
                 await switchModel(to: fallback)
-            } else {
+            } else if currentModel.isEmpty {
                 currentModel = ""
             }
             // Kick off warmup for whatever ended up as the active model,
@@ -1489,13 +1579,15 @@ struct ResearchView: View {
 
             let status = try JSONDecoder().decode(BackendStatusResponse.self, from: data)
             appState.profile = status.profile
+            if let planning = status.planningModel, !planning.isEmpty {
+                profilePlanningModel = planning
+            }
 
             // Populate currentModel from /api/status's effective_model whenever the
             // poll runs — covers the cold-start race where fetchModels hasn't yet
             // populated availableModels, so the toolbar can render the model name
             // immediately without waiting for the first SSE .status event.
-            if currentModel.isEmpty, !isSwitchingModel,
-               let em = status.effectiveModel, !em.isEmpty {
+            if !isSwitchingModel, let em = status.effectiveModel, !em.isEmpty {
                 currentModel = em
             }
 
@@ -1653,6 +1745,7 @@ struct ResearchView: View {
 
 private struct BackendStatusResponse: Decodable {
     let profile: String
+    let planningModel: String?
     let ready: Bool
     let missingModels: [String]
     let ollama: OllamaState
@@ -1664,6 +1757,7 @@ private struct BackendStatusResponse: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case profile
+        case planningModel = "planning_model"
         case ready
         case missingModels = "missing_models"
         case ollama

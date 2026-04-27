@@ -82,7 +82,15 @@ echo "  -> Installing localsmartz from ${REPO_ROOT} into bundled Python"
 # Local Smartz is Ollama-only; langchain-anthropic + langchain-google-genai
 # ride in as deepagents transitive deps but are never used at runtime.
 # See references/bundle-size.md for rationale and measurements.
-SP_DIR="${APP_PY_DIR}/lib/python3.12/site-packages"
+SP_DIR="$("${APP_PY_DIR}/bin/python3" - <<'PY'
+import sysconfig
+print(sysconfig.get_paths()["purelib"])
+PY
+)"
+if [ ! -d "${SP_DIR}" ]; then
+    echo "Error: bundled site-packages not found at ${SP_DIR}"
+    exit 1
+fi
 
 echo "  -> Pre-slim site-packages size"
 du -sh "${SP_DIR}" || true
@@ -172,7 +180,7 @@ fi
 #    Run BEFORE stripping __pycache__ so the subsequent strip also removes
 #    any bytecode this test regenerates.
 echo "  -> Smoke-testing bundled Python import"
-if ! "${APP_PY_DIR}/bin/python3" -c "from deepagents import create_deep_agent; print('deepagents import ok')"; then
+if ! PYTHONDONTWRITEBYTECODE=1 "${APP_PY_DIR}/bin/python3" -c "from deepagents import create_deep_agent; print('deepagents import ok')"; then
     echo "  ERROR: deepagents import failed after slim. Aborting DMG build."
     exit 1
 fi

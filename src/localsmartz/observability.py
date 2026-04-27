@@ -43,7 +43,10 @@ _PII_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED_SSN]"),
     (re.compile(r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b"), "[REDACTED_PHONE]"),
     (re.compile(r"\b(?:\d[ -]*?){13,19}\b"), "[REDACTED_NUMBER]"),
+    (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b", re.IGNORECASE), "Bearer [REDACTED_TOKEN]"),
     (re.compile(r"\b(?:sk|pk|rk|xox[baprs]|ghp|github_pat)_[A-Za-z0-9_\-]{12,}\b"), "[REDACTED_TOKEN]"),
+    (re.compile(r"(?<!\w)/(?:Users|home)/[^\s'\"<>),;\]]+"), "/[REDACTED_PATH]"),
+    (re.compile(r"\b[A-Za-z]:\\Users\\[^\s'\"<>),;\]]+"), "[REDACTED_PATH]"),
 )
 _PAYLOAD_KEY_PARTS = (
     "prompt",

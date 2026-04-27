@@ -298,13 +298,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print only the numeric optimization score.",
     )
+    parser.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+        help="Exit non-zero if the score falls below this value.",
+    )
     args = parser.parse_args(argv)
 
     payload = run_query_doe(repetitions=max(1, args.repetitions))
+    score = float(payload["score"])
     if args.score_only:
         print(payload["score"])
     else:
         print(json.dumps(payload, indent=2))
+    if args.min_score is not None and score < args.min_score:
+        return 1
     return 0
 
 

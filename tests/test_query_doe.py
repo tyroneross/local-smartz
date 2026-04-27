@@ -25,3 +25,10 @@ def test_query_doe_score_only_cli(capsys):
 
     assert rc == 0
     float(capsys.readouterr().out.strip())
+
+
+def test_query_doe_min_score_cli_passes(capsys):
+    rc = main(["--repetitions", "1", "--score-only", "--min-score", "2500"])
+
+    assert rc == 0
+    float(capsys.readouterr().out.strip())

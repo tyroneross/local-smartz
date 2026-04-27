@@ -43,6 +43,13 @@ jobs:
             --ignore=tests/test_serve.py \
             --junitxml=pytest-results.xml
 
+      - name: Check routing DOE guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m localsmartz.query_doe --repetitions 50 --score-only --min-score 2950
+          python -m localsmartz.agent_role_doe --repetitions 50 --score-only --min-score 2950
+
       - name: Upload pytest results
         if: always()
         uses: actions/upload-artifact@v4

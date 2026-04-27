@@ -15,7 +15,7 @@ struct SetupHelp {
         title: "Python",
         what: "Python is the runtime that runs the Local Smartz backend — the research agent, HTTP server, Ollama client, and plugin loader are all Python.",
         why: "The Swift app is a thin shell. It spawns a Python subprocess and talks to it over http://localhost:11435.",
-        whatChanges: "The app ships its own Python inside the .app bundle — you do NOT need to install Python separately. It uses the bundled one by default. If you pick a different Python, it must have the `localsmartz` package importable from it (check with `python3 -c \"import localsmartz\"`).",
+        whatChanges: "The app ships Python 3.14.4 inside the .app bundle — you do NOT need to install Python separately. It uses the bundled one by default. If you pick a different Python, it must be Python 3.12+ and have the `localsmartz` package importable from it (check with `python3 -c \"import localsmartz\"`).",
         howToChange: "Click Change… to pick a different python3 binary. Useful if you have custom libraries installed in a particular Python environment. Most users should leave this alone."
     )
 
