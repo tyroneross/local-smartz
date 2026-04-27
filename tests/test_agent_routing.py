@@ -72,7 +72,12 @@ def test_list_agents_full_analyzer_uses_32b(fake_home):
     profile = get_profile("full")
     by_name = {a["name"]: a for a in list_agents(profile)}
     assert "32b" in by_name["analyzer"]["model"]
-    assert "8b" in by_name["planner"]["model"]
+    assert by_name["planner"]["model"] == "gpt-oss:20b"
+    assert by_name["researcher"]["model"] == "gpt-oss:20b"
+    assert by_name["writer"]["model"] == "gpt-oss:20b"
+    assert by_name["fact_checker"]["model"] == "gpt-oss:20b"
+    assert by_name["planner"]["default_model"] == "gpt-oss:20b"
+    assert by_name["planner"]["model_override"] == ""
 
 
 # ── global_config override takes precedence ──────────────────────────────
@@ -82,6 +87,7 @@ def test_list_agents_honors_override(fake_home):
     profile = get_profile("full")
     by_name = {a["name"]: a for a in list_agents(profile)}
     assert by_name["analyzer"]["model"] == "gemma2:9b"
+    assert by_name["analyzer"]["model_override"] == "gemma2:9b"
     # Other agents untouched
     assert by_name["planner"]["model"] == PROFILES["full"]["agents"]["planner"]["model"]
 

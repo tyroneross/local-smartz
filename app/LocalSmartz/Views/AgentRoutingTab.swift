@@ -7,13 +7,40 @@ struct AgentEntry: Decodable, Identifiable {
     let title: String
     let summary: String
     let model: String?
+    let defaultModel: String?
+    let modelOverride: String?
 
     var id: String { name }
+    var effectiveModel: String { model ?? defaultModel ?? "" }
+    var hasOverride: Bool { !(modelOverride ?? "").isEmpty }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case title
+        case summary
+        case model
+        case defaultModel = "default_model"
+        case modelOverride = "model_override"
+    }
 }
 
 private struct InstalledModel: Decodable {
     let name: String
     let size_gb: Double?
+}
+
+private struct AgentsResponse: Decodable {
+    let profile: String?
+    let agents: [AgentEntry]
+}
+
+private struct AgentModelsResponse: Decodable {
+    let profile: String?
+    let models: [String: String]
+}
+
+private struct InstalledModelsResponse: Decodable {
+    let models: [InstalledModel]
 }
 
 // MARK: - View model
@@ -33,9 +60,8 @@ final class AgentRoutingVM: ObservableObject {
     /// Returns the picker selection tag for a given agent — either a concrete
     /// installed model name or the profile-default sentinel.
     func selection(for agent: AgentEntry) -> String {
-        // Treat empty or nil model as "profile default".
-        if let m = agent.model, !m.isEmpty {
-            return m
+        if let override = agent.modelOverride, !override.isEmpty {
+            return override
         }
         return Self.profileDefaultSentinel
     }
@@ -48,7 +74,13 @@ final class AgentRoutingVM: ObservableObject {
         for m in installedModels where !m.isEmpty && seen.insert(m).inserted {
             result.append(m)
         }
-        if let current = agent.model, !current.isEmpty, seen.insert(current).inserted {
+        if let defaultModel = agent.defaultModel,
+           !defaultModel.isEmpty,
+           seen.insert(defaultModel).inserted {
+            result.append(defaultModel)
+        }
+        let current = agent.effectiveModel
+        if !current.isEmpty, seen.insert(current).inserted {
             result.append(current)
         }
         return result
@@ -69,7 +101,8 @@ final class AgentRoutingVM: ObservableObject {
             do {
                 let (data, resp) = try await URLSession.shared.data(from: url)
                 if let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
-                    agents = try JSONDecoder().decode([AgentEntry].self, from: data)
+                    let decoded = try JSONDecoder().decode(AgentsResponse.self, from: data)
+                    agents = decoded.agents
                 } else {
                     error = "Could not load agents"
                     return
@@ -83,16 +116,16 @@ final class AgentRoutingVM: ObservableObject {
         // Load effective mapping (best-effort, non-fatal)
         if let url = URL(string: "\(base)/api/agents/models") {
             if let (data, _) = try? await URLSession.shared.data(from: url),
-               let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
-                effective = decoded
+               let decoded = try? JSONDecoder().decode(AgentModelsResponse.self, from: data) {
+                effective = decoded.models
             }
         }
 
         // Load installed models (best-effort, non-fatal)
         if let url = URL(string: "\(base)/api/models") {
             if let (data, _) = try? await URLSession.shared.data(from: url),
-               let decoded = try? JSONDecoder().decode([InstalledModel].self, from: data) {
-                installedModels = decoded.map(\.name)
+               let decoded = try? JSONDecoder().decode(InstalledModelsResponse.self, from: data) {
+                installedModels = decoded.models.map(\.name)
             }
         }
     }
@@ -116,7 +149,9 @@ final class AgentRoutingVM: ObservableObject {
                 name: existing.name,
                 title: existing.title,
                 summary: existing.summary,
-                model: (model?.isEmpty ?? true) ? nil : model
+                model: (model?.isEmpty ?? true) ? existing.defaultModel : model,
+                defaultModel: existing.defaultModel,
+                modelOverride: (model?.isEmpty ?? true) ? "" : model
             )
         }
         await refresh()
@@ -186,7 +221,7 @@ struct AgentRoutingTab: View {
                         .buttonStyle(.borderless)
                         .foregroundStyle(.secondary)
                         .font(.system(size: 12))
-                        .disabled(vm.agents.allSatisfy { ($0.model ?? "").isEmpty })
+                        .disabled(vm.agents.allSatisfy { !$0.hasOverride })
                     }
                 }
             }
@@ -271,11 +306,11 @@ struct AgentRoutingTab: View {
             Picker("", selection: selection) {
                 ForEach(vm.pickerOptions(for: agent), id: \.self) { option in
                     if option == AgentRoutingVM.profileDefaultSentinel {
-                        Text("Profile default")
+                        Text("Profile default (\(Self.compactModelName(agent.effectiveModel)))")
                             .italic()
                             .tag(option)
                     } else {
-                        Text(option).tag(option)
+                        Text(Self.compactModelName(option)).tag(option)
                     }
                 }
             }
@@ -283,8 +318,30 @@ struct AgentRoutingTab: View {
             .labelsHidden()
             .controlSize(.small)
             .frame(width: 180, alignment: .trailing)
+            .help(agent.hasOverride
+                  ? "Override: \(agent.modelOverride ?? "")"
+                  : "Profile default: \(agent.effectiveModel)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private static func compactModelName(_ model: String) -> String {
+        var value = model
+        for suffix in [
+            "-instruct-q5_K_M",
+            "-instruct-q4_K_M",
+            "-q8_0",
+            "-q6_K",
+            "-q5_K_M",
+            "-q4_K_M",
+            "-latest",
+        ] {
+            if value.hasSuffix(suffix) {
+                value.removeLast(suffix.count)
+                break
+            }
+        }
+        return value.isEmpty ? "not set" : value
     }
 }

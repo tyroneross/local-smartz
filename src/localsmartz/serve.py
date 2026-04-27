@@ -2573,7 +2573,11 @@ Return ONLY the JSON, no prose, no code fences."""
 
     @_json_body
     def _handle_agent_model_set(self, agent_name: str, *, body):
-        """POST /api/agents/<name>/model body {"model": "..."} — persist override."""
+        """POST /api/agents/<name>/model body {"model": "..."}.
+
+        Non-empty ``model`` persists an override. Empty string clears the
+        override so the agent inherits the profile default again.
+        """
         from localsmartz import global_config
         from localsmartz.profiles import get_profile
 
@@ -2591,7 +2595,7 @@ Return ONLY the JSON, no prose, no code fences."""
             return
 
         model = body.get("model")
-        if not isinstance(model, str) or not model.strip():
+        if not isinstance(model, str):
             self._json_response({"error": "Request body must include string 'model'"}, 400)
             return
         model = model.strip()
@@ -2601,7 +2605,10 @@ Return ONLY the JSON, no prose, no code fences."""
         if not isinstance(current, dict):
             current = {}
         current = dict(current)
-        current[agent_name] = model
+        if model:
+            current[agent_name] = model
+        else:
+            current.pop(agent_name, None)
         try:
             global_config.set("agent_models", current)
         except ValueError as exc:

@@ -127,6 +127,7 @@ struct SetupProgressView: View {
     }
 }
 
+#if ENABLE_PREVIEWS
 #Preview {
     SetupProgressView(
         progresses: [
@@ -141,3 +142,4 @@ struct SetupProgressView: View {
     .padding(32)
     .frame(width: 560)
 }
+#endif

@@ -36,8 +36,8 @@ Telemetry:
 
 Two implementation paths:
   - **Path A** (``profile.use_deepagents_subagents=True``, default on
-    standard+/cloud). DeepAgents ``subagents`` + ``task`` tool. ~20
-    lines. Uses the S1 factory for the lead agent's chat model.
+    standard+/cloud). DeepAgents ``subagents`` + ``task`` tool. Uses
+    the S1 factory for the lead agent's chat model.
   - **Path B** (``use_deepagents_subagents=False``, default on mini).
     Iterate workers via ``AgentRunner.run_turn`` directly. No DeepAgents
     machinery — keeps the load path cheap on 24GB hardware.
@@ -160,6 +160,27 @@ def _summarize(text: str, max_chars: int = WORKER_SUMMARY_MAX_CHARS) -> str:
     if len(candidate) <= max_chars:
         return candidate
     return candidate[: max_chars - 1].rstrip() + "…"
+
+
+def _path_a_subagent_name(index: int, role: str) -> str:
+    """Stable DeepAgents subagent name for one decomposed worker task."""
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "_", role.strip().lower()).strip("_")
+    if not slug:
+        slug = "worker"
+    return f"worker_{index}_{slug[:32]}"
+
+
+def _message_text(msg: Any) -> str:
+    """Extract plain text from a LangChain message."""
+    content = getattr(msg, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            seg.get("text", "") if isinstance(seg, dict) else str(seg)
+            for seg in content
+        )
+    return str(content or "")
 
 
 def _force_shared_model_on_mini_override(
@@ -499,12 +520,118 @@ async def _dispatch_workers_path_a(
     tracer: Any,
     thread_id: str | None,
 ) -> list[dict]:
-    """Path A placeholder — intentionally raises NotImplementedError.
+    """Path A: execute workers through DeepAgents ``subagents`` + ``task``.
 
-    The full Path A wiring (DeepAgents subagents + task tool + LangChain
-    chat model from S1 factory) is a larger integration that plugs in at
-    the ``agent.py`` layer. For Phase 3 we ship Path B end-to-end so the
-    pattern is usable on all tiers, and leave Path A as a toggle callers
-    can flip once the subagent wiring lands on standard+/cloud.
+    Decomposition and final synthesis stay in the provider-agnostic runner
+    path. Only worker execution switches to DeepAgents' native task tool so
+    standard+/cloud profiles get real context-isolated subagents without
+    changing the pattern contract.
     """
-    raise NotImplementedError("Path A (DeepAgents subagents) is a follow-up")
+    from deepagents import create_deep_agent
+    from localsmartz.runners import create_langchain_model
+
+    provider = (
+        lead_ref.get("provider")
+        or profile.get("provider")
+        or "ollama"
+    )
+    lead_model = create_langchain_model(provider, lead_ref)
+    worker_system = worker_agent.get("system_focus") or _load_worker_prompt() or (
+        "You are a worker agent. Complete exactly one assigned subtask and "
+        "return a concise result."
+    )
+    worker_tools = [
+        tool for tool in (worker_agent.get("tools") or [])
+        if not isinstance(tool, str)
+    ]
+
+    subagents: list[dict[str, Any]] = []
+    for n, task in enumerate(tasks, start=1):
+        ref = forced_worker_ref or worker_agent.get("model_ref") or lead_ref
+        worker_provider = ref.get("provider") or provider
+        subagents.append({
+            "name": _path_a_subagent_name(n, task.role),
+            "description": f"Worker {n} for role {task.role}: {task.prompt}",
+            "system_prompt": (
+                f"{worker_system}\n\n"
+                "Constraints: complete only this single worker assignment; "
+                "do not call task() or spawn another subagent."
+            ),
+            # Explicit empty list keeps custom tool scope narrow instead of
+            # inheriting the lead's tool surface.
+            "tools": worker_tools,
+            "model": create_langchain_model(worker_provider, ref),
+        })
+
+    dispatch_system = (
+        "You are the lead orchestrator for worker dispatch only. Use the "
+        "task tool exactly once per listed worker. Launch multiple task calls "
+        "in the same turn when possible. After all task results return, give "
+        "a one-line completion summary; do not synthesize the final answer."
+    )
+    dispatch_lines = [
+        "Dispatch these independent workers via task(subagent_type=...).",
+        "Use each subagent_type exactly once:",
+    ]
+    for n, task in enumerate(tasks, start=1):
+        dispatch_lines.append(
+            f"- subagent_type={_path_a_subagent_name(n, task.role)}; "
+            f"role={task.role}; description={task.prompt}"
+        )
+    dispatch_prompt = "\n".join(dispatch_lines)
+
+    start = time.time()
+    agent = create_deep_agent(
+        model=lead_model,
+        tools=[],
+        system_prompt=dispatch_system,
+        subagents=subagents,
+    )
+    result = await agent.ainvoke({
+        "messages": [{"role": "user", "content": dispatch_prompt}]
+    })
+    duration_ms = int((time.time() - start) * 1000)
+
+    messages = result.get("messages", []) if isinstance(result, dict) else []
+    task_outputs = [
+        _message_text(msg)
+        for msg in messages
+        if getattr(msg, "type", None) == "tool"
+    ]
+    if len(task_outputs) < len(tasks):
+        raise NotImplementedError(
+            "Path A did not return one task result per worker"
+        )
+
+    worker_outputs: list[dict] = []
+    for n, task in enumerate(tasks, start=1):
+        body = task_outputs[n - 1]
+        with tracer.start_as_current_span(
+            f"ls.orchestrator.worker.{n}"
+        ) as w_span:
+            artifact_id = ""
+            try:
+                art = register_artifact(
+                    path=f".localsmartz/workers/{thread_id or 'ad-hoc'}/worker-{n}-{task.role}.md",
+                    format="markdown",
+                    title=f"Worker {n} ({task.role}) output",
+                    cwd=_extract_cwd(ctx),
+                    thread_id=thread_id,
+                )
+                artifact_id = art.get("id", "")
+            except Exception as exc:  # noqa: BLE001
+                log.debug("orchestrator: Path A worker artifact register failed: %s", exc)
+            summary = _summarize(body)
+            w_span.set_attribute("ls.worker.role", task.role)
+            w_span.set_attribute("ls.worker.artifact_id", artifact_id)
+            w_span.set_attribute("ls.worker.duration_ms", duration_ms)
+            w_span.set_attribute("ls.worker.status", "ok")
+            worker_outputs.append({
+                "role": task.role,
+                "artifact_id": artifact_id,
+                "summary": summary,
+                "duration_ms": duration_ms,
+                "status": "ok",
+            })
+
+    return worker_outputs

@@ -29,8 +29,9 @@ OLLAMA_BASE = "http://localhost:11434"
 # releases automatically, ranks by pull count, and de-dupes by family
 # so newer versions replace older ones.
 SUGGESTED_MODELS: list[dict] = [
-    {"name": "qwen3:8b-q4_K_M",                   "size_gb_estimate": 5.2,  "ram_class": "lite",  "note": "Lite/full planning default"},
-    {"name": "qwen2.5-coder:32b-instruct-q5_K_M", "size_gb_estimate": 23.0, "ram_class": "full",  "note": "Full execution default"},
+    {"name": "qwen3:8b-q4_K_M",                   "size_gb_estimate": 5.2,  "ram_class": "lite",  "note": "Lite + fast-path default"},
+    {"name": "gpt-oss:20b",                       "size_gb_estimate": 14.0, "ram_class": "full",  "note": "Full agent default"},
+    {"name": "qwen2.5-coder:32b-instruct-q5_K_M", "size_gb_estimate": 23.0, "ram_class": "full",  "note": "Code-heavy execution fallback"},
     {"name": "llama3.3:70b-instruct-q5_K_M",      "size_gb_estimate": 48.0, "ram_class": "heavy", "note": "Heavy-tier alternative"},
     {"name": "gpt-oss:120b",                      "size_gb_estimate": 65.0, "ram_class": "heavy", "note": "Largest OSS model supported"},
 ]

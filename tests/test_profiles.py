@@ -13,9 +13,10 @@ from localsmartz.profiles import (
 def test_get_profile_full():
     profile = get_profile("full")
     assert profile["name"] == "full"
-    # Planning model is a fast lightweight model for low first-token latency;
-    # execution still escalates to a strong coder model.
-    assert "8b" in profile["planning_model"]
+    # Full-profile planning uses the general agentic model; fast-path keeps the
+    # lightweight model for trivial queries.
+    assert profile["planning_model"] == "gpt-oss:20b"
+    assert "8b" in profile["fast_model"]
     assert "32b" in profile["execution_model"]
     assert profile["max_concurrent_agents"] == 2
 
@@ -35,7 +36,8 @@ def test_get_profile_auto():
 
 def test_get_model():
     profile = get_profile("full")
-    assert "8b" in get_model(profile, "planning")
+    assert get_model(profile, "planning") == "gpt-oss:20b"
+    assert "8b" in get_model(profile, "fast")
     assert "32b" in get_model(profile, "execution")
 
 

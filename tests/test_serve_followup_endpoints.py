@@ -106,6 +106,36 @@ def test_put_agent_prompt_requires_non_empty(server: int, tmp_path: Path, monkey
     assert status == 400
 
 
+# ── POST agent model endpoint ──────────────────────────────────────────────
+
+def test_post_agent_model_empty_clears_override(
+    server: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    status, data = _post_json(
+        server,
+        "/api/agents/researcher/model",
+        {"model": "qwen3:8b-q4_K_M"},
+    )
+    assert status == 200, data
+
+    status, data = _post_json(
+        server,
+        "/api/agents/researcher/model",
+        {"model": ""},
+    )
+    assert status == 200, data
+    assert data["model"] == ""
+
+    from localsmartz import global_config
+
+    assert global_config.get("agent_models") == {}
+
+
 # ── Golden-task eval runner endpoint (Item 6) ────────────────────────────
 
 def test_post_evals_run_uses_runner(server: int, monkeypatch) -> None:

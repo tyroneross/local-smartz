@@ -492,8 +492,8 @@ def test_role_llm_uses_profile_model(monkeypatch):
     profile = get_profile("full")
     llm = _role_llm("writer", profile)
     assert seen_models, "ChatOllama was not instantiated"
-    # Writer on full profile uses the execution model (32b coder).
-    assert "32b" in seen_models[-1] or "coder" in seen_models[-1].lower()
+    # Writer on full profile uses the general full-profile model.
+    assert seen_models[-1] == "gpt-oss:20b"
     # Regression guard: _role_llm must return an object that has
     # ``bind_tools``. Earlier code wrapped the LLM in ``with_retry`` which
     # strips that method and silently broke tool registration for every

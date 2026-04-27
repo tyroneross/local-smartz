@@ -278,7 +278,7 @@ def _setup(args):
     else:
         print("  No models downloaded yet.")
         print("  Downloading recommended model...")
-        rec_model = "qwen3:8b-q4_K_M" if ram_gb < 64 else "llama3.1:70b-instruct-q5_K_M"
+        rec_model = "qwen3:8b-q4_K_M" if ram_gb < 64 else "gpt-oss:20b"
         pull_model(rec_model)
         models = list_models_with_size()
         print(f"  \033[32m\u2713\033[0m Downloaded {rec_model}")

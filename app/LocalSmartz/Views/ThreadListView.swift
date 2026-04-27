@@ -8,6 +8,9 @@ struct AgentInfo: Decodable, Identifiable {
     /// Optional because older payloads may omit it; the Settings → Agents
     /// tab falls back to em-dash when nil.
     let model: String?
+    /// Profile default and explicit override, when supplied by newer backends.
+    let defaultModel: String?
+    let modelOverride: String?
     /// Tool allow-list for this agent — surfaced in the sidebar so users
     /// can see what each focused agent will actually call. Backend populates
     /// it from ``AGENT_ROLES[role]["tools"]`` (see profiles.list_agents).
@@ -26,6 +29,8 @@ struct AgentInfo: Decodable, Identifiable {
         case title
         case summary
         case model
+        case defaultModel = "default_model"
+        case modelOverride = "model_override"
         case tools
         case systemFocus = "system_focus"
     }
@@ -164,11 +169,15 @@ struct ThreadListView: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                         if let model = modelName, !model.isEmpty {
-                            Text(model)
+                            Text(Self.compactModelName(model))
                                 .font(.system(size: 13, design: .monospaced))
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
                                 .padding(.leading, 24)
                                 .padding(.top, 1)
+                                .help("Model: \(model)")
+                                .accessibilityLabel("Model \(model)")
                         }
                     }
                     Spacer(minLength: 0)
@@ -199,6 +208,25 @@ struct ThreadListView: View {
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
             .onTapGesture(perform: onTap)
+        }
+
+        private static func compactModelName(_ model: String) -> String {
+            var value = model
+            for suffix in [
+                "-instruct-q5_K_M",
+                "-instruct-q4_K_M",
+                "-q8_0",
+                "-q6_K",
+                "-q5_K_M",
+                "-q4_K_M",
+                "-latest",
+            ] {
+                if value.hasSuffix(suffix) {
+                    value.removeLast(suffix.count)
+                    break
+                }
+            }
+            return value
         }
     }
 

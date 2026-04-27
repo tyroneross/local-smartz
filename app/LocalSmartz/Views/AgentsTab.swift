@@ -302,10 +302,14 @@ private struct AgentCard: View {
                 if isEditing {
                     EmptyView()  // picker rendered in edit section
                 } else if let model = agent.model, !model.isEmpty {
-                    Text(model)
+                    Text(Self.compactModelName(model))
                         .font(.system(size: 13, design: .monospaced))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                         .textSelection(.enabled)
+                        .help("Model: \(model)")
+                        .accessibilityLabel("Model \(model)")
                 } else {
                     Text("—")
                         .font(.system(size: 13, design: .monospaced))
@@ -417,6 +421,25 @@ private struct AgentCard: View {
                 }
             }
         }
+    }
+
+    private static func compactModelName(_ model: String) -> String {
+        var value = model
+        for suffix in [
+            "-instruct-q5_K_M",
+            "-instruct-q4_K_M",
+            "-q8_0",
+            "-q6_K",
+            "-q5_K_M",
+            "-q4_K_M",
+            "-latest",
+        ] {
+            if value.hasSuffix(suffix) {
+                value.removeLast(suffix.count)
+                break
+            }
+        }
+        return value
     }
 }
 

@@ -8,6 +8,7 @@ DMG_NAME="${APP_NAME}-Installer"
 VERSION="0.1"
 VOLUME_NAME="${DISPLAY_NAME} ${VERSION}"
 DMG_FILE="${DMG_NAME}.dmg"
+TMP_DMG_FILE="${DMG_FILE}.tmp"
 STAGING_DIR=".dmg-staging"
 BUILD_DIR="build/Build/Products/Release"
 
@@ -196,7 +197,7 @@ codesign --force --deep --sign - "${APP_BUNDLE}" || \
 # Step 5: Prepare staging directory
 echo ""
 echo "=== Preparing DMG contents ==="
-rm -rf "${STAGING_DIR}" "${DMG_FILE}"
+rm -rf "${STAGING_DIR}" "${TMP_DMG_FILE}"
 mkdir -p "${STAGING_DIR}"
 
 cp -R "${APP_BUNDLE}" "${STAGING_DIR}/"
@@ -211,7 +212,9 @@ hdiutil create \
     -ov \
     -format UDZO \
     -imagekey zlib-level=9 \
-    "${DMG_FILE}"
+    "${TMP_DMG_FILE}"
+
+mv "${TMP_DMG_FILE}" "${DMG_FILE}"
 
 rm -rf "${STAGING_DIR}"
 

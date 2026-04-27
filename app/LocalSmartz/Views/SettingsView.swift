@@ -143,7 +143,7 @@ private struct GeneralTab: View {
             }
             Divider().padding(.vertical, 2)
             LabeledRow("Active model") {
-                TextField("e.g. qwen3:8b-q4_K_M", text: $vm.settings.activeModel)
+                TextField("e.g. gpt-oss:20b", text: $vm.settings.activeModel)
                     .textFieldStyle(.roundedBorder)
             }
             Divider().padding(.vertical, 2)

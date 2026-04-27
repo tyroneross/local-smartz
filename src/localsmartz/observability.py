@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+from collections.abc import Mapping, Sequence
 
 log = logging.getLogger(__name__)
 
@@ -35,11 +37,168 @@ DEFAULT_SERVICE_NAME = os.environ.get("OTEL_SERVICE_NAME", "local-smartz")
 
 _INSTRUMENTED = False
 
+_REDACTED = "[REDACTED]"
+_PII_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b"), "[REDACTED_EMAIL]"),
+    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "[REDACTED_SSN]"),
+    (re.compile(r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b"), "[REDACTED_PHONE]"),
+    (re.compile(r"\b(?:\d[ -]*?){13,19}\b"), "[REDACTED_NUMBER]"),
+    (re.compile(r"\b(?:sk|pk|rk|xox[baprs]|ghp|github_pat)_[A-Za-z0-9_\-]{12,}\b"), "[REDACTED_TOKEN]"),
+)
+_PAYLOAD_KEY_PARTS = (
+    "prompt",
+    "prompts",
+    "message",
+    "messages",
+    "input",
+    "output",
+    "completion",
+    "response",
+    "content",
+    "query",
+    "document",
+    "documents",
+    "text",
+)
+_SECRET_KEY_PARTS = (
+    "authorization",
+    "api_key",
+    "apikey",
+    "password",
+    "secret",
+    "token",
+)
+
 
 def is_observability_enabled() -> bool:
     """Honor an env-var override so the user doesn't have to pass ``--observe``."""
     val = os.environ.get("LOCALSMARTZ_OBSERVE", "").lower().strip()
     return val in ("1", "true", "yes", "on")
+
+
+def is_pii_redaction_enabled() -> bool:
+    """Default-on guard before any trace leaves this process."""
+    val = os.environ.get("LOCALSMARTZ_TELEMETRY_REDACT", "1").lower().strip()
+    return val not in ("0", "false", "no", "off")
+
+
+def redact_pii_text(text: str) -> str:
+    """Redact common PII/secrets from a string while preserving readability."""
+    out = text
+    for pattern, replacement in _PII_PATTERNS:
+        out = pattern.sub(replacement, out)
+    return out
+
+
+def _sensitive_key(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    return any(part in normalized for part in _PAYLOAD_KEY_PARTS + _SECRET_KEY_PARTS)
+
+
+def redact_pii_value(value, *, key: str = ""):
+    """Return an OpenTelemetry-safe value with PII removed.
+
+    Prompt/response-shaped attributes are replaced wholesale because LangChain
+    instrumentation can place full user text there. Other strings are pattern
+    redacted so operational labels remain useful.
+    """
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        if _sensitive_key(key):
+            return _REDACTED
+        return redact_pii_text(value)
+    if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray | str):
+        redacted = [redact_pii_value(item, key=key) for item in value]
+        if all(isinstance(item, str) for item in redacted):
+            return redacted
+        if all(isinstance(item, bool) for item in redacted):
+            return redacted
+        if all(isinstance(item, int) and not isinstance(item, bool) for item in redacted):
+            return redacted
+        if all(isinstance(item, float) for item in redacted):
+            return redacted
+        return [_REDACTED if item is not None else "" for item in redacted]
+    return _REDACTED if _sensitive_key(key) else redact_pii_text(str(value))
+
+
+def redact_pii_attributes(attributes: Mapping | None) -> dict:
+    """Redact a span/event attribute mapping."""
+    if not attributes:
+        return {}
+    return {
+        str(key): redact_pii_value(value, key=str(key))
+        for key, value in attributes.items()
+    }
+
+
+class _RedactedSpan:
+    """ReadableSpan proxy that sanitizes attributes and events at export time."""
+
+    def __init__(self, span):
+        self._span = span
+
+    def __getattr__(self, name):
+        return getattr(self._span, name)
+
+    @property
+    def attributes(self):
+        return redact_pii_attributes(getattr(self._span, "attributes", None))
+
+    @property
+    def events(self):
+        try:
+            from opentelemetry.sdk.trace import Event
+        except Exception:  # pragma: no cover - defensive fallback
+            return getattr(self._span, "events", ())
+        return tuple(
+            Event(
+                event.name,
+                redact_pii_attributes(getattr(event, "attributes", None)),
+                getattr(event, "timestamp", None),
+            )
+            for event in getattr(self._span, "events", ())
+        )
+
+
+class PIIRedactingSpanExporter:
+    """Exporter wrapper that redacts spans before forwarding them."""
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+
+    def export(self, spans):
+        return self._wrapped.export(tuple(_RedactedSpan(span) for span in spans))
+
+    def shutdown(self):
+        return self._wrapped.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30000):
+        force_flush = getattr(self._wrapped, "force_flush", None)
+        if callable(force_flush):
+            return force_flush(timeout_millis)
+        return True
+
+
+class PIIRedactingSpanProcessor:
+    """Batch span processor with a redacting exporter in front of the collector."""
+
+    def __init__(self, exporter):
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        self._delegate = BatchSpanProcessor(PIIRedactingSpanExporter(exporter))
+
+    def on_start(self, span, parent_context=None):
+        return self._delegate.on_start(span, parent_context=parent_context)
+
+    def on_end(self, span):
+        return self._delegate.on_end(span)
+
+    def shutdown(self):
+        return self._delegate.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30000):
+        return self._delegate.force_flush(timeout_millis)
 
 
 def probe_collector(endpoint: str | None = None, timeout: float = 1.0) -> bool:
@@ -112,7 +271,6 @@ def setup_observability(
         from opentelemetry import trace
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter,
         )
@@ -137,7 +295,12 @@ def setup_observability(
             })
         )
         exporter = OTLPSpanExporter(endpoint=resolved_endpoint)
-        provider.add_span_processor(BatchSpanProcessor(exporter))
+        if is_pii_redaction_enabled():
+            provider.add_span_processor(PIIRedactingSpanProcessor(exporter))
+        else:
+            from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+            provider.add_span_processor(BatchSpanProcessor(exporter))
         trace.set_tracer_provider(provider)
         LangChainInstrumentor().instrument(tracer_provider=provider)
     except Exception as e:  # noqa: BLE001 — never crash the agent for observability
@@ -185,6 +348,7 @@ def status() -> dict:
         "endpoint": DEFAULT_OTLP_ENDPOINT,
         "service_name": DEFAULT_SERVICE_NAME,
         "env_override": is_observability_enabled(),
+        "pii_redaction": is_pii_redaction_enabled(),
         "collector_reachable": probe_collector(),
         "phoenix_install_hint": (
             "Run Phoenix locally:\n"

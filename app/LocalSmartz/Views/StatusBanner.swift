@@ -49,6 +49,7 @@ struct StatusBanner: View {
     }
 }
 
+#if ENABLE_PREVIEWS
 #Preview("With phase + streaming") {
     StatusBanner(phase: "🔍 Searching", model: "llama3.1:8b", isStreaming: true)
         .frame(width: 600)
@@ -64,3 +65,4 @@ struct StatusBanner: View {
         .frame(width: 600)
         .border(.red)
 }
+#endif

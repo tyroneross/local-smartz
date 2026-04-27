@@ -136,8 +136,8 @@ CATALOG: list[ModelRec] = [
         "reasoning_mode": "native",
         "capabilities": ["tools", "thinking"],
         "context_window": 131072,
-        "notes": "OpenAI open-weights 20B; standard-tier alternative to qwen3.5:27b.",
-        "default_for": [],
+        "notes": "OpenAI open-weights 20B; default full-profile general agent for local latency + tool use.",
+        "default_for": ["single.primary.standard", "single.primary.full", "orchestrator.lead", "critic_loop.writer"],
     },
     {
         "name": "gpt-oss:120b",
@@ -292,9 +292,9 @@ def recommended_for_tier(tier: str) -> list[ModelRec]:
     if tier == "mini":
         names = ["qwen3.5:9b"]
     elif tier == "standard":
-        names = ["qwen3.5:9b", "qwen3.5:27b", "gemma4:26b"]
+        names = ["qwen3.5:9b", "gpt-oss:20b", "qwen3.5:27b", "gemma4:26b"]
     elif tier == "full":
-        names = ["qwen3.5:9b", "qwen3.5:122b", "qwen3-next:80b", "gemma4:26b"]
+        names = ["qwen3.5:9b", "gpt-oss:20b", "qwen3.5:122b", "qwen3-next:80b", "gemma4:26b"]
     else:
         names = ["qwen3.5:9b"]
 

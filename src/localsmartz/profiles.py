@@ -178,11 +178,12 @@ def agent_tool_names(role: str) -> list[str]:
 # global_config["agent_models"] take precedence at resolution time.
 PROFILES = {
     "full": {
-        # Fast planning model — a lightweight model for planning + first-token
-        # latency dominates simple-query timing, so this is qwen3:8b (5 GB).
-        # Execution still uses a strong 32B coder model for heavy lifting.
+        # General agent model. gpt-oss:20b is the installed full-profile default
+        # because it is tool/agent oriented and much lighter than gpt-oss:120b.
+        # Execution still uses a strong 32B coder model for code/Python-heavy
+        # analysis. The separate fast_model keeps trivial-query latency low.
         # Users can override via the toolbar picker or `localsmartz --model`.
-        "planning_model": "qwen3:8b-q4_K_M",
+        "planning_model": "gpt-oss:20b",
         # fast_model: used by fast_path_stream so trivial queries never touch
         # the heavy 32B execution model. Explicit here so get_model("fast")
         # can return it without scanning the agents dict.
@@ -190,16 +191,11 @@ PROFILES = {
         "execution_model": "qwen2.5-coder:32b-instruct-q5_K_M",
         "agents": {
             "planner": {
-                "model": "qwen3:8b-q4_K_M",
+                "model": "gpt-oss:20b",
                 "summary": AGENT_ROLES["planner"]["summary"],
             },
             "researcher": {
-                # Pinned to the 32B coder model to match analyzer/fact_checker/writer.
-                # The graph pipeline goes researcher → analyzer → fact_checker → writer;
-                # when researcher was 8B, every round paid a full 32B VRAM load on the
-                # next hop. All four roles sharing one model = zero mid-round swaps on
-                # machines that meet the full-profile RAM bar (>=64 GB).
-                "model": "qwen2.5-coder:32b-instruct-q5_K_M",
+                "model": "gpt-oss:20b",
                 "summary": AGENT_ROLES["researcher"]["summary"],
             },
             "analyzer": {
@@ -207,15 +203,15 @@ PROFILES = {
                 "summary": AGENT_ROLES["analyzer"]["summary"],
             },
             "writer": {
-                "model": "qwen2.5-coder:32b-instruct-q5_K_M",
+                "model": "gpt-oss:20b",
                 "summary": AGENT_ROLES["writer"]["summary"],
             },
             "fact_checker": {
-                "model": "qwen2.5-coder:32b-instruct-q5_K_M",
+                "model": "gpt-oss:20b",
                 "summary": AGENT_ROLES["fact_checker"]["summary"],
             },
             "orchestrator": {
-                "model": "qwen2.5-coder:32b-instruct-q5_K_M",
+                "model": "gpt-oss:20b",
                 "summary": AGENT_ROLES["orchestrator"]["summary"],
             },
         },
@@ -329,11 +325,14 @@ def list_agents(profile: dict) -> list[dict]:
             summary = spec.get("summary", "") or meta.get("summary", "")
         else:
             summary = meta.get("summary", "")
+        override = overrides.get(name)
         out.append({
             "name": name,
             "title": meta.get("title", name.title()),
             "summary": summary,
-            "model": overrides.get(name, default_model),
+            "model": override or default_model,
+            "default_model": default_model,
+            "model_override": override or "",
             # Tool allow-list from AGENT_ROLES — surfaced to the UI so a
             # sidebar can render "Planner uses: write_todos" without the
             # Swift app having to know about profile internals.

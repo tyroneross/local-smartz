@@ -9,6 +9,7 @@ struct GlobalSettings: Codable, Equatable {
     var workspace: String = ""
     var pythonPath: String = ""
     var activeModel: String = ""
+    var agentModels: [String: String] = [:]
     var pluginPaths: [String] = []
     var activeSkills: [String] = []
     /// Show a confirmation dialog when the user launches a research run
@@ -38,6 +39,7 @@ struct GlobalSettings: Codable, Equatable {
         case workspace
         case pythonPath = "python_path"
         case activeModel = "active_model"
+        case agentModels = "agent_models"
         case pluginPaths = "plugin_paths"
         case activeSkills = "active_skills"
         case warnBeforeLargeModels = "warn_before_large_models"
@@ -48,6 +50,7 @@ struct GlobalSettings: Codable, Equatable {
         workspace: String = "",
         pythonPath: String = "",
         activeModel: String = "",
+        agentModels: [String: String] = [:],
         pluginPaths: [String] = [],
         activeSkills: [String] = [],
         warnBeforeLargeModels: Bool = true,
@@ -56,6 +59,7 @@ struct GlobalSettings: Codable, Equatable {
         self.workspace = workspace
         self.pythonPath = pythonPath
         self.activeModel = activeModel
+        self.agentModels = agentModels
         self.pluginPaths = pluginPaths
         self.activeSkills = activeSkills
         self.warnBeforeLargeModels = warnBeforeLargeModels
@@ -67,6 +71,7 @@ struct GlobalSettings: Codable, Equatable {
         self.workspace = (try? c.decodeIfPresent(String.self, forKey: .workspace)) ?? ""
         self.pythonPath = (try? c.decodeIfPresent(String.self, forKey: .pythonPath)) ?? ""
         self.activeModel = (try? c.decodeIfPresent(String.self, forKey: .activeModel)) ?? ""
+        self.agentModels = (try? c.decodeIfPresent([String: String].self, forKey: .agentModels)) ?? [:]
         self.pluginPaths = (try? c.decodeIfPresent([String].self, forKey: .pluginPaths)) ?? []
         self.activeSkills = (try? c.decodeIfPresent([String].self, forKey: .activeSkills)) ?? []
         self.warnBeforeLargeModels = (try? c.decodeIfPresent(Bool.self, forKey: .warnBeforeLargeModels)) ?? true
@@ -95,6 +100,7 @@ struct GlobalSettings: Codable, Equatable {
             workspace: home.appendingPathComponent("Documents/LocalSmartz").path,
             pythonPath: "/usr/bin/env python3",
             activeModel: "",
+            agentModels: [:],
             pluginPaths: [],
             activeSkills: [],
             warnBeforeLargeModels: true,
@@ -171,6 +177,7 @@ struct GlobalSettings: Codable, Equatable {
             workspace: workspace.isEmpty ? d.workspace : workspace,
             pythonPath: pythonPath.isEmpty ? d.pythonPath : pythonPath,
             activeModel: activeModel,
+            agentModels: agentModels,
             pluginPaths: pluginPaths,
             activeSkills: activeSkills,
             warnBeforeLargeModels: warnBeforeLargeModels,

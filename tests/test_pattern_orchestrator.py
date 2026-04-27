@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage
 
 
 class _RecordingRunner:
@@ -38,6 +40,13 @@ class _RecordingRunner:
         content = self.scripts[self.calls]
         self.calls += 1
         return {"content": content}
+
+
+class _ToolCallingFakeModel(FakeMessagesListChatModel):
+    """Fake chat model that DeepAgents can bind tools onto in tests."""
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        return self
 
 
 def _install_in_memory_tracing():
@@ -318,11 +327,20 @@ def test_orchestrator_path_b_without_deepagents():
     assert "FINAL" in final.get("content", "")
 
 
-def test_orchestrator_path_a_falls_back_on_not_implemented():
-    """Path A placeholder raises NotImplementedError → pattern falls back to Path B."""
+def test_orchestrator_path_a_falls_back_on_not_implemented(monkeypatch):
+    """Path A construction failures still fall back to Path B."""
     from localsmartz.patterns import orchestrator
 
     _install_in_memory_tracing()
+
+    async def _unavailable(*args, **kwargs):
+        raise NotImplementedError("not available in this test")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_dispatch_workers_path_a",
+        _unavailable,
+    )
 
     runner = _RecordingRunner([
         _STD_DECOMPOSITION,
@@ -347,6 +365,84 @@ def test_orchestrator_path_a_falls_back_on_not_implemented():
     # Verify we still completed (Path A fallback → Path B).
     assert types[-1] == "done"
     assert runner.calls == 4
+
+
+def test_orchestrator_path_a_constructs_real_deepagents_agent(monkeypatch):
+    """Path A uses real DeepAgents subagents and does not consume runner worker turns."""
+    from localsmartz.patterns import orchestrator
+
+    _install_in_memory_tracing()
+
+    worker_1 = orchestrator._path_a_subagent_name(1, "researcher")
+    worker_2 = orchestrator._path_a_subagent_name(2, "analyzer")
+
+    lead_model = _ToolCallingFakeModel(responses=[
+        AIMessage(content="", tool_calls=[
+            {
+                "name": "task",
+                "args": {
+                    "description": "Find the capital of France",
+                    "subagent_type": worker_1,
+                },
+                "id": "call_1",
+            },
+            {
+                "name": "task",
+                "args": {
+                    "description": "Explain why Paris is the capital",
+                    "subagent_type": worker_2,
+                },
+                "id": "call_2",
+            },
+        ]),
+        AIMessage(content="worker dispatch complete"),
+    ])
+    worker_models = iter([
+        _ToolCallingFakeModel(responses=[AIMessage(content="Paris is the capital.")]),
+        _ToolCallingFakeModel(responses=[
+            AIMessage(content="Paris is the capital because of history.")
+        ]),
+    ])
+
+    def _fake_model(provider, model_ref):
+        if model_ref["name"] == "lead":
+            return lead_model
+        return next(worker_models)
+
+    import localsmartz.runners as runners
+
+    monkeypatch.setattr(runners, "create_langchain_model", _fake_model)
+
+    runner = _RecordingRunner([
+        _STD_DECOMPOSITION,
+        "FINAL: Paris is the capital",
+    ])
+    profile = {
+        "tier": "standard",
+        "provider": "ollama",
+        "use_deepagents_subagents": True,
+    }
+    agents = {
+        "orchestrator": {"model_ref": {"provider": "ollama", "name": "lead"}},
+        "worker": {"model_ref": {"provider": "ollama", "name": "worker"}},
+    }
+
+    events = _drain(orchestrator.run(
+        "capital of france?",
+        agents=agents,
+        profile=profile,
+        runner=runner,
+        ctx={},
+    ))
+
+    assert runner.calls == 2  # plan + synthesize only; workers used DeepAgents task.
+    assert any(
+        e.get("role") == "worker.researcher"
+        and "Paris is the capital" in e.get("content", "")
+        for e in events
+    )
+    final = next(e for e in events if e.get("role") == "final")
+    assert "FINAL" in final.get("content", "")
 
 
 def test_orchestrator_empty_decomposition_yields_final():

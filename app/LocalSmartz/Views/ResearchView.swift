@@ -676,16 +676,10 @@ struct ResearchView: View {
 
             Spacer()
 
-            // Right cluster: model · profile · status · duration
+            // Right cluster: model · status · duration
             // All status uses text + color, no individual badges/borders per Calm Precision.
             HStack(spacing: 14) {
                 modelPicker
-
-                // Calm Precision Rule 9: status/profile is text only, no badge.
-                Text(appState.profile.uppercased())
-                    .font(.system(size: 12, weight: .medium))
-                    .tracking(0.5)
-                    .foregroundStyle(.secondary)
 
                 HStack(spacing: 5) {
                     Circle()
@@ -887,7 +881,7 @@ struct ResearchView: View {
             return EmptyStateAction(
                 title: "Install a model",
                 icon: "arrow.down.circle",
-                hint: "Pull a model so the agents can run. The default is qwen3:8b-q4_K_M.",
+                hint: "Pull a model so the agents can run. Full-profile default is gpt-oss:20b; lite uses qwen3:8b.",
                 handler: { showInstallSheet = true }
             )
         case .loading, .unknown, .ready:

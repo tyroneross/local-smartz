@@ -26,3 +26,42 @@ def test_status_includes_collector_reachable_field() -> None:
     s = observability.status()
     assert "collector_reachable" in s
     assert isinstance(s["collector_reachable"], bool)
+    assert isinstance(s["pii_redaction"], bool)
+
+
+def test_redact_pii_attributes_redacts_payloads_and_patterns() -> None:
+    attrs = observability.redact_pii_attributes({
+        "llm.input_messages": "email me at person@example.com",
+        "http.url": "https://example.test/users/person@example.com",
+        "api_key": "sk_test_12345678901234567890",
+        "model.name": "gpt-oss:20b",
+    })
+    assert attrs["llm.input_messages"] == "[REDACTED]"
+    assert "[REDACTED_EMAIL]" in attrs["http.url"]
+    assert attrs["api_key"] == "[REDACTED]"
+    assert attrs["model.name"] == "gpt-oss:20b"
+
+
+def test_redacting_span_exporter_sanitizes_attributes() -> None:
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(
+        SimpleSpanProcessor(observability.PIIRedactingSpanExporter(exporter))
+    )
+    tracer = provider.get_tracer("test")
+
+    with tracer.start_as_current_span("redaction-test") as span:
+        span.set_attribute("user.email", "person@example.com")
+        span.set_attribute("model.name", "gpt-oss:20b")
+        span.add_event("payload", {"prompt": "My SSN is 123-45-6789"})
+
+    spans = exporter.get_finished_spans()
+    assert spans[0].attributes["user.email"] == "[REDACTED_EMAIL]"
+    assert spans[0].attributes["model.name"] == "gpt-oss:20b"
+    assert spans[0].events[0].attributes["prompt"] == "[REDACTED]"
