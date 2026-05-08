@@ -18,6 +18,14 @@ from typing import TypedDict
 # from the provider pricing pages. ⚠️ Treat as advisory; always re-verify
 # before deploying at scale.
 LAST_UPDATED = date(2026, 4, 23)
+# LAST_VERIFIED is the canonical name going forward (feat: c9). Kept as an
+# alias for LAST_UPDATED — existing callers don't break. New code should
+# read LAST_VERIFIED.
+LAST_VERIFIED = LAST_UPDATED
+
+# Days before pricing is considered stale. Crossed → pricing_freshness()
+# returns stale=True; doctor probes warn; UI surfaces a banner.
+PRICING_STALE_AFTER_DAYS = 30
 
 
 class Rate(TypedDict):
@@ -102,6 +110,25 @@ def estimate_cost_usd(
 def rate_age_days() -> int:
     """Days since the last rate-table update. Doctor probe warns if > 90."""
     return (date.today() - LAST_UPDATED).days
+
+
+def pricing_freshness() -> dict:
+    """Return the pricing freshness envelope (feat: c9).
+
+    ``stale`` flips to ``True`` once the rate table is older than
+    ``PRICING_STALE_AFTER_DAYS`` (default 30). Callers (UI, doctor probe)
+    decide what to do with the signal — banner, warn, or block deploys.
+
+    The provider pricing URLs for manual re-verification are documented in
+    ``scripts/refresh-pricing.py``.
+    """
+    age = rate_age_days()
+    return {
+        "last_verified": LAST_VERIFIED.isoformat(),
+        "age_days": age,
+        "stale": age > PRICING_STALE_AFTER_DAYS,
+        "stale_threshold_days": PRICING_STALE_AFTER_DAYS,
+    }
 
 
 def cost_from_usage(*, model: str, usage: dict, pattern: str = "single") -> dict:
