@@ -3,12 +3,23 @@
 The router turn returns a one-word label (or a tool call with a label arg);
 the pattern maps the label to a specialist slot and runs one more turn.
 Works well on small models because each stage sees a narrow context.
+
+Streaming (commit D, 2026-05-08):
+  The router classification turn is NOT streamed — output is one word
+  and token-level streaming would add noise without value. The specialist
+  turn IS streamed; ``text_delta`` events carry ``role="specialist:<label>"``
+  so the SSE consumer can render which-route-was-chosen mid-stream.
 """
 from __future__ import annotations
 
 from typing import Any, AsyncIterator
 
-from localsmartz.patterns.base import BudgetTracker, PatternEvent, make_root_span
+from localsmartz.patterns.base import (
+    BudgetTracker,
+    PatternEvent,
+    make_root_span,
+    stream_or_run_turn,
+)
 from localsmartz.runners import AgentRunner
 
 
@@ -94,14 +105,24 @@ async def run(
             "specialist", {}
         ).get("model_ref") or router_model
 
-        specialist_turn = await runner.run_turn(
+        # Specialist turn — STREAMED. Text deltas carry role="specialist:<label>"
+        # so the SSE consumer knows which route emitted them.
+        specialist_turn: dict = {}
+        async for ev in stream_or_run_turn(
+            runner,
             prompt,
+            role=f"specialist:{label}",
             tools=specialist_slot.get("tools") or agents.get("specialist", {}).get("tools"),
             model_ref=specialist_model,
             system=specialist_slot.get("system_focus")
             or agents.get("specialist", {}).get("system_focus", ""),
             ctx=ctx,
-        )
+            stream=stream,
+        ):
+            if ev.get("_final"):
+                specialist_turn = ev.get("turn") or {}
+            else:
+                yield ev  # text_delta
         yield {
             "type": "turn",
             "role": f"specialist:{label}",

@@ -16,6 +16,11 @@ class PatternEvent(TypedDict, total=False):
     #   "pattern_start" | "turn" | "tool" | "iteration" | "score" | "done"
     #   "budget_warn"  — cloud-only token-budget advisory (feat: c8 follow-up)
     #   "text_delta"   — token-level streaming chunk (feat: c6 follow-up)
+    #   "phase_start" / "phase_end"  — sub-phase boundaries inside a pattern
+    #     (commit E, 2026-05-08). Used by patterns where token-level
+    #     interleaving across roles is ambiguous (critic_loop / parallel /
+    #     reflection); preferred over text_delta when concurrent roles
+    #     would muddle the stream.
     type: str
     pattern: str
     role: str
@@ -27,6 +32,8 @@ class PatternEvent(TypedDict, total=False):
     verdict: str
     thread_id: str
     duration_ms: int
+    # phase_start / phase_end fields
+    phase: str
     # budget_warn fields
     session_tokens: int
     threshold: int
@@ -113,6 +120,85 @@ class Pattern(Protocol):
         ctx: dict[str, Any] | None = None,
     ) -> AsyncIterator[PatternEvent]:
         ...
+
+
+async def stream_or_run_turn(
+    runner: AgentRunner,
+    prompt: str,
+    *,
+    role: str,
+    tools: Any = None,
+    model_ref: dict,
+    system: str | None = None,
+    ctx: dict | None = None,
+    stream: bool = True,
+) -> AsyncIterator[PatternEvent | dict]:
+    """Drive one turn through ``runner`` and yield streaming events + a
+    final terminal envelope (commit D, 2026-05-08).
+
+    Yields:
+      - one ``text_delta`` PatternEvent per token chunk WHEN streaming is
+        enabled AND the runner exposes ``stream_turn``.
+      - one final dict ``{"_final": True, "turn": <AssistantTurn>}`` —
+        NOT a PatternEvent; the caller unwraps it to compose the
+        pattern-specific terminal events (``turn``, ``budget_warn``, etc.).
+
+    Falls back to ``run_turn`` (whole-turn flush) when:
+      - ``stream`` is False, OR
+      - the runner doesn't expose ``stream_turn`` (local_ollama / harmony).
+
+    Replicates the assemble + error + fallback logic single.py already
+    encodes so chain / router / orchestrator can ship streaming without
+    duplicating it.
+
+    Error handling: a stream-side error surfaces as a final turn payload
+    with ``content="[error] <msg>"`` so the caller's downstream events
+    stay deterministic.
+    """
+    use_streaming = stream and hasattr(runner, "stream_turn")
+    if use_streaming:
+        assembled = ""
+        final_turn: dict = {}
+        async for chunk in runner.stream_turn(  # type: ignore[attr-defined]
+            prompt,
+            tools=tools,
+            model_ref=model_ref,
+            system=system,
+            ctx=ctx,
+        ):
+            if chunk.get("done"):
+                final_turn = chunk.get("final") or {}
+                if chunk.get("error"):
+                    final_turn = {
+                        "content": f"[error] {chunk.get('error')}",
+                        "tool_calls": [],
+                        "usage": {},
+                    }
+                break
+            delta = chunk.get("delta", "")
+            if delta:
+                assembled += delta
+                yield {
+                    "type": "text_delta",
+                    "role": role,
+                    "delta": delta,
+                }
+        turn = final_turn or {
+            "content": assembled,
+            "tool_calls": [],
+            "usage": {},
+        }
+        yield {"_final": True, "turn": turn}
+        return
+
+    turn = await runner.run_turn(
+        prompt,
+        tools=tools,
+        model_ref=model_ref,
+        system=system,
+        ctx=ctx,
+    )
+    yield {"_final": True, "turn": turn}
 
 
 # Telemetry helper — used by every pattern. Kept here to avoid circular imports.

@@ -55,7 +55,12 @@ from typing import Any, AsyncIterator
 
 from localsmartz.artifacts import register as register_artifact
 from localsmartz.observability import get_tracer
-from localsmartz.patterns.base import BudgetTracker, PatternEvent, make_root_span
+from localsmartz.patterns.base import (
+    BudgetTracker,
+    PatternEvent,
+    make_root_span,
+    stream_or_run_turn,
+)
 from localsmartz.runners import AgentRunner
 
 log = logging.getLogger(__name__)
@@ -425,17 +430,34 @@ async def run(
         yield {"type": "pattern_start", "pattern": "orchestrator"}
 
         # ── Step 1: decomposition ──────────────────────────────────────
+        # Stream the planner's tokens as `text_delta` PatternEvents with
+        # role="orchestrator.plan" so cloud users see live progress on
+        # decomposition. Decomposition is JSON; partial JSON is harmless
+        # to surface — the parser at the end gets the assembled body.
         tasks: list[WorkerTask] = []
         plan_body = ""
+        plan_turn: dict = {}
+        # Buffer planner deltas until the span context exits, then yield
+        # them in order. Yielding from inside an `async for` driven by
+        # `stream_or_run_turn` is fine, but we need plan_turn settled
+        # before the next code block.
+        plan_deltas: list[dict] = []
         with tracer.start_as_current_span("ls.orchestrator.plan") as plan_span:
             lead_system = lead.get("system_focus") or DEFAULT_LEAD_SYSTEM
-            plan_turn = await runner.run_turn(
+            async for ev in stream_or_run_turn(
+                runner,
                 prompt,
+                role="orchestrator.plan",
                 tools=lead.get("tools"),
                 model_ref=lead_ref,
                 system=lead_system,
                 ctx=ctx,
-            )
+                stream=stream,
+            ):
+                if ev.get("_final"):
+                    plan_turn = ev.get("turn") or {}
+                else:
+                    plan_deltas.append(ev)
             plan_body = plan_turn.get("content", "") or ""
             tasks = _parse_decomposition(plan_body)
             plan_span.set_attribute("ls.plan.worker_count", len(tasks))
@@ -458,6 +480,10 @@ async def run(
                 except Exception as exc:  # noqa: BLE001
                     log.debug("orchestrator: todo.md register failed: %s", exc)
 
+        # Yield the buffered planner text_deltas BEFORE the turn event so
+        # consumers see incremental tokens before the role-boundary marker.
+        for delta_ev in plan_deltas:
+            yield delta_ev
         yield {
             "type": "turn",
             "role": "orchestrator.plan",
@@ -579,17 +605,29 @@ async def run(
             synth_span.set_attribute("ls.synthesize.input_chars", len(synth_prompt))
             synth_span.set_attribute("ls.synthesize.worker_count", len(worker_outputs))
 
-            synth_turn = await runner.run_turn(
+            synth_turn: dict = {}
+            synth_deltas: list[dict] = []
+            async for ev in stream_or_run_turn(
+                runner,
                 synth_prompt,
+                role="final",
                 model_ref=lead_ref,
                 system=synth_system,
                 ctx=ctx,
-            )
+                stream=stream,
+            ):
+                if ev.get("_final"):
+                    synth_turn = ev.get("turn") or {}
+                else:
+                    synth_deltas.append(ev)
             final_body = synth_turn.get("content", "") or ""
 
         root_span.set_attribute("ls.orchestrator.worker_count", len(worker_outputs))
         root_span.set_attribute("ls.orchestrator.verdict", "ok")
 
+        # Stream synthesis deltas before the final turn event.
+        for delta_ev in synth_deltas:
+            yield delta_ev
         yield {
             "type": "turn",
             "role": "final",

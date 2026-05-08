@@ -4,12 +4,26 @@ Default stages: ``gather`` → ``analyze`` → ``write``. Each stage takes the
 previous stage's output as its user prompt. Each stage can be pinned to a
 different model via ``agents[stage].model_ref``; by default all stages
 share the ``primary`` slot (so mini tier keeps one model resident).
+
+Streaming (commit D, 2026-05-08):
+  Each stage uses ``stream_or_run_turn`` so cloud runners with
+  ``stream_turn`` ship token deltas as ``text_delta`` events with
+  ``role=<stage_name>``. Stages run sequentially, so role boundaries are
+  unambiguous and no phase-marker is needed — the next ``text_delta`` is
+  the next stage. The closing ``turn`` event per stage stays as the
+  authoritative role-boundary marker for callers who only care about
+  whole-turn output.
 """
 from __future__ import annotations
 
 from typing import Any, AsyncIterator
 
-from localsmartz.patterns.base import BudgetTracker, PatternEvent, make_root_span
+from localsmartz.patterns.base import (
+    BudgetTracker,
+    PatternEvent,
+    make_root_span,
+    stream_or_run_turn,
+)
 from localsmartz.runners import AgentRunner
 
 
@@ -70,13 +84,24 @@ async def run(
                 "provider": "ollama",
                 "name": profile.get("planning_model", ""),
             }
-            turn = await runner.run_turn(
+            # Stream tokens through stream_or_run_turn — cloud runners
+            # ship text_delta per chunk with role=<stage>; ollama / harmony
+            # fall back to whole-turn flush.
+            turn: dict = {}
+            async for ev in stream_or_run_turn(
+                runner,
                 current_input,
+                role=stage["name"],
                 tools=slot.get("tools"),
                 model_ref=model_ref,
                 system=slot.get("system_focus") or stage.get("system", ""),
                 ctx=ctx,
-            )
+                stream=stream,
+            ):
+                if ev.get("_final"):
+                    turn = ev.get("turn") or {}
+                else:
+                    yield ev  # text_delta
             content = turn.get("content", "") or ""
             yield {
                 "type": "turn",
