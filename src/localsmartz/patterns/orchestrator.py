@@ -205,6 +205,32 @@ def _extract_cwd(ctx: dict | None) -> str:
     return (ctx or {}).get("cwd") or "."
 
 
+# Per-provider concurrency caps for Path B parallel dispatch (feat: c5).
+# Cloud providers are bounded so we don't blast the rate limiter; Ollama
+# has its own daemon-side queue so we leave it unbounded.
+_PROVIDER_CONCURRENCY_CAPS: dict[str, int] = {
+    "anthropic": 4,
+    "openai": 4,
+    "groq": 4,
+    # ollama: omitted → no semaphore created (effectively unbounded).
+}
+
+
+def _semaphore_for_ref(ref: dict, _cache: dict[str, asyncio.Semaphore]) -> asyncio.Semaphore | None:
+    """Return a per-provider semaphore for the worker ref, or None for unlimited.
+
+    Caches semaphores keyed by provider so concurrent workers on the same
+    provider share the cap within one dispatch call.
+    """
+    provider = (ref or {}).get("provider", "ollama")
+    cap = _PROVIDER_CONCURRENCY_CAPS.get(provider)
+    if cap is None:
+        return None
+    if provider not in _cache:
+        _cache[provider] = asyncio.Semaphore(cap)
+    return _cache[provider]
+
+
 async def _dispatch_workers_path_b(
     tasks: list[WorkerTask],
     *,
@@ -217,14 +243,43 @@ async def _dispatch_workers_path_b(
     tracer: Any,
     thread_id: str | None,
 ) -> list[dict]:
-    """Path B: iterate each worker via AgentRunner.run_turn directly.
+    """Path B: dispatch workers in parallel via asyncio.gather (feat: c5).
+
+    Cloud providers are bounded by per-provider semaphores
+    (``_PROVIDER_CONCURRENCY_CAPS``); Ollama is unbounded. Result-list
+    ordering is preserved (gather returns in argument order).
 
     Returns a list of ``{role, artifact_id, summary, duration_ms, status}``.
+
+    NestedSubagentError is the one error class that escapes — every other
+    worker failure is captured into the result envelope (status="error").
+    Pre-checks the depth guard ONCE before fan-out so the per-worker
+    depth check still fires correctly.
     """
     worker_system = worker_agent.get("system_focus") or _load_worker_prompt()
-    worker_outputs: list[dict] = []
 
-    for n, task in enumerate(tasks, start=1):
+    # Depth guard — fire once before fan-out. Each worker shares the same
+    # parent ctx and incrementing depth, so we only need the check at the
+    # batch level.
+    sub_ctx_template = dict(ctx or {})
+    depth = int(sub_ctx_template.get("_orchestrator_depth", 0) or 0)
+    if depth >= 1:
+        raise NestedSubagentError(
+            f"Worker dispatch at depth {depth} cannot spawn "
+            "another worker — one-level-only enforced (P1)."
+        )
+    sub_ctx_template["_orchestrator_depth"] = depth + 1
+
+    # Choose model ref: forced on mini-override, else worker's own ref,
+    # else the lead's ref as fallback. Same for all workers in this batch.
+    ref = forced_worker_ref or worker_agent.get("model_ref") or lead_ref
+
+    # Per-call semaphore cache so cloud workers sharing a provider share
+    # the same cap, and unrelated providers don't block each other.
+    sem_cache: dict[str, asyncio.Semaphore] = {}
+    sem = _semaphore_for_ref(ref, sem_cache)
+
+    async def _one_worker(n: int, task: WorkerTask) -> dict:
         with tracer.start_as_current_span(
             f"ls.orchestrator.worker.{n}"
         ) as w_span:
@@ -234,33 +289,29 @@ async def _dispatch_workers_path_b(
             artifact_id = ""
             summary = ""
             try:
-                # Depth guard — inject via ctx. If already set to >= 1,
-                # raise before the turn.
-                sub_ctx = dict(ctx or {})
-                depth = int(sub_ctx.get("_orchestrator_depth", 0) or 0)
-                if depth >= 1:
-                    raise NestedSubagentError(
-                        f"Worker {task.role!r} at depth {depth} cannot spawn "
-                        "another worker — one-level-only enforced (P1)."
+                # Acquire the semaphore (cloud only) before the turn so we
+                # respect the per-provider cap. Ollama path has sem=None
+                # and proceeds immediately.
+                if sem is not None:
+                    async with sem:
+                        turn = await runner.run_turn(
+                            task.prompt,
+                            tools=worker_agent.get("tools"),
+                            model_ref=ref,
+                            system=worker_system,
+                            ctx=dict(sub_ctx_template),
+                        )
+                else:
+                    turn = await runner.run_turn(
+                        task.prompt,
+                        tools=worker_agent.get("tools"),
+                        model_ref=ref,
+                        system=worker_system,
+                        ctx=dict(sub_ctx_template),
                     )
-                sub_ctx["_orchestrator_depth"] = depth + 1
-
-                # Choose model ref: forced on mini-override, else worker's
-                # own ref, else the lead's ref as fallback.
-                ref = forced_worker_ref or worker_agent.get("model_ref") or lead_ref
-
-                turn = await runner.run_turn(
-                    task.prompt,
-                    tools=worker_agent.get("tools"),
-                    model_ref=ref,
-                    system=worker_system,
-                    ctx=sub_ctx,
-                )
                 body = turn.get("content", "") or ""
 
-                # Artifact: store the worker output. Path basename is
-                # just the span-friendly id; we don't write a real file,
-                # the artifact index tracks the metadata.
+                # Artifact: store the worker output.
                 art = register_artifact(
                     path=f".localsmartz/workers/{thread_id or 'ad-hoc'}/worker-{n}-{task.role}.md",
                     format="markdown",
@@ -283,15 +334,20 @@ async def _dispatch_workers_path_b(
                 w_span.set_attribute("ls.worker.duration_ms", duration_ms)
                 w_span.set_attribute("ls.worker.status", status)
 
-            worker_outputs.append({
+            return {
                 "role": task.role,
                 "artifact_id": artifact_id,
                 "summary": summary,
                 "duration_ms": duration_ms,
                 "status": status,
-            })
+            }
 
-    return worker_outputs
+    # Fan out via gather. NestedSubagentError still propagates because
+    # gather without return_exceptions=True re-raises the first exception.
+    coroutines = [_one_worker(n, task) for n, task in enumerate(tasks, start=1)]
+    results = await asyncio.gather(*coroutines)
+    # gather preserves argument order, so results align with tasks 1..N.
+    return list(results)
 
 
 async def run(
