@@ -602,3 +602,80 @@ def get_model(profile: dict, role: str) -> str | None:
         return profile.get("fast_model") or profile.get("planning_model")
     else:
         raise ValueError(f"Unknown role: {role}. Expected 'planning', 'execution', or 'fast'")
+
+
+
+# ---------------------------------------------------------------------------
+# Tier-aware task routing (feat: c7)
+#
+# Maps each AGENT_ROLES role to a tier (cheap/mid/strong), then maps that
+# tier per cloud provider to a concrete model name. Default cloud-fallback
+# table aligns with cost.RATES; override at the call site by passing an
+# explicit model_ref.
+#
+# This is the cloud-fallback path. Local Ollama uses PROFILES.agents[<role>].model
+# directly — tiers are a cloud abstraction.
+# ---------------------------------------------------------------------------
+
+# Per-role tier assignments. Synonyms from the user brief are mapped to the
+# project's actual role names:
+#   fast_path  → researcher  (cheap; quick fact-fetch role)
+#   classifier → analyzer    (cheap; computational/discriminative role)
+#   synthesizer → writer     (strong; final output, reasoning-heavy)
+TIER_BY_ROLE: dict[str, str] = {
+    "planner": "mid",
+    "researcher": "cheap",
+    "analyzer": "cheap",
+    "writer": "strong",
+    "fact_checker": "mid",
+    "orchestrator": "mid",
+}
+
+DEFAULT_TIER = "mid"
+
+
+# Provider × tier → model name. Models match keys in cost.RATES so cost
+# estimation stays coherent.
+CLOUD_TIER_TABLE: dict[str, dict[str, str]] = {
+    "anthropic": {
+        "cheap": "claude-haiku-4",
+        "mid": "claude-sonnet-4-6",
+        "strong": "claude-opus-4-7",
+    },
+    "openai": {
+        "cheap": "gpt-4o-mini",
+        "mid": "gpt-4o-mini",
+        "strong": "gpt-4o",
+    },
+    # Groq currently exposes a single high-throughput inference model in our
+    # cost table. The user's preferred cloud fallback per the plan: all tiers
+    # land on llama-3.3-70b-versatile until additional Groq models are added
+    # to cost.RATES.
+    "groq": {
+        "cheap": "llama-3.3-70b-versatile",
+        "mid": "llama-3.3-70b-versatile",
+        "strong": "llama-3.3-70b-versatile",
+    },
+}
+
+
+def tier_for_role(role: str) -> str:
+    """Return the tier for a role, defaulting to 'mid' for unknown roles."""
+    return TIER_BY_ROLE.get(role, DEFAULT_TIER)
+
+
+def resolve_model_for_role(role: str, provider: str) -> str:
+    """Return the concrete model name for ``(role, provider)``.
+
+    Raises ValueError when ``provider`` is not in CLOUD_TIER_TABLE — the
+    caller must handle. Unknown ``role`` falls back to the default tier
+    silently (mid is the safe middle).
+    """
+    tier_table = CLOUD_TIER_TABLE.get(provider)
+    if tier_table is None:
+        raise ValueError(
+            f"resolve_model_for_role: unknown cloud provider {provider!r}. "
+            f"Known: {sorted(CLOUD_TIER_TABLE.keys())}"
+        )
+    tier = tier_for_role(role)
+    return tier_table[tier]
