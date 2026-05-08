@@ -10,9 +10,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import statistics
+import sys
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Iterable
 
 from localsmartz.runners import AgentRunner, get_runner
@@ -293,6 +296,211 @@ def _parse_models(raw: str | None, *, limit: int) -> list[str]:
     return default_local_eval_models(limit=limit)
 
 
+# ---------------------------------------------------------------------------
+# Multi-provider parity scorecard
+# ---------------------------------------------------------------------------
+
+# Default model picks per cloud provider when --multi-provider is run without
+# explicit --cloud-models. Single small representative model each — keeps the
+# scorecard cheap. Override via --cloud-models 'anthropic:claude-haiku-4,...'.
+DEFAULT_CLOUD_MODELS: dict[str, list[str]] = {
+    "anthropic": ["claude-haiku-4"],
+    "openai": ["gpt-4o-mini"],
+    "groq": ["llama-3.3-70b-versatile"],
+}
+
+
+def _provider_has_key(provider: str) -> bool:
+    """Best-effort check: does the provider have a usable API key?
+
+    Looks at the project's secrets module first, falls back to env. NEVER
+    raises — missing key is a normal "skip" path, not an error.
+    """
+    if provider == "ollama":
+        return True  # daemon liveness checked separately at run time
+    env_var = {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "groq": "GROQ_API_KEY",
+    }.get(provider)
+    if env_var and os.environ.get(env_var):
+        return True
+    try:
+        from localsmartz import secrets as _secrets
+
+        val = _secrets.get(f"{provider}_api_key")
+        return bool(isinstance(val, str) and val.strip())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _parse_cloud_models(raw: str | None) -> dict[str, list[str]]:
+    """Parse ``--cloud-models 'anthropic:claude-haiku-4,groq:llama-3.3-70b-versatile'``.
+
+    Empty/None → DEFAULT_CLOUD_MODELS.
+    """
+    if not raw:
+        return {p: list(m) for p, m in DEFAULT_CLOUD_MODELS.items()}
+    out: dict[str, list[str]] = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        prov, model = part.split(":", 1)
+        out.setdefault(prov.strip(), []).append(model.strip())
+    return out
+
+
+def run_multi_provider(
+    *,
+    ollama_models: Iterable[str],
+    cloud_models: dict[str, list[str]],
+    tasks: Iterable[ModelEvalTask] = MODEL_EVAL_TASKS,
+    system: str | None = "Answer exactly as requested. Be concise.",
+    on_skip: Any = None,  # callable(provider, reason) -> None
+) -> list[ModelEvalResult]:
+    """Run the eval matrix across Ollama + each cloud provider that has a key.
+
+    Cloud providers without API keys are skipped silently (one ``on_skip``
+    callback per skipped provider). Ollama daemon unreachable is also skipped
+    but reported the same way — never raises a hard error.
+    """
+    materialized_tasks = list(tasks)
+    results: list[ModelEvalResult] = []
+
+    # Ollama
+    ollama_list = list(ollama_models)
+    if ollama_list:
+        try:
+            results.extend(
+                run_model_matrix(
+                    provider="ollama",
+                    models=ollama_list,
+                    tasks=materialized_tasks,
+                    system=system,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            if on_skip:
+                on_skip("ollama", f"daemon unreachable: {exc}")
+
+    # Cloud providers
+    for provider in ("anthropic", "openai", "groq"):
+        models = cloud_models.get(provider, [])
+        if not models:
+            continue
+        if not _provider_has_key(provider):
+            if on_skip:
+                on_skip(provider, "no API key (env or secrets)")
+            continue
+        try:
+            results.extend(
+                run_model_matrix(
+                    provider=provider,
+                    models=models,
+                    tasks=materialized_tasks,
+                    system=system,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            if on_skip:
+                on_skip(provider, f"runtime error: {exc}")
+
+    return results
+
+
+def write_scorecard_tsv(results: list[ModelEvalResult], path: Path) -> None:
+    """Write a flat TSV (one row per task-result) to ``path``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = ["provider\tmodel\ttask\tok\tlatency_ms\tweight\tcategory\terror"]
+    for r in results:
+        for tr in r.results:
+            err = (tr.error or "").replace("\t", " ").replace("\n", " ")
+            rows.append(
+                f"{tr.provider}\t{tr.model}\t{tr.task}\t{int(tr.ok)}\t"
+                f"{tr.latency_ms}\t{tr.weight}\t{tr.category}\t{err}"
+            )
+    path.write_text("\n".join(rows) + "\n")
+
+
+def write_scorecard_md(results: list[ModelEvalResult], path: Path, *, skips: list[tuple[str, str]] | None = None) -> None:
+    """Write a human-readable markdown scorecard, one table per provider."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["# Multi-Provider Parity Scorecard", ""]
+    if skips:
+        lines.append("## Skipped Providers")
+        lines.append("")
+        for prov, reason in skips:
+            lines.append(f"- **{prov}** — {reason}")
+        lines.append("")
+    by_provider: dict[str, list[ModelEvalResult]] = {}
+    for r in results:
+        by_provider.setdefault(r.provider, []).append(r)
+    for provider, rs in sorted(by_provider.items()):
+        lines.append(f"## {provider}")
+        lines.append("")
+        lines.append("| model | pass | fail | weighted_score | median_latency_ms |")
+        lines.append("|---|---|---|---|---|")
+        for r in rs:
+            ml = r.median_latency_ms
+            ml_text = f"{ml:.0f}" if isinstance(ml, float) else "n/a"
+            lines.append(
+                f"| {r.model} | {r.pass_count} | {r.fail_count} | "
+                f"{r.weighted_score:.3f} | {ml_text} |"
+            )
+        lines.append("")
+    if not by_provider:
+        lines.append("_No providers produced results — all skipped or unreachable._")
+        lines.append("")
+    path.write_text("\n".join(lines))
+
+
+def main_multi_provider(args: argparse.Namespace) -> int:
+    """Entry point for ``--multi-provider`` mode. Always exit 0 on graceful skip."""
+    cloud_models = _parse_cloud_models(args.cloud_models)
+    ollama_models = _parse_models(args.models, limit=max(1, args.limit_models))
+    tasks = list(MODEL_EVAL_TASKS)
+    if args.limit_tasks is not None:
+        tasks = tasks[: max(1, args.limit_tasks)]
+
+    skips: list[tuple[str, str]] = []
+
+    def on_skip(provider: str, reason: str) -> None:
+        skips.append((provider, reason))
+        print(f"[skip] {provider}: {reason}", file=sys.stderr)
+
+    results = run_multi_provider(
+        ollama_models=ollama_models,
+        cloud_models=cloud_models,
+        tasks=tasks,
+        on_skip=on_skip,
+    )
+
+    out_dir = Path(args.out_dir) if args.out_dir else Path(".build-loop/evals")
+    stamp = args.stamp or time.strftime("%Y-%m-%d", time.gmtime())
+    tsv_path = out_dir / f"{stamp}-multi-provider-parity.tsv"
+    md_path = out_dir / f"{stamp}-multi-provider-parity.md"
+    write_scorecard_tsv(results, tsv_path)
+    write_scorecard_md(results, md_path, skips=skips)
+
+    payload = {
+        "stamp": stamp,
+        "tsv": str(tsv_path),
+        "md": str(md_path),
+        "providers_run": sorted({r.provider for r in results}),
+        "providers_skipped": [{"provider": p, "reason": r} for p, r in skips],
+        "matrix": matrix_to_dict(results),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Wrote {tsv_path}")
+        print(f"Wrote {md_path}")
+        if skips:
+            print(f"Skipped: {[p for p, _ in skips]}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="localsmartz-model-eval",
@@ -313,7 +521,29 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="Print full JSON results.")
     parser.add_argument("--score-only", action="store_true", help="Print best weighted score.")
+    parser.add_argument(
+        "--multi-provider",
+        action="store_true",
+        help=(
+            "Run the eval matrix across Ollama + each cloud provider with a key. "
+            "Cloud providers without keys are skipped with one stderr line each."
+        ),
+    )
+    parser.add_argument(
+        "--cloud-models",
+        default=None,
+        help=(
+            "Comma-separated 'provider:model' pairs for --multi-provider, e.g. "
+            "'anthropic:claude-haiku-4,groq:llama-3.3-70b-versatile'. Defaults to "
+            "one small model per cloud provider."
+        ),
+    )
+    parser.add_argument("--out-dir", default=None, help="Scorecard output dir (default .build-loop/evals)")
+    parser.add_argument("--stamp", default=None, help="Date stamp for output filenames (default UTC today)")
     args = parser.parse_args(argv)
+
+    if args.multi_provider:
+        return main_multi_provider(args)
 
     models = _parse_models(args.models, limit=max(1, args.limit_models))
     tasks = list(MODEL_EVAL_TASKS)
