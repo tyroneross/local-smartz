@@ -2052,6 +2052,243 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                 from localsmartz.plugins.agent_integration import close_mcp_clients
                 close_mcp_clients(mcp_clients)
 
+    def _run_pattern_cloud(
+        self,
+        *,
+        prompt: str,
+        profile_name: str | None,
+        thread_id: str | None,
+        cwd_override: str | None,
+        provider: str,
+        pattern: str | None,
+    ) -> None:
+        """Cloud-runner SSE bridge (commit B, 2026-05-08).
+
+        Closes the gap between the patterns-layer streaming primitive
+        (``patterns/single.stream_turn``) and the SSE consumer surface.
+        Before this, ``provider != "ollama"`` requests fell through to the
+        Ollama-bound fast/graph/full paths and the user saw "Thinking…"
+        until the full reply landed.
+
+        Owns:
+          - heartbeat pulse + OTel span
+          - PatternEvent → SSE translation
+          - thread bookkeeping (``append_entry`` on success)
+
+        Skips Ollama preflight entirely — cloud calls don't need it.
+
+        SSE translation (PatternEvent → SSE event):
+          - ``text_delta`` → ``{type: "text", content: delta}`` (matches
+            the existing SSE consumer schema in the macOS app + HTML UI;
+            no new client work needed).
+          - ``turn`` → ``{type: "text", content}`` ONLY when streaming
+            didn't already ship the body (i.e. fallback path on a runner
+            that has no ``stream_turn``). When ``text_delta`` events
+            already shipped the assembled body, the turn event is dropped
+            to avoid double-emission.
+          - ``budget_warn``, ``pattern_start``, ``done``, ``iteration``,
+            ``tool``, ``score``, ``phase_start``, ``phase_end`` —
+            passed through verbatim. The UI uses ``done`` to stop the
+            spinner.
+        """
+        import asyncio
+        import importlib
+
+        from localsmartz.observability import get_tracer
+        from localsmartz.profiles import (
+            CLOUD_TIER_TABLE,
+            get_profile,
+            resolve_model_for_role,
+        )
+        from localsmartz.runners import get_runner
+        from localsmartz.threads import append_entry
+
+        # Resolve cwd override (per-project research) the same way the
+        # ollama path does — a test_serve doesn't have to fake this.
+        cwd = Path.cwd()
+        if cwd_override:
+            override_path = Path(cwd_override).expanduser()
+            if override_path.is_dir():
+                cwd = override_path
+
+        # Ensure storage dirs exist (mirror _stream_research / _run_full_agent).
+        storage = cwd / ".localsmartz"
+        for subdir in ["threads", "artifacts", "memory", "scripts", "reports"]:
+            (storage / subdir).mkdir(parents=True, exist_ok=True)
+
+        # Resolve the cloud model + profile.
+        if provider not in CLOUD_TIER_TABLE:
+            self._send_event({
+                "type": "error",
+                "message": (
+                    f"Cloud provider {provider!r} not in CLOUD_TIER_TABLE. "
+                    f"Known: {sorted(CLOUD_TIER_TABLE.keys())}"
+                ),
+            })
+            return
+        try:
+            model_name = resolve_model_for_role("planner", provider)
+        except ValueError as exc:
+            self._send_event({"type": "error", "message": str(exc)})
+            return
+
+        profile = get_profile(profile_name) or {}
+        # Carry the runner's provider through the profile so BudgetTracker
+        # can read it via profile.get("provider").
+        profile = {**profile, "provider": provider}
+
+        # Resolve runner (fail-loud on missing SDK so the user sees what's
+        # wrong instead of a cryptic 500).
+        try:
+            runner = get_runner(provider)
+        except (ImportError, ValueError) as exc:
+            self._send_event({"type": "error", "message": str(exc)})
+            return
+
+        # Resolve pattern. Default to "single" so the simplest cloud call
+        # gets streaming with no extra ceremony. The patterns module is
+        # imported by name so a typo surfaces a friendly error instead of
+        # an AttributeError stack.
+        pattern_name = (pattern or "single").strip().lower()
+        try:
+            pattern_mod = importlib.import_module(f"localsmartz.patterns.{pattern_name}")
+        except ImportError:
+            self._send_event({
+                "type": "error",
+                "message": (
+                    f"Unknown pattern {pattern_name!r}. Known patterns are "
+                    "single, chain, router, critic_loop, orchestrator, "
+                    "parallel, reflection."
+                ),
+            })
+            return
+        if not hasattr(pattern_mod, "run"):
+            self._send_event({
+                "type": "error",
+                "message": f"pattern {pattern_name!r} missing run() entrypoint",
+            })
+            return
+
+        # Build the agent slot dict the patterns expect. ``primary`` is the
+        # universal slot; chain/router/orchestrator look up additional
+        # slots and fall back to primary when absent.
+        agents: dict = {
+            "primary": {
+                "model_ref": {"provider": provider, "name": model_name},
+                "system_focus": "",
+            }
+        }
+
+        # Heartbeat + OTel span — same shape as _run_full_agent.
+        start_time = time.time()
+        pulse = _HeartbeatPulse(self._send_event, interval_s=15.0)
+        pulse.start()
+        tracer = get_tracer("local-smartz.research")
+        span_cm = tracer.start_as_current_span("research.pattern_cloud")
+        span = span_cm.__enter__()
+        span.set_attribute("routing.path", "pattern_cloud")
+        span.set_attribute("model.name", model_name)
+        span.set_attribute("provider.name", provider)
+        span.set_attribute("pattern.name", pattern_name)
+        span.set_attribute("profile.name", profile.get("name", "unknown"))
+
+        # Track whether streaming text_delta already shipped the body so we
+        # can drop the redundant turn event in that case.
+        streamed_body_by_role: dict[str, bool] = {}
+        assembled_body = ""
+        client_disconnected = False
+
+        async def _drive() -> None:
+            nonlocal assembled_body
+            ctx = {"thread_id": thread_id, "cwd": str(cwd)}
+            async for ev in pattern_mod.run(
+                prompt,
+                agents=agents,
+                profile=profile,
+                stream=True,
+                runner=runner,
+                ctx=ctx,
+            ):
+                etype = ev.get("type")
+                if etype == "text_delta":
+                    role = ev.get("role", "primary")
+                    streamed_body_by_role[role] = True
+                    delta = ev.get("delta", "")
+                    if isinstance(delta, str) and delta:
+                        if role == "primary":
+                            assembled_body += delta
+                        # Match the SSE consumer schema — same shape the
+                        # ollama paths use. Token-level streaming arrives
+                        # as type=text content=delta.
+                        self._send_event({"type": "text", "content": delta})
+                    pulse.touch()
+                    continue
+                if etype == "turn":
+                    role = ev.get("role", "primary")
+                    content = ev.get("content", "") or ""
+                    # Drop redundant turn events — text_delta already shipped the body.
+                    if streamed_body_by_role.get(role):
+                        pulse.touch()
+                        continue
+                    if isinstance(content, str) and content:
+                        if role == "primary" or role == "final":
+                            assembled_body += content
+                        self._send_event({"type": "text", "content": content})
+                    pulse.touch()
+                    continue
+                if etype == "done":
+                    # Swallow — we emit a wrapper done with duration_ms below.
+                    # Pattern's thread_id may be empty; ours has the request's.
+                    pulse.touch()
+                    continue
+                # All other PatternEvent types: pass through verbatim. The
+                # SSE consumer is forgiving of unknown event types.
+                self._send_event(dict(ev))
+                pulse.touch()
+
+        try:
+            asyncio.run(_drive())
+        except (BrokenPipeError, ConnectionResetError):
+            client_disconnected = True
+        except Exception as exc:  # noqa: BLE001
+            # Surface the failure to the SSE consumer rather than letting
+            # the request handler emit a generic 500.
+            tb = traceback.format_exc()
+            try:
+                self._send_event({"type": "error", "message": f"{exc}\n\n{tb}"})
+            except Exception:
+                pass
+        finally:
+            pulse.stop()
+            span_cm.__exit__(None, None, None)
+
+        if client_disconnected:
+            return
+
+        # Thread bookkeeping — mirror _run_full_agent. Best-effort.
+        if thread_id:
+            try:
+                append_entry(
+                    thread_id=thread_id,
+                    cwd=str(cwd),
+                    query=prompt,
+                    summary=assembled_body[:500],
+                    artifacts=[],
+                    turns=1,
+                )
+            except Exception:
+                pass
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        try:
+            self._send_event({
+                "type": "done",
+                "duration_ms": duration_ms,
+                "thread_id": thread_id or "",
+            })
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def _stream_research(
         self,
         prompt: str,
@@ -2065,7 +2302,9 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
     ):
         """Run research agent and emit SSE events.
 
-        Orchestrates four phases:
+        Orchestrates the dispatch:
+        0. ``_run_pattern_cloud`` — cloud providers (anthropic/openai/groq)
+           bypass Ollama preflight and stream via the patterns layer.
         1. ``_preflight_model`` — Ollama + model availability + warmup.
         2. ``_run_fast_path`` — trivial prompts, direct ChatOllama stream.
         3. ``_run_graph_pipeline`` — deterministic LangGraph (DEFAULT).
@@ -2074,6 +2313,24 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         """
         from localsmartz.routing import select_research_runtime
         from localsmartz.threads import create_thread
+
+        # ── Cloud path branch (commit B, 2026-05-08) ──────────────────────
+        # When the request explicitly names a non-ollama provider, skip the
+        # Ollama preflight entirely (cloud calls don't require ollama serve)
+        # and dispatch through the patterns layer so SSE consumers see
+        # text_delta events for cloud runs. The legacy fast/graph/full paths
+        # remain Ollama-only — `provider in (None, "ollama")` keeps them.
+        provider_norm = (provider or "").strip().lower() if isinstance(provider, str) else ""
+        if provider_norm and provider_norm != "ollama":
+            self._run_pattern_cloud(
+                prompt=prompt,
+                profile_name=profile_name,
+                thread_id=thread_id,
+                cwd_override=cwd_override,
+                provider=provider_norm,
+                pattern=pattern,
+            )
+            return
 
         model_override = LocalSmartzHandler._model_override or _saved_model_override(Path.cwd())
 
