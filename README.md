@@ -205,8 +205,9 @@ A native SwiftUI desktop app is available in `app/`. It wraps the web API with a
 ```bash
 cd app
 xcodegen generate        # Generate Xcode project from project.yml
-xcodebuild -scheme LocalSmartz build
-open ~/Library/Developer/Xcode/DerivedData/LocalSmartz-*/Build/Products/Debug/Local\ Smartz.app
+xcodebuild -scheme LocalSmartz -configuration Debug clean build
+APP_PATH="$(find "$HOME/Library/Developer/Xcode/DerivedData" -path '*/Build/Products/Debug/Local Smartz.app' -type d -print0 | xargs -0 stat -f '%m %N' | sort -rn | head -1 | cut -d' ' -f2-)"
+open "$APP_PATH"
 ```
 
 Or install via the pre-built DMG in `app/LocalSmartz-Installer.dmg`.

@@ -52,8 +52,12 @@ These shipped in code + clean rebuild + relaunch, but the IBR scan caught the Se
 
 **Verify command sequence:**
 ```
-pkill -9 -f "Local Smartz"
-open "/Users/tyroneross/Library/Developer/Xcode/DerivedData/LocalSmartz-adskgbdiipgunggnzfecqpkzjefl/Build/Products/Debug/Local Smartz.app"
+cd app
+xcodegen generate
+xcodebuild -scheme LocalSmartz -configuration Debug clean build
+APP_PATH="$(find "$HOME/Library/Developer/Xcode/DerivedData" -path '*/Build/Products/Debug/Local Smartz.app' -type d -print0 | xargs -0 stat -f '%m %N' | sort -rn | head -1 | cut -d' ' -f2-)"
+osascript -e 'tell application "Local Smartz" to quit' >/dev/null 2>&1 || true
+open "$APP_PATH"
 # wait ~5s, click Get Started, send "what time is it", then send a follow-up
 curl -sS http://localhost:11435/api/status | python3 -m json.tool
 ```
@@ -65,6 +69,7 @@ Expected: `effective_model: "gpt-oss:20b"`, toolbar shows that name, fast-path m
 
 - **xcodebuild incremental returns false-success.** Always `xcodebuild -scheme LocalSmartz -configuration Debug clean` before build. Verified twice this session — the binary timestamp is the proof.
 - **Repo `app/build/` is gone (intentional).** Build outputs live in `~/Library/Developer/Xcode/DerivedData/LocalSmartz-adskgbdiipgunggnzfecqpkzjefl/Build/Products/Debug/Local Smartz.app`.
+- **Do not force duplicate app launches.** Use `open "$APP_PATH"` after quitting the existing app, not `open -n`. The app Info.plist now prohibits multiple instances so LaunchServices rejects accidental duplicates before AppKit registration.
 - **macOS app spawn order:** bundled python (only in DMG) → `~/.local/bin/localsmartz` shim → user pythonPath → uv-tool venv. The shim is the active path in dev.
 - **SourceKit ghost errors** (`Cannot find type 'AppState'…`) are **indexer-only false positives**, not real build errors. They appear after Swift edits and clear after `xcodegen generate` re-runs. Don't try to "fix" them.
 - **gpt-oss family emits OpenAI Harmony format.** Tool names arrive wrapped as `assistant<|channel|>commentary<|message|>functions=NAME(args)`. The harmony parser at `src/localsmartz/runners/harmony.py` strips wrappers before tool-name validation in `serve.py:_is_valid_tool_name`. Don't add `.with_retry()` calls before `create_deep_agent` (DeepAgents constraint — see `feedback_subagent_default.md` and `reference_deepagents_runnable_retry.md`).

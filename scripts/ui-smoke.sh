@@ -12,7 +12,24 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-APP_PATH="/Users/tyroneross/Library/Developer/Xcode/DerivedData/LocalSmartz-cdfckkqgqzkywtcirxnxyulzemth/Build/Products/Debug/Local Smartz.app"
+resolve_app_path() {
+    find "$HOME/Library/Developer/Xcode/DerivedData" \
+        -path "*/Build/Products/Debug/Local Smartz.app" \
+        -type d \
+        -print 2>/dev/null |
+    while IFS= read -r path; do
+        printf "%s\t%s\n" "$(stat -f "%m" "$path")" "$path"
+    done |
+    sort -rn |
+    head -1 |
+    cut -f2-
+}
+
+APP_PATH="${LOCALSMARTZ_APP_PATH:-$(resolve_app_path)}"
+if [ -z "$APP_PATH" ]; then
+    echo "FAIL: Debug app not found. Run: cd app && xcodebuild -scheme LocalSmartz -configuration Debug clean build"
+    exit 1
+fi
 TS="$(date +%Y%m%d-%H%M%S)"
 OUT=".ibr/scans/smoke-$TS"
 mkdir -p "$OUT"
@@ -53,12 +70,23 @@ sys.exit(1)
 PY
 }
 
-# -- Kill any running instance; launch backgrounded --
+# -- Quit any running instance; launch backgrounded through LaunchServices. --
+# Avoid `open -n`: forcing duplicate app instances can race AppKit/LaunchServices
+# registration for Debug builds with the same bundle identifier.
 osascript -e 'tell application "Local Smartz" to quit' >/dev/null 2>&1
-sleep 2
-open -g -n "$APP_PATH"
-sleep 5
-PID=$(pgrep -f "$APP_PATH/Contents/MacOS/Local Smartz" | head -1)
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if ! pgrep -f "/Contents/MacOS/Local Smartz" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.5
+done
+open -g "$APP_PATH"
+PID=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    PID=$(pgrep -f "$APP_PATH/Contents/MacOS/Local Smartz" | head -1)
+    [ -n "$PID" ] && break
+    sleep 0.5
+done
 [ -z "$PID" ] && { echo "FAIL: app did not launch"; exit 1; }
 echo "launched pid=$PID"
 
