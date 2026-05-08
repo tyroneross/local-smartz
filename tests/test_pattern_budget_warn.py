@@ -212,3 +212,184 @@ def test_single_pattern_threshold_none_no_warn(monkeypatch):
     )
     warns = [ev for ev in events if ev.get("type") == "budget_warn"]
     assert warns == []
+
+
+# --- orchestrator pattern integration (commit C, 2026-05-08) -----------------
+#
+# The c8 follow-up (commit c9592bf) wired BudgetTracker into single.py but
+# left orchestrator workers ungauged. Worker-side dispatch in
+# _dispatch_workers_path_b._one_worker now propagates `usage` through the
+# return shape; run() ticks the tracker once per worker AFTER fan-out so
+# the warn fires at most once per session even when multiple workers cross
+# the threshold simultaneously.
+
+
+class _OrchestratorScriptedRunner:
+    """Runner that scripts content + usage per call.
+
+    Lead's first call is the planner (decomposition JSON). Workers and
+    synthesizer follow. Each call records its prompt so the test can
+    assert which-call-fired-which.
+    """
+
+    def __init__(self, scripts: list[tuple[str, dict[str, Any]]]) -> None:
+        # scripts: list of (content, usage) pairs in call order.
+        self.scripts = list(scripts)
+        self.calls = 0
+        self.history: list[dict] = []
+
+    async def run_turn(
+        self,
+        prompt: str,
+        *,
+        tools: Any = None,
+        model_ref: dict,
+        system: str | None = None,
+        ctx: dict | None = None,
+    ) -> dict:
+        if self.calls >= len(self.scripts):
+            raise AssertionError(
+                f"orchestrator scripted runner out of scripts at call {self.calls}; "
+                f"last prompt: {prompt[:80]!r}"
+            )
+        content, usage = self.scripts[self.calls]
+        self.history.append({
+            "prompt": prompt,
+            "model_ref": dict(model_ref),
+            "system": system,
+        })
+        self.calls += 1
+        return {"content": content, "tool_calls": [], "usage": dict(usage)}
+
+
+_DECOMPOSITION_JSON = (
+    '[{"role":"alpha","prompt":"sub-task A"},'
+    '{"role":"beta","prompt":"sub-task B"}]'
+)
+
+
+def test_orchestrator_workers_emit_budget_warn(monkeypatch):
+    """Two workers each push 60 tokens; with threshold=200 the SECOND
+    worker's tick crosses 240 and fires exactly one budget_warn event.
+    """
+    monkeypatch.setattr(
+        "localsmartz.serve._read_budget_threshold", lambda: 200
+    )
+    from localsmartz.patterns import orchestrator
+
+    runner = _OrchestratorScriptedRunner([
+        # Lead planner — 60 tokens. Tracker session=60 (under 200).
+        (_DECOMPOSITION_JSON, {"input_tokens": 30, "output_tokens": 30}),
+        # Worker alpha — 80 tokens. Tracker session=140 (under 200) after
+        # the worker tick.
+        ("alpha output", {"input_tokens": 40, "output_tokens": 40}),
+        # Worker beta — 80 tokens. Tracker session=220 → warn fires here.
+        ("beta output", {"input_tokens": 40, "output_tokens": 40}),
+        # Synthesizer — additional 10 tokens; tracker latched, no re-fire.
+        ("final synthesis", {"input_tokens": 5, "output_tokens": 5}),
+    ])
+    agents = {
+        "orchestrator": {
+            "model_ref": {"provider": "anthropic", "name": "claude-haiku-4"},
+        },
+        "worker": {
+            "model_ref": {"provider": "anthropic", "name": "claude-haiku-4"},
+        },
+    }
+    profile = {"name": "full", "tier": "full", "provider": "anthropic"}
+
+    events = _drain(
+        orchestrator.run(
+            "ten-token prompt",
+            agents=agents,
+            profile=profile,
+            stream=False,
+            runner=runner,
+        )
+    )
+
+    warns = [ev for ev in events if ev.get("type") == "budget_warn"]
+    # Headline assertion: exactly one warn fired.
+    assert len(warns) == 1, f"expected 1 warn, got {len(warns)}: {warns}"
+    # And the warn fired AFTER worker-2's usage pushed past 200.
+    assert warns[0]["session_tokens"] >= 200
+    assert warns[0]["provider"] == "anthropic"
+    assert warns[0]["advisory"] is True
+
+
+def test_orchestrator_workers_ollama_no_warn(monkeypatch):
+    """Cloud-only filter still applies through the worker layer — Ollama
+    workers never fire budget_warn regardless of token volume."""
+    monkeypatch.setattr(
+        "localsmartz.serve._read_budget_threshold", lambda: 1
+    )
+    from localsmartz.patterns import orchestrator
+
+    runner = _OrchestratorScriptedRunner([
+        (_DECOMPOSITION_JSON, {"input_tokens": 10_000, "output_tokens": 10_000}),
+        ("alpha output", {"input_tokens": 10_000, "output_tokens": 10_000}),
+        ("beta output", {"input_tokens": 10_000, "output_tokens": 10_000}),
+        ("final synthesis", {"input_tokens": 10_000, "output_tokens": 10_000}),
+    ])
+    agents = {
+        "orchestrator": {
+            "model_ref": {"provider": "ollama", "name": "qwen3:8b"},
+        },
+        "worker": {
+            "model_ref": {"provider": "ollama", "name": "qwen3:8b"},
+        },
+    }
+    profile = {"name": "full", "tier": "full", "provider": "ollama"}
+
+    events = _drain(
+        orchestrator.run(
+            "p",
+            agents=agents,
+            profile=profile,
+            stream=False,
+            runner=runner,
+        )
+    )
+    warns = [ev for ev in events if ev.get("type") == "budget_warn"]
+    assert warns == []
+
+
+def test_orchestrator_warn_fires_once_across_workers(monkeypatch):
+    """Even when EVERY worker crosses the threshold, the warn is
+    emitted exactly once (BudgetTracker._warned latches after first fire)."""
+    monkeypatch.setattr(
+        "localsmartz.serve._read_budget_threshold", lambda: 50
+    )
+    from localsmartz.patterns import orchestrator
+
+    big_usage = {"input_tokens": 500, "output_tokens": 500}
+    runner = _OrchestratorScriptedRunner([
+        # Planner already exceeds threshold by itself — fires the warn.
+        (_DECOMPOSITION_JSON, big_usage),
+        # Both workers also push past — must not re-fire.
+        ("alpha output", big_usage),
+        ("beta output", big_usage),
+        # Synth — also no re-fire.
+        ("final synthesis", big_usage),
+    ])
+    agents = {
+        "orchestrator": {
+            "model_ref": {"provider": "groq", "name": "llama-3.1-8b-instant"},
+        },
+        "worker": {
+            "model_ref": {"provider": "groq", "name": "llama-3.1-8b-instant"},
+        },
+    }
+    profile = {"name": "full", "tier": "full", "provider": "groq"}
+
+    events = _drain(
+        orchestrator.run(
+            "p",
+            agents=agents,
+            profile=profile,
+            stream=False,
+            runner=runner,
+        )
+    )
+    warns = [ev for ev in events if ev.get("type") == "budget_warn"]
+    assert len(warns) == 1, f"expected exactly 1 warn (latched), got {len(warns)}"

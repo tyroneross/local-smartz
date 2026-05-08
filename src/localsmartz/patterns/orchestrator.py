@@ -288,6 +288,7 @@ async def _dispatch_workers_path_b(
             status = "ok"
             artifact_id = ""
             summary = ""
+            usage: dict = {}
             try:
                 # Acquire the semaphore (cloud only) before the turn so we
                 # respect the per-provider cap. Ollama path has sem=None
@@ -310,6 +311,12 @@ async def _dispatch_workers_path_b(
                         ctx=dict(sub_ctx_template),
                     )
                 body = turn.get("content", "") or ""
+                # Capture usage so the caller can tick the BudgetTracker
+                # once per worker (commit C, 2026-05-08). Empty dict on
+                # absent/null means the BudgetTracker tick is a no-op.
+                turn_usage = turn.get("usage") or {}
+                if isinstance(turn_usage, dict):
+                    usage = dict(turn_usage)
 
                 # Artifact: store the worker output.
                 art = register_artifact(
@@ -340,6 +347,7 @@ async def _dispatch_workers_path_b(
                 "summary": summary,
                 "duration_ms": duration_ms,
                 "status": status,
+                "usage": usage,
             }
 
     # Fan out via gather. NestedSubagentError still propagates because
@@ -526,12 +534,34 @@ async def run(
                 thread_id=thread_id,
             )
 
+        # Resolve the worker provider for budget bookkeeping. Same
+        # precedence the dispatcher uses to pick model_ref.
+        worker_ref_for_budget = (
+            forced_worker_ref
+            or worker_agent.get("model_ref")
+            or lead_ref
+        )
+        worker_provider_for_budget = (worker_ref_for_budget or {}).get(
+            "provider", lead_ref.get("provider", "ollama")
+        )
+
         for n, out in enumerate(worker_outputs, 1):
             yield {
                 "type": "turn",
                 "role": f"worker.{out.get('role', n)}",
                 "content": out.get("summary", ""),
             }
+            # Tick the per-worker usage into the BudgetTracker (commit C,
+            # 2026-05-08). Cloud-only inside the tracker; ollama tokens
+            # increment session_tokens but never fire the warn. The
+            # tracker is idempotent once it has fired, so even if every
+            # worker simultaneously crosses the threshold the user sees
+            # exactly one budget_warn event for the run.
+            warn = budget_tracker.tick(
+                out.get("usage"), worker_provider_for_budget
+            )
+            if warn is not None:
+                yield warn
 
         # ── Step 3: synthesize — summaries only (F7) ────────────────────
         with tracer.start_as_current_span(
@@ -695,6 +725,11 @@ async def _dispatch_workers_path_a(
                 "summary": summary,
                 "duration_ms": duration_ms,
                 "status": "ok",
+                # Path A doesn't expose per-call usage today (DeepAgents
+                # wraps the bookkeeping at the agent level). Empty dict
+                # keeps the worker-output shape stable for the caller's
+                # BudgetTracker tick (which is a no-op on empty dict).
+                "usage": {},
             })
 
     return worker_outputs
