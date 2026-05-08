@@ -102,3 +102,74 @@ def estimate_cost_usd(
 def rate_age_days() -> int:
     """Days since the last rate-table update. Doctor probe warns if > 90."""
     return (date.today() - LAST_UPDATED).days
+
+
+def cost_from_usage(*, model: str, usage: dict, pattern: str = "single") -> dict:
+    """Compute USD cost from a real ``Usage`` dict (preferred path).
+
+    ``usage`` is the dict returned by the cloud runners (see
+    ``runners.base.Usage``). Keys read: ``input_tokens``, ``output_tokens``,
+    plus optional Anthropic cache fields ``cache_creation_input_tokens`` and
+    ``cache_read_input_tokens`` (surfaced verbatim in the envelope; cache-
+    discount math is deferred — see ``.build-loop/issues/cache-discount-math.md``).
+
+    Returns the same envelope shape as ``estimate_cost_usd`` plus a
+    ``source`` field: ``"sdk"`` when ``usage`` carries non-zero token
+    counts, ``"estimate"`` when it doesn't (caller passed an empty dict).
+
+    The deepagents memory note: this function is what every NEW caller
+    should use; ``estimate_cost_usd`` is kept for the no-usage (pre-call)
+    case where we only have a prompt string.
+    """
+    if not usage or not isinstance(usage, dict):
+        # Fall back to estimate. Caller must pass prompt separately for
+        # estimate; without a prompt we return zeros + source=estimate.
+        envelope = estimate_cost_usd(model=model, prompt="", pattern=pattern)
+        envelope["source"] = "estimate"
+        return envelope
+
+    input_tokens = int(usage.get("input_tokens", 0) or 0)
+    output_tokens = int(usage.get("output_tokens", 0) or 0)
+    cache_creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
+    cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+
+    if input_tokens == 0 and output_tokens == 0:
+        envelope = estimate_cost_usd(model=model, prompt="", pattern=pattern)
+        envelope["source"] = "estimate"
+        return envelope
+
+    rate = RATES.get(model)
+    if rate is None:
+        return {
+            "model": model,
+            "pattern": pattern,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": cache_creation,
+            "cache_read_input_tokens": cache_read,
+            "estimated_usd": 0.0,
+            "rate_known": False,
+            "source": "sdk",
+            "last_updated": LAST_UPDATED.isoformat(),
+        }
+
+    # NOTE: Cache discount math is deferred. Anthropic charges cache reads
+    # at ~10% of the input rate and cache writes at ~125%, but we surface
+    # the raw counts here and let downstream UI / billing apply the math.
+    # See .build-loop/issues/cache-discount-math.md.
+    cost = (
+        input_tokens * rate["input_per_1m"] / 1_000_000
+        + output_tokens * rate["output_per_1m"] / 1_000_000
+    )
+    return {
+        "model": model,
+        "pattern": pattern,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_creation_input_tokens": cache_creation,
+        "cache_read_input_tokens": cache_read,
+        "estimated_usd": round(cost, 4),
+        "rate_known": True,
+        "source": "sdk",
+        "last_updated": LAST_UPDATED.isoformat(),
+    }
