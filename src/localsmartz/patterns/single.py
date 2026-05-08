@@ -23,7 +23,19 @@ async def run(
     runner: AgentRunner,
     ctx: dict[str, Any] | None = None,
 ) -> AsyncIterator[PatternEvent]:
-    """Yield ``pattern_start``, one ``turn``, one ``done``."""
+    """Yield ``pattern_start``, one ``turn``, one ``done``.
+
+    When ``runner`` exposes ``stream_turn`` AND ``stream=True``, yields
+    one ``text_delta`` PatternEvent per token chunk before the final
+    ``turn`` event. This bridges the c6 cloud-runner streaming primitive
+    (cloud_anthropic.stream_turn / cloud_openai_compat.stream_turn) into
+    the pattern event stream, matching the local-Ollama UX.
+
+    Falls back to ``run_turn`` (whole-turn flush) when:
+    - ``stream`` is False, OR
+    - the runner doesn't expose ``stream_turn`` (e.g. local_ollama,
+      harmony — these don't ship a streaming surface yet).
+    """
     thread_id = (ctx or {}).get("thread_id")
     budget = BudgetTracker()
     span_cm, attrs = make_root_span("single", profile, thread_id)
@@ -37,13 +49,53 @@ async def run(
         model_ref = primary.get("model_ref") or {"provider": "ollama", "name": profile.get("planning_model", "")}
         system = primary.get("system_focus", "")
 
-        turn = await runner.run_turn(
-            prompt,
-            tools=primary.get("tools"),
-            model_ref=model_ref,
-            system=system,
-            ctx=ctx,
-        )
+        # Prefer streaming when available + requested. Falls back to run_turn
+        # for runners that don't ship stream_turn (local_ollama, harmony) or
+        # when the caller has disabled streaming explicitly.
+        use_streaming = stream and hasattr(runner, "stream_turn")
+
+        if use_streaming:
+            assembled_content = ""
+            final_turn: dict = {}
+            async for chunk in runner.stream_turn(  # type: ignore[attr-defined]
+                prompt,
+                tools=primary.get("tools"),
+                model_ref=model_ref,
+                system=system,
+                ctx=ctx,
+            ):
+                if chunk.get("done"):
+                    final_turn = chunk.get("final") or {}
+                    if chunk.get("error"):
+                        # Surface the error as a turn payload so the caller
+                        # gets a deterministic terminal event.
+                        final_turn = {
+                            "content": f"[error] {chunk.get('error')}",
+                            "tool_calls": [],
+                            "usage": {},
+                        }
+                    break
+                delta = chunk.get("delta", "")
+                if delta:
+                    assembled_content += delta
+                    yield {
+                        "type": "text_delta",
+                        "role": "primary",
+                        "delta": delta,
+                    }
+            turn = final_turn or {
+                "content": assembled_content,
+                "tool_calls": [],
+                "usage": {},
+            }
+        else:
+            turn = await runner.run_turn(
+                prompt,
+                tools=primary.get("tools"),
+                model_ref=model_ref,
+                system=system,
+                ctx=ctx,
+            )
 
         yield {
             "type": "turn",
