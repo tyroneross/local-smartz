@@ -1,0 +1,6 @@
+{
+  "_comment": "Example config — copy to .localsmartz/config.json and edit. Keys are optional.",
+  "provider": "ollama",
+  "budget_tokens_warn": null,
+  "_budget_tokens_warn_doc": "When set to a positive integer, the server emits an SSE 'budget_warn' event once a cloud session crosses this token total. Advisory only — never aborts. Ollama runs are exempt regardless of threshold. null disables the warning."
+}

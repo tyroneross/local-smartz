@@ -32,6 +32,73 @@ def _json_bytes(data: dict, status: int = 200) -> tuple[bytes, int]:
     return json.dumps(data).encode("utf-8"), status
 
 
+# ---------------------------------------------------------------------------
+# Cloud-only token budget warn (feat: c8)
+#
+# Advisory only — emits an SSE event when a session crosses the configured
+# threshold; never aborts the run. Disabled by default
+# (config.budget_tokens_warn=null). Ollama paths are exempt regardless of
+# threshold (cloud-only). Read the threshold from .localsmartz/config.json
+# at request time — no in-memory cache.
+# ---------------------------------------------------------------------------
+
+
+def _emit_budget_warn(
+    *,
+    session_tokens: int,
+    threshold: int | None,
+    provider: str,
+) -> dict | None:
+    """Return an SSE event dict if the budget warn should fire, else None.
+
+    Pure function — caller is responsible for actually writing the event
+    to the response stream and for tracking ``session_tokens`` across turns.
+
+    Args:
+        session_tokens: total tokens consumed in this session so far
+        threshold: configured ceiling (``None`` = disabled)
+        provider: which provider just produced tokens; ollama is exempt
+
+    Returns:
+        ``{"type": "budget_warn", "session_tokens": N, "threshold": M,
+            "advisory": True, "provider": str}`` when threshold crossed,
+        else ``None``.
+    """
+    if threshold is None:
+        return None
+    if session_tokens < threshold:
+        return None
+    if provider == "ollama":
+        # Cloud-only filter: local runs are free at the wallet level.
+        return None
+    return {
+        "type": "budget_warn",
+        "session_tokens": int(session_tokens),
+        "threshold": int(threshold),
+        "advisory": True,
+        "provider": provider,
+    }
+
+
+def _read_budget_threshold(config_path: Path | str = ".localsmartz/config.json") -> int | None:
+    """Read ``budget_tokens_warn`` from the config file. None when missing/disabled."""
+    try:
+        path = Path(config_path)
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    val = data.get("budget_tokens_warn")
+    if val is None:
+        return None
+    try:
+        n = int(val)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
 def _iso_timestamp(value) -> str:
     """Convert a Unix timestamp to an ISO 8601 UTC string."""
     try:
