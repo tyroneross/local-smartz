@@ -28,22 +28,23 @@ LAST_VERIFIED = LAST_UPDATED
 PRICING_STALE_AFTER_DAYS = 30
 
 
-# Anthropic prompt-caching billing multipliers (verified 2026-05-08 against
-# https://www.anthropic.com/pricing — TAG:UNVERIFIED until automated refresh
-# script confirms; manual numbers below match the standard 5-min ephemeral
-# cache tier).
+# Anthropic prompt-caching billing multipliers — VERIFIED 2026-05-08
+# against the official caching docs at
+# https://docs.claude.com/en/docs/build-with-claude/prompt-caching#pricing
+# (markdown source):
 #
-#   Cache writes (cache_creation_input_tokens): 1.25× the base input rate
-#     (premium for storing the prefix).
-#   Cache reads (cache_read_input_tokens):     0.10× the base input rate
-#     (90% discount on subsequent hits).
+#   "5-minute cache write tokens are 1.25 times the base input tokens price"
+#   "Cache read tokens are 0.1 times the base input tokens price"
+#   ("1-hour cache write tokens are 2 times the base input tokens price"
+#    — NOT used here; runners pin cache_control={"type":"ephemeral"} which
+#    is the 5-minute tier.)
 #
 # These coefficients are encoded as named constants so the
 # pricing-freshness signal (cost.pricing_freshness) is the right gate for
 # refreshing them. If Anthropic changes the discount, bump LAST_VERIFIED
 # and update both constants.
-CACHE_WRITE_MULTIPLIER = 1.25
-CACHE_READ_MULTIPLIER = 0.10
+CACHE_WRITE_MULTIPLIER = 1.25  # 5-min ephemeral cache write surcharge
+CACHE_READ_MULTIPLIER = 0.10   # 90% discount on cache hits
 
 
 class Rate(TypedDict):
@@ -61,18 +62,35 @@ RATES: dict[str, Rate] = {
     "gpt-4o": {"input_per_1m": 2.50, "output_per_1m": 10.0, "note": ""},
     "gpt-4o-mini": {"input_per_1m": 0.15, "output_per_1m": 0.60, "note": "cheap"},
     # Groq — OpenAI-compatible endpoint, their own models. Free tier exists
-    # for small workloads; these are the paid rates as of 2026-05-08.
+    # for small workloads; these are the paid rates VERIFIED 2026-05-08
+    # against https://console.groq.com/docs/models.md AND the live
+    # GET /openai/v1/models API response.
     # Removed: mixtral-8x7b-32768, qwen-2.5-32b (deprecated in Groq's
     # production model list).
-    # ⚠️ Llama-4 Maverick / Scout / Compound rates are TAG:UNVERIFIED —
-    # confirm against https://console.groq.com/docs/models before relying
-    # on the cost output. Setting rate_known=False is preferable to a
-    # confidently-wrong number.
-    "llama-3.3-70b-versatile": {"input_per_1m": 0.59, "output_per_1m": 0.79, "note": "groq"},
-    "llama-3.1-8b-instant": {"input_per_1m": 0.05, "output_per_1m": 0.08, "note": "groq cheap"},
-    "meta-llama/llama-4-maverick-17b-128e-instruct": {"input_per_1m": 0.20, "output_per_1m": 0.60, "note": "groq vision+128k UNVERIFIED"},
-    "meta-llama/llama-4-scout-17b-16e-instruct": {"input_per_1m": 0.11, "output_per_1m": 0.34, "note": "groq UNVERIFIED"},
-    "groq/compound": {"input_per_1m": 0.50, "output_per_1m": 0.85, "note": "groq compound UNVERIFIED"},
+    "llama-3.3-70b-versatile": {"input_per_1m": 0.59, "output_per_1m": 0.79, "note": "groq production"},
+    "llama-3.1-8b-instant": {"input_per_1m": 0.05, "output_per_1m": 0.08, "note": "groq production cheap"},
+    # Scout: VERIFIED in the Groq Preview Models table (input $0.11 / output $0.34)
+    # AND present in the live /v1/models API. Tier=preview, may be promoted
+    # or deprecated; revisit on PRICING_STALE_AFTER_DAYS rollover.
+    "meta-llama/llama-4-scout-17b-16e-instruct": {"input_per_1m": 0.11, "output_per_1m": 0.34, "note": "groq preview, 17B 16E"},
+    # Maverick: VERIFICATION RESULT 2026-05-08 — no longer appears in either
+    # the Groq production OR preview docs table (models.md), AND the live
+    # GET /openai/v1/models API does not return it. Treat as DEPRECATED on
+    # Groq's hosted endpoint. Profiles still references it as the strong
+    # tier (CLOUD_TIER_TABLE["groq"]["strong"]); a follow-up commit should
+    # repoint it (e.g. to openai/gpt-oss-120b in production tier). Until
+    # that lands, the row is preserved with rate_estimate=True so the
+    # cost report flags the staleness rather than silently returning zero.
+    "meta-llama/llama-4-maverick-17b-128e-instruct": {"input_per_1m": 0.20, "output_per_1m": 0.60, "note": "DEPRECATED on Groq 2026-05-08 — verify before use"},
+    # groq/compound: VERIFICATION RESULT 2026-05-08 — Groq does not publish
+    # per-token pricing for the compound systems (the docs models.md table
+    # lists "-" in the price column). Compound is an AI system that
+    # aggregates underlying-model costs which surface as separate line
+    # items on the underlying models. The numbers below are an upper-bound
+    # SWAG kept ONLY so estimate_cost_usd doesn't return rate_known=False
+    # while the row remains in CLOUD_TIER_TABLE expectations; the note
+    # field tells the UI to display "Rate approximate".
+    "groq/compound": {"input_per_1m": 0.50, "output_per_1m": 0.85, "note": "groq compound — system, no published per-token rate; approximate"},
 }
 
 
