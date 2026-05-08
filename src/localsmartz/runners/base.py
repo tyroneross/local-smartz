@@ -7,10 +7,47 @@ text content, any tool calls, and token usage.
 Patterns call ``run_turn`` repeatedly; they never touch a provider SDK
 directly. This keeps the same pattern code working on local (Ollama) and
 cloud (Anthropic, OpenAI, Groq).
+
+Error taxonomy (feat: c10): cloud runners normalize SDK exceptions to the
+``RunnerError`` family below so retry policies and UI handlers don't need
+to know which SDK raised. All subclass ``RunnerError``; broad
+``except Exception:`` paths still catch them.
 """
 from __future__ import annotations
 
 from typing import Any, AsyncIterator, Protocol, TypedDict
+
+
+class RunnerError(Exception):
+    """Base class for normalized runner errors. Subclass for specific
+    provider-agnostic categories.
+
+    Subclasses are named for what the CALLER does, not for what the SDK
+    emitted: retry / auth-fix / abort. Mapping from provider SDK exceptions
+    happens in each runner's ``run_turn`` adapter layer.
+    """
+
+
+class RunnerRateLimit(RunnerError):
+    """HTTP 429 / provider rate limit. Retry with backoff (Retry-After honored)."""
+
+
+class RunnerAuth(RunnerError):
+    """4xx auth (401/403). Caller must fix the API key; do NOT retry."""
+
+
+class RunnerTransient(RunnerError):
+    """Transient network / timeout. Retry with exponential backoff."""
+
+
+class RunnerContextOverflow(RunnerError):
+    """Prompt + max_tokens exceeds the model's context window. Caller must
+    truncate or split — retry will not help."""
+
+
+class RunnerUnknown(RunnerError):
+    """Catch-all for SDK errors that don't match any of the above. Caller
+    should treat as fatal unless explicit handling exists."""
 
 
 class ModelRef(TypedDict, total=False):

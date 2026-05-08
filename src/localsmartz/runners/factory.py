@@ -4,6 +4,21 @@ This is the S1 refactor from Phase 3. Patterns that need a raw LangChain
 chat model (e.g. orchestrator's DeepAgents Path A) can reach in here
 without importing ``agent.py`` (which pulls the full DeepAgents stack).
 
+DUAL-PATH NOTE (feat: c10 — DO NOT collapse with ``agent.py::_create_model``):
+
+    The two model-builders are intentionally separate. ``agent.py::_create_model``
+    serves the DeepAgents path; this factory serves the patterns path. They
+    look like duplicates; merging them breaks DeepAgents because LangChain's
+    ``RunnableRetry`` is unhashable inside DeepAgents' model cache and strips
+    ``bind_tools``. See:
+
+        ~/.claude/projects/-Users-tyroneross/memory/reference_deepagents_runnable_retry.md
+
+    The retry policy lives in ``runners._retry.with_retry`` and wraps the
+    SDK call site (``cloud_anthropic.run_turn`` / ``cloud_openai_compat.run_turn``)
+    — NOT the chat-model wrapper layer. Both paths benefit; neither pays the
+    DeepAgents cost.
+
 Key invariants (DO NOT BREAK):
 
 - **No ``.with_retry()`` wrapping here.** See project memory

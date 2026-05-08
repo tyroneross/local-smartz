@@ -207,6 +207,29 @@ When the user asks for a PowerPoint, slide deck, .pptx, or "deck", produce a mar
 def _create_model(profile: dict, role: str, *, model_name: str | None = None):
     """Create a bare chat model for the given profile and role.
 
+    DUAL-PATH NOTE (feat: c10 — DO NOT collapse with ``runners.factory.create_langchain_model``):
+
+        Two functions in this codebase build LangChain chat models:
+            1. ``agent.py::_create_model`` (this function) — used by the
+               DeepAgents path (``create_deep_agent`` consumers).
+            2. ``runners.factory.create_langchain_model`` — used by the
+               patterns path (``patterns/*.py`` consumers).
+
+        They look like duplicates and there's a standing temptation to
+        merge them. DO NOT. The DeepAgents code path stores the chat model
+        in a hashable cache and calls ``bind_tools`` on it; LangChain's
+        ``RunnableRetry`` is (a) unhashable and (b) strips ``bind_tools``.
+        See ``~/.claude/projects/-Users-tyroneross/memory/reference_deepagents_runnable_retry.md``.
+        Retry wrapping at this layer breaks DeepAgents specifically.
+
+        Retry policy lives in ``runners._retry.with_retry``, which wraps
+        the SDK call site (``cloud_anthropic.run_turn`` / ``cloud_openai_compat.run_turn``)
+        — NOT the chat-model wrapper layer. This keeps DeepAgents working
+        while still giving us transient/429 retry where it matters.
+
+        If you find yourself wanting to refactor away the duplication,
+        re-read the linked memory note first. The duplication is load-bearing.
+
     Provider dispatch (Phase 2): reads the project-local config's
     ``provider`` key. ``ollama`` (default) → ``ChatOllama``. ``anthropic``
     → ``ChatAnthropic`` (reads key from keyring). ``openai`` / ``groq``

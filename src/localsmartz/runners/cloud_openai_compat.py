@@ -7,12 +7,72 @@ is ``https://api.groq.com/openai/v1``. API key sourced by provider name (``opena
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 from typing import AsyncIterator
 
 from localsmartz.runners._retry import with_retry
-from localsmartz.runners.base import AssistantTurn, ModelRef, StreamChunk, ToolCall, Usage
+from localsmartz.runners.base import (
+    AssistantTurn,
+    ModelRef,
+    RunnerAuth,
+    RunnerContextOverflow,
+    RunnerError,
+    RunnerRateLimit,
+    RunnerTransient,
+    RunnerUnknown,
+    StreamChunk,
+    ToolCall,
+    Usage,
+)
+
+
+def _map_openai_error(exc: BaseException) -> RunnerError:
+    """Translate an OpenAI/Groq SDK / httpx exception to a RunnerError.
+
+    Both OpenAI and Groq use the openai Python SDK; same exception shapes.
+    """
+    name = type(exc).__name__
+    sc = getattr(exc, "status_code", None)
+    if sc is None:
+        resp = getattr(exc, "response", None)
+        sc = getattr(resp, "status_code", None) if resp is not None else None
+
+    msg = str(exc)
+
+    if sc in (401, 403) or "AuthenticationError" in name or "PermissionDeniedError" in name:
+        return RunnerAuth(f"openai-compat auth error: {msg}")
+    if sc == 429 or "RateLimit" in name:
+        return RunnerRateLimit(f"openai-compat rate limit: {msg}")
+    # Context overflow surfaces as 400 with code 'context_length_exceeded'
+    # or message text.
+    code = getattr(exc, "code", None)
+    if code == "context_length_exceeded" or (sc == 400 and "context_length" in msg.lower()):
+        return RunnerContextOverflow(f"openai-compat context overflow: {msg}")
+    if name in ("TransportError", "TimeoutException", "ConnectError", "APIConnectionError"):
+        return RunnerTransient(f"openai-compat transient: {msg}")
+    return RunnerUnknown(f"openai-compat unknown ({name}): {msg}")
+
+
+def _current_span_safe() -> Any:
+    """Return the currently-active OTel span, or None. Best-effort."""
+    try:
+        from opentelemetry import trace as _trace  # type: ignore
+
+        span = _trace.get_current_span()
+        if hasattr(span, "is_recording") and not span.is_recording():
+            return None
+        return span
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _set_attr_safe(span: Any, key: str, value: Any) -> None:
+    try:
+        span.set_attribute(key, value)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _env_name_for(provider: str) -> str:
@@ -112,7 +172,14 @@ class CloudOpenAICompatRunner:
         system: str | None = None,
         ctx: dict[str, Any] | None = None,
     ) -> AssistantTurn:
+        # OTel attributes attached at end (feat: c10). LangChain instrumentation
+        # doesn't cover raw SDK calls. See cloud_anthropic.py for the rationale.
+        _span = _current_span_safe()
+        _start = time.perf_counter()
         provider = model_ref.get("provider", "openai")
+        if _span is not None:
+            _set_attr_safe(_span, "ls.runner.provider", provider)
+            _set_attr_safe(_span, "ls.runner.model", model_ref.get("name", ""))
         client = self._make_client(provider, model_ref.get("base_url"))
         tool_schemas = _convert_tools(tools)
 
@@ -133,11 +200,17 @@ class CloudOpenAICompatRunner:
             create_kwargs["max_tokens"] = mx
 
         # Wrap the SDK call in retry/backoff (feat: c4). Same policy as
-        # the Anthropic runner: transient + 429 retry up to 3, others fail.
+        # the Anthropic runner. Post-retry, exhausted exceptions are
+        # re-raised as normalized RunnerError subclasses (feat: c10).
         async def _do_call() -> Any:
             return await client.chat.completions.create(**create_kwargs)
 
-        resp = await with_retry(_do_call)
+        try:
+            resp = await with_retry(_do_call)
+        except RunnerError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise _map_openai_error(exc) from exc
 
         choice = resp.choices[0] if getattr(resp, "choices", None) else None
         msg = getattr(choice, "message", None) if choice is not None else None
@@ -171,6 +244,11 @@ class CloudOpenAICompatRunner:
                 "output_tokens": int(getattr(um, "completion_tokens", 0) or 0),
                 "total_tokens": int(getattr(um, "total_tokens", 0) or 0),
             }
+
+        if _span is not None:
+            _set_attr_safe(_span, "ls.runner.latency_ms", int((time.perf_counter() - _start) * 1000))
+            _set_attr_safe(_span, "ls.runner.input_tokens", int(usage.get("input_tokens", 0)))
+            _set_attr_safe(_span, "ls.runner.output_tokens", int(usage.get("output_tokens", 0)))
 
         return {
             "content": content,
