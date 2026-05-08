@@ -8,8 +8,10 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from typing import AsyncIterator
+
 from localsmartz.runners._retry import with_retry
-from localsmartz.runners.base import AssistantTurn, ModelRef, ToolCall, Usage
+from localsmartz.runners.base import AssistantTurn, ModelRef, StreamChunk, ToolCall, Usage
 
 
 def _load_api_key() -> str | None:
@@ -176,3 +178,78 @@ class CloudAnthropicRunner:
             "provider": self.provider,
             "raw": resp,
         }
+
+    async def stream_turn(
+        self,
+        prompt: str,
+        *,
+        tools: list[Any] | None = None,
+        model_ref: ModelRef,
+        system: str | None = None,
+        ctx: dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Token-level streaming via ``client.messages.stream()`` (feat: c6).
+
+        Yields ``{"delta": str, "done": False}`` for each text increment,
+        then a single final ``{"delta": "", "done": True, "final": AssistantTurn}``.
+        On error, yields one terminal chunk with ``done=True`` and ``error``.
+        """
+        client = self._get_client()
+        tool_schemas = _convert_tools(tools)
+
+        create_kwargs: dict[str, Any] = {
+            "model": model_ref["name"],
+            "max_tokens": (ctx or {}).get("max_tokens", 4096),
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if system:
+            create_kwargs["system"] = [
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ]
+        if tool_schemas:
+            tools_with_cache = list(tool_schemas)
+            tools_with_cache[-1] = {
+                **tools_with_cache[-1],
+                "cache_control": {"type": "ephemeral"},
+            }
+            create_kwargs["tools"] = tools_with_cache
+
+        full_text = ""
+        try:
+            async with client.messages.stream(**create_kwargs) as stream:
+                async for delta in stream.text_stream:
+                    full_text += delta
+                    yield {"delta": delta, "done": False}
+                final_msg = await stream.get_final_message()
+        except Exception as exc:  # noqa: BLE001
+            yield {"delta": "", "done": True, "error": str(exc)}
+            return
+
+        # Build final AssistantTurn from the assembled message.
+        usage: Usage = {}
+        um = getattr(final_msg, "usage", None)
+        if um is not None:
+            usage = {
+                "input_tokens": int(getattr(um, "input_tokens", 0) or 0),
+                "output_tokens": int(getattr(um, "output_tokens", 0) or 0),
+                "total_tokens": int(
+                    (getattr(um, "input_tokens", 0) or 0)
+                    + (getattr(um, "output_tokens", 0) or 0)
+                ),
+            }
+            cache_creation = getattr(um, "cache_creation_input_tokens", None)
+            cache_read = getattr(um, "cache_read_input_tokens", None)
+            if cache_creation is not None:
+                usage["cache_creation_input_tokens"] = int(cache_creation or 0)
+            if cache_read is not None:
+                usage["cache_read_input_tokens"] = int(cache_read or 0)
+
+        final_turn: AssistantTurn = {
+            "content": full_text,
+            "tool_calls": [],  # tool calls in streaming are surfaced via stream events; bridge in a follow-up
+            "usage": usage,
+            "model": model_ref["name"],
+            "provider": self.provider,
+            "raw": final_msg,
+        }
+        yield {"delta": "", "done": True, "final": final_turn}

@@ -9,8 +9,10 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from typing import AsyncIterator
+
 from localsmartz.runners._retry import with_retry
-from localsmartz.runners.base import AssistantTurn, ModelRef, ToolCall, Usage
+from localsmartz.runners.base import AssistantTurn, ModelRef, StreamChunk, ToolCall, Usage
 
 
 def _env_name_for(provider: str) -> str:
@@ -178,3 +180,79 @@ class CloudOpenAICompatRunner:
             "provider": provider,
             "raw": resp,
         }
+
+    async def stream_turn(
+        self,
+        prompt: str,
+        *,
+        tools: list[Any] | None = None,
+        model_ref: ModelRef,
+        system: str | None = None,
+        ctx: dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Token-level streaming via ``stream=True`` (feat: c6).
+
+        Works for both OpenAI and Groq (same OpenAI-compatible API). Yields
+        ``{"delta": str, "done": False}`` per content chunk, then a single
+        terminal ``{"delta": "", "done": True, "final": AssistantTurn}``.
+        On error: ``{"delta": "", "done": True, "error": str}``.
+        """
+        provider = model_ref.get("provider", "openai")
+        client = self._make_client(provider, model_ref.get("base_url"))
+        tool_schemas = _convert_tools(tools)
+
+        messages: list[dict[str, Any]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        create_kwargs: dict[str, Any] = {
+            "model": model_ref["name"],
+            "messages": messages,
+            "temperature": 0,
+            "stream": True,
+            # Some providers (Groq, OpenAI) require this to surface usage on stream end.
+            "stream_options": {"include_usage": True},
+        }
+        if tool_schemas:
+            create_kwargs["tools"] = tool_schemas
+        mx = (ctx or {}).get("max_tokens")
+        if mx is not None:
+            create_kwargs["max_tokens"] = mx
+
+        full_text = ""
+        usage: Usage = {}
+        try:
+            stream = await client.chat.completions.create(**create_kwargs)
+            async for chunk in stream:
+                # OpenAI chunk shape: chunk.choices[0].delta.content (None or str).
+                choices = getattr(chunk, "choices", None) or []
+                if choices:
+                    delta_msg = getattr(choices[0], "delta", None)
+                    if delta_msg is not None:
+                        text = getattr(delta_msg, "content", None)
+                        if text:
+                            full_text += text
+                            yield {"delta": text, "done": False}
+                # Final usage chunk (when stream_options.include_usage=True,
+                # the SDK delivers a chunk with usage populated and empty choices).
+                um = getattr(chunk, "usage", None)
+                if um is not None:
+                    usage = {
+                        "input_tokens": int(getattr(um, "prompt_tokens", 0) or 0),
+                        "output_tokens": int(getattr(um, "completion_tokens", 0) or 0),
+                        "total_tokens": int(getattr(um, "total_tokens", 0) or 0),
+                    }
+        except Exception as exc:  # noqa: BLE001
+            yield {"delta": "", "done": True, "error": str(exc)}
+            return
+
+        final_turn: AssistantTurn = {
+            "content": full_text,
+            "tool_calls": [],
+            "usage": usage,
+            "model": model_ref["name"],
+            "provider": provider,
+            "raw": None,
+        }
+        yield {"delta": "", "done": True, "final": final_turn}

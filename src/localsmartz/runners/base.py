@@ -10,7 +10,7 @@ cloud (Anthropic, OpenAI, Groq).
 """
 from __future__ import annotations
 
-from typing import Any, Protocol, TypedDict
+from typing import Any, AsyncIterator, Protocol, TypedDict
 
 
 class ModelRef(TypedDict, total=False):
@@ -38,6 +38,21 @@ class Usage(TypedDict, total=False):
     # response.usage when present; absent for providers without cache support.
     cache_creation_input_tokens: int
     cache_read_input_tokens: int
+
+
+class StreamChunk(TypedDict, total=False):
+    """One chunk yielded by ``stream_turn`` (feat: c6).
+
+    The shape is intentionally tiny so SSE bridging in serve.py is a
+    straight passthrough. Every stream MUST end with ``done: True`` even on
+    error; error path yields ``{"delta": "", "done": True, "error": str}``
+    optionally with ``final`` carrying whatever AssistantTurn was assembled
+    before the error.
+    """
+    delta: str
+    done: bool
+    final: "AssistantTurn"
+    error: str
 
 
 class AssistantTurn(TypedDict, total=False):
@@ -78,3 +93,20 @@ class AgentRunner(Protocol):
         ctx: dict[str, Any] | None = None,
     ) -> AssistantTurn:
         ...
+
+    # NOTE: stream_turn is documented here as the canonical streaming
+    # surface (feat: c6) but is NOT part of the Protocol type — making it
+    # required would break local_ollama / harmony runners that don't ship
+    # a stream API yet. Concrete cloud runners implement it; callers should
+    # check ``hasattr(runner, "stream_turn")`` before invoking.
+    #
+    # async def stream_turn(
+    #     self,
+    #     prompt: str,
+    #     *,
+    #     tools: list[Any] | None = None,
+    #     model_ref: ModelRef,
+    #     system: str | None = None,
+    #     ctx: dict[str, Any] | None = None,
+    # ) -> AsyncIterator[StreamChunk]:
+    #     ...
