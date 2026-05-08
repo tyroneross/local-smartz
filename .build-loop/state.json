@@ -45,19 +45,30 @@
     }
   },
   "observability": {
-    "phoenix_wired": true,
-    "otlp_endpoint": "http://localhost:6006/v1/traces",
-    "env_flag": "LOCALSMARTZ_OBSERVE",
-    "langsmith_legacy": "opt-in only"
+    "level": "well-instrumented",
+    "note": "OTel via observability.py"
   },
   "escalations": [],
   "debuggerGates": {},
   "phases": {
-    "assess": {"status": "completed", "note": "Goal + criteria + plan written. 30 criteria defined."},
-    "plan": {"status": "completed"},
-    "execute": {"status": "completed", "note": "Chunk 1 (S1/S2/S3) + Chunk 2 (A/B/C patterns) + Chunk 3 (REGISTRY merge + tests + build + 3 live smokes). Serial execution on main thread (TAG:ASSUMED equivalent to parallel subagent dispatch for this scope)."},
-    "review": {"status": "completed", "note": "Scorecard written at .build-loop/evals/2026-04-23-phase-3-scorecard.md. 29/30 criteria ✅, 1 ⚠️ untested (PatternTab visual). No blockers."},
-    "iterate": {"status": "not_needed"}
+    "assess": {
+      "status": "completed",
+      "note": "Goal + criteria + plan written. 30 criteria defined."
+    },
+    "plan": {
+      "status": "completed"
+    },
+    "execute": {
+      "status": "completed",
+      "note": "Chunk 1 (S1/S2/S3) + Chunk 2 (A/B/C patterns) + Chunk 3 (REGISTRY merge + tests + build + 3 live smokes). Serial execution on main thread (TAG:ASSUMED equivalent to parallel subagent dispatch for this scope)."
+    },
+    "review": {
+      "status": "completed",
+      "note": "Scorecard written at .build-loop/evals/2026-04-23-phase-3-scorecard.md. 29/30 criteria ✅, 1 ⚠️ untested (PatternTab visual). No blockers."
+    },
+    "iterate": {
+      "status": "not_needed"
+    }
   },
   "runs": [
     {
@@ -67,10 +78,125 @@
       "criteria_passed": 29,
       "criteria_untested": 1,
       "criteria_failed": 0,
-      "tests": {"passed": 562, "skipped": 4, "failed": 0, "new": 31},
-      "live_smokes": ["reflection", "orchestrator", "parallel"],
+      "tests": {
+        "passed": 562,
+        "skipped": 4,
+        "failed": 0,
+        "new": 31
+      },
+      "live_smokes": [
+        "reflection",
+        "orchestrator",
+        "parallel"
+      ],
       "macos_build": "BUILD SUCCEEDED",
       "phoenix_reachable_during_smokes": true
+    },
+    {
+      "run_id": "run_20260508T082242Z_c5909ea4",
+      "date": "2026-05-08T08:49:09Z",
+      "goal": "LLM provider optimizations — 10 commits across 4 batches",
+      "outcome": "pass",
+      "phases": {
+        "assess": {
+          "status": "pass",
+          "duration_s": 120
+        },
+        "plan": {
+          "status": "pass",
+          "duration_s": 60,
+          "plan_verify": "exit 0 (2 WARN false positives)"
+        },
+        "execute": {
+          "status": "pass",
+          "duration_s": 1500,
+          "commits": 10
+        },
+        "review": {
+          "status": "pass",
+          "duration_s": 100
+        },
+        "iterate": {
+          "status": "n/a",
+          "attempts": 0
+        }
+      },
+      "commits": [
+        "b5c01f9 feat(model_eval): multi-provider parity scorecard with key-skip",
+        "44b2b6a feat(runners): anthropic prompt caching on system + tools",
+        "92f0e5e feat(cost): prefer SDK token counts over estimate",
+        "58424ad feat(runners): exponential-backoff retry on cloud SDK calls",
+        "1ebe737 perf(orchestrator): parallel worker dispatch in Path B",
+        "8cbfd91 feat(runners): token-level streaming on cloud runners",
+        "87bf377 feat(profiles): tier-aware role->model mapping with cloud fallback",
+        "824b1cb feat(serve): advisory token-budget event helper for cloud paths",
+        "c19126a feat(cost): pricing-freshness signal + refresh script stub",
+        "57e219d chore(runners): error taxonomy + OTel parity + dual-path doc"
+      ],
+      "tests_added": 109,
+      "tests_total": 779,
+      "tests_skipped": 4,
+      "manualInterventions": [
+        {
+          "phase": "execute",
+          "note": "c8 docs/config.example.json moved out of gitignored .localsmartz/"
+        },
+        {
+          "phase": "execute",
+          "note": "c10 OTel span attribute approach (attach to active span) replaced initial nested-with attempt"
+        },
+        {
+          "phase": "execute",
+          "note": "c10 test_no_runnable_retry refined to strip docstrings/comments"
+        }
+      ],
+      "cloud_providers_exercised": [
+        "ollama"
+      ],
+      "cloud_providers_skipped": [
+        "anthropic",
+        "openai",
+        "groq"
+      ]
     }
-  ]
+  ],
+  "selfRecursive": {
+    "enabled": false,
+    "reason": "not_a_plugin"
+  },
+  "execution": {
+    "run_id": "run_20260508T082242Z_c5909ea4",
+    "phase": "report",
+    "queued_chunks": [],
+    "in_flight_chunks": [],
+    "completed_chunks": [
+      "c1",
+      "c2",
+      "c3",
+      "c4",
+      "c5",
+      "c6",
+      "c7",
+      "c8",
+      "c9",
+      "c10"
+    ],
+    "iterate_attempt": 0
+  },
+  "intent": {
+    "north_star": "Local-Ollama-first multi-agent research with first-class cloud fallback (Anthropic/OpenAI/Groq).",
+    "update_intent": "10 sequenced commits hardening the cloud path: parity scorecard, prompt caching, real token counts, retry/backoff, parallel workers, streaming, tier routing, budget warn, pricing freshness, hygiene."
+  },
+  "structure": {
+    "modules": [
+      "runners (provider abstraction)",
+      "patterns (orchestration shapes)",
+      "cost.py",
+      "profiles.py (roles+tiers)",
+      "serve.py (HTTP+SSE)",
+      "observability.py (OTel)"
+    ],
+    "mece_partitions_by_commit": true
+  },
+  "schema_version": "1.0.0"
 }
