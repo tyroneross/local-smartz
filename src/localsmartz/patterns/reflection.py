@@ -5,6 +5,18 @@ own output against a structured rubric, then revises. Cheapest Phase 3
 pattern: same-model-two-prompts, no co-residency requirement, works on
 the 24GB mini floor.
 
+Streaming (commit E, 2026-05-08):
+  Same reasoning as critic_loop: token-level interleaving across the
+  primary's draft + reflector's verdict across iterations is ambiguous,
+  and the reflector's output is JSON anyway. Phase markers preferred:
+
+      {"type": "phase_start", "phase": "primary",   "iteration": N}
+      {"type": "phase_end",   "phase": "primary",   "iteration": N}
+      {"type": "phase_start", "phase": "reflector", "iteration": N}
+      {"type": "phase_end",   "phase": "reflector", "iteration": N}
+
+  The full-text ``turn`` event per role still fires inside each phase.
+
 Flow:
   1. primary → draft
   2. reflector → {"score": 0..1, "revision_reason": "...", "suggest": "..."}
@@ -217,6 +229,11 @@ async def run(
                         "\n\nRevise based on reflector feedback: "
                         + current_suggest
                     )
+                yield {
+                    "type": "phase_start",
+                    "phase": "primary",
+                    "iteration": iteration,
+                }
                 primary_turn = await runner.run_turn(
                     prompt,
                     tools=primary.get("tools"),
@@ -230,6 +247,11 @@ async def run(
                     "type": "turn",
                     "role": "primary",
                     "content": last_content,
+                    "iteration": iteration,
+                }
+                yield {
+                    "type": "phase_end",
+                    "phase": "primary",
                     "iteration": iteration,
                 }
                 warn = budget_tracker.tick(primary_turn.get("usage"), primary_ref.get("provider", "ollama"))
@@ -247,6 +269,11 @@ async def run(
                     f"PRIMARY DRAFT:\n{last_content}\n\n"
                     "Return the JSON object only."
                 )
+                yield {
+                    "type": "phase_start",
+                    "phase": "reflector",
+                    "iteration": iteration,
+                }
                 reflector_turn = await runner.run_turn(
                     reflector_prompt,
                     model_ref=reflector_ref,
@@ -299,6 +326,11 @@ async def run(
                     "score": score,
                     "verdict": "pass" if score >= pass_threshold else "revise",
                     "content": reason,
+                }
+                yield {
+                    "type": "phase_end",
+                    "phase": "reflector",
+                    "iteration": iteration,
                 }
 
                 # Pass threshold → done.

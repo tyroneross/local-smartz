@@ -5,6 +5,32 @@ synthesizer agent merges them into one answer. Useful for ensemble
 voting, reducing model variance, and catching obvious hallucinations
 through disagreement.
 
+Streaming (commit E, 2026-05-08):
+  N samples run concurrently (subject to the tier-gated semaphore).
+  Token-level streaming would interleave deltas from up-to-3 samples on
+  the same SSE stream — the consumer cannot reliably attribute each
+  delta back to its sample without out-of-band metadata, and even with
+  metadata the rendered text is unreadable. Rather than ship that, we
+  emit phase-boundary events:
+
+      {"type": "phase_start", "phase": "sample.<n>"}
+      {"type": "phase_end",   "phase": "sample.<n>"}
+
+  per sample, plus
+
+      {"type": "phase_start", "phase": "synthesize"}
+      {"type": "phase_end",   "phase": "synthesize"}
+
+  around the synthesizer. Per-sample full-text events still fire as
+  ``turn`` events with role=sampler.<n>. The synthesizer's final answer
+  is a ``turn`` event with role="final".
+
+  Phase events fire AFTER ``asyncio.gather`` returns — i.e. all samples
+  have already completed; we emit them in deterministic order so the
+  consumer can render a "1/3, 2/3, 3/3" progress UI even though the
+  underlying turns happened concurrently. This is by design — the value
+  of phase markers in this pattern is render-order, not real-time.
+
 Tier-gated concurrency:
   - mini:     semaphore=1 (sequential samples with varied temperatures —
               F1 OOM guard, single model loaded at a time)
@@ -232,10 +258,21 @@ async def run(
         ))
 
         for s in samples:
+            # Emit phase markers around each sample's turn event so the
+            # SSE consumer can render samples in deterministic order even
+            # though the underlying execution was concurrent.
+            yield {
+                "type": "phase_start",
+                "phase": f"sample.{s['index']}",
+            }
             yield {
                 "type": "turn",
                 "role": f"sampler.{s['index']}",
                 "content": s["content"],
+            }
+            yield {
+                "type": "phase_end",
+                "phase": f"sample.{s['index']}",
             }
             warn = budget.tick(s.get("usage"), sampler_ref.get("provider", "ollama"))
             if warn is not None:
@@ -244,6 +281,7 @@ async def run(
         root_span.set_attribute("ls.parallel.peak_concurrency", concurrency_tracker["peak"])
 
         # ── Synthesize ─────────────────────────────────────────────────
+        yield {"type": "phase_start", "phase": "synthesize"}
         with tracer.start_as_current_span("ls.synthesize") as syn_span:
             syn_prompt_lines = [
                 f"USER QUESTION:\n{prompt}",
@@ -271,6 +309,7 @@ async def run(
             final_body = synth_turn.get("content", "") or ""
 
         yield {"type": "turn", "role": "final", "content": final_body}
+        yield {"type": "phase_end", "phase": "synthesize"}
         warn = budget.tick(synth_turn.get("usage"), synthesizer_ref.get("provider", "ollama"))
         if warn is not None:
             yield warn

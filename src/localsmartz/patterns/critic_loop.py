@@ -9,6 +9,25 @@ Flow:
   3. if score < threshold AND iterations < max: writer re-runs with feedback
   4. else return latest writer content
 
+Streaming (commit E, 2026-05-08):
+  Token-level interleaving across writer + critic across iterations is
+  ambiguous — whose tokens arrive first, the previous critic's verdict
+  still settling or the new writer's draft? Rather than risk a confused
+  SSE stream we emit phase-boundary events:
+
+      {"type": "phase_start", "phase": "writer", "iteration": N}
+      {"type": "phase_end",   "phase": "writer", "iteration": N}
+
+  per role per iteration, alongside the existing ``turn`` events that
+  carry the full role body. SSE consumers can render the loop transitions
+  cleanly without trying to attribute interleaved tokens.
+
+  If a future implementer finds a clean way to interleave token streams
+  across roles within an iteration (e.g. by always serializing
+  writer-then-critic and never dispatching them concurrently), text_delta
+  events MAY be added — but the current sequential structure already gives
+  callers everything they need at the role boundary.
+
 Guards:
   - F2 (mini tier): if ``profile.tier == "mini"`` and writer != critic, force
     critic to share the writer's model ref. Log at INFO.
@@ -170,6 +189,11 @@ async def run(
                     writer_system += (
                         "\n\nRevise based on critic feedback: " + last_feedback
                     )
+                yield {
+                    "type": "phase_start",
+                    "phase": "writer",
+                    "iteration": iteration,
+                }
                 writer_turn = await runner.run_turn(
                     current_input,
                     tools=writer.get("tools"),
@@ -185,6 +209,11 @@ async def run(
                     "content": last_content,
                     "iteration": iteration,
                 }
+                yield {
+                    "type": "phase_end",
+                    "phase": "writer",
+                    "iteration": iteration,
+                }
                 warn = budget_tracker.tick(writer_turn.get("usage"), writer_ref.get("provider", "ollama"))
                 if warn is not None:
                     yield warn
@@ -196,6 +225,11 @@ async def run(
                     "Return the JSON object only."
                 )
                 critic_system = critic.get("system_focus") or DEFAULT_CRITIC_SYSTEM
+                yield {
+                    "type": "phase_start",
+                    "phase": "critic",
+                    "iteration": iteration,
+                }
                 critic_turn = await runner.run_turn(
                     critic_prompt,
                     model_ref=critic_ref,
@@ -218,6 +252,11 @@ async def run(
                     "score": score,
                     "verdict": verdict,
                     "content": feedback,
+                }
+                yield {
+                    "type": "phase_end",
+                    "phase": "critic",
+                    "iteration": iteration,
                 }
                 warn = budget_tracker.tick(critic_turn.get("usage"), critic_ref.get("provider", "ollama"))
                 if warn is not None:
