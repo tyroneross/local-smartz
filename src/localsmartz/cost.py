@@ -14,10 +14,10 @@ from datetime import date
 from typing import TypedDict
 
 
-# Rate cards in USD per 1M tokens (input, output). Last verified 2026-04-23
+# Rate cards in USD per 1M tokens (input, output). Last verified 2026-05-08
 # from the provider pricing pages. ⚠️ Treat as advisory; always re-verify
 # before deploying at scale.
-LAST_UPDATED = date(2026, 4, 23)
+LAST_UPDATED = date(2026, 5, 8)
 # LAST_VERIFIED is the canonical name going forward (feat: c9). Kept as an
 # alias for LAST_UPDATED — existing callers don't break. New code should
 # read LAST_VERIFIED.
@@ -43,10 +43,18 @@ RATES: dict[str, Rate] = {
     "gpt-4o": {"input_per_1m": 2.50, "output_per_1m": 10.0, "note": ""},
     "gpt-4o-mini": {"input_per_1m": 0.15, "output_per_1m": 0.60, "note": "cheap"},
     # Groq — OpenAI-compatible endpoint, their own models. Free tier exists
-    # for small workloads; these are the paid rates as of 2026-04-23.
+    # for small workloads; these are the paid rates as of 2026-05-08.
+    # Removed: mixtral-8x7b-32768, qwen-2.5-32b (deprecated in Groq's
+    # production model list).
+    # ⚠️ Llama-4 Maverick / Scout / Compound rates are TAG:UNVERIFIED —
+    # confirm against https://console.groq.com/docs/models before relying
+    # on the cost output. Setting rate_known=False is preferable to a
+    # confidently-wrong number.
     "llama-3.3-70b-versatile": {"input_per_1m": 0.59, "output_per_1m": 0.79, "note": "groq"},
-    "mixtral-8x7b-32768": {"input_per_1m": 0.24, "output_per_1m": 0.24, "note": "groq"},
-    "qwen-2.5-32b": {"input_per_1m": 0.79, "output_per_1m": 0.79, "note": "groq"},
+    "llama-3.1-8b-instant": {"input_per_1m": 0.05, "output_per_1m": 0.08, "note": "groq cheap"},
+    "meta-llama/llama-4-maverick-17b-128e-instruct": {"input_per_1m": 0.20, "output_per_1m": 0.60, "note": "groq vision+128k UNVERIFIED"},
+    "meta-llama/llama-4-scout-17b-16e-instruct": {"input_per_1m": 0.11, "output_per_1m": 0.34, "note": "groq UNVERIFIED"},
+    "groq/compound": {"input_per_1m": 0.50, "output_per_1m": 0.85, "note": "groq compound UNVERIFIED"},
 }
 
 

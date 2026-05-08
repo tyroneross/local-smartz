@@ -313,8 +313,10 @@ DEFAULT_CLOUD_MODELS: dict[str, list[str]] = {
 def _provider_has_key(provider: str) -> bool:
     """Best-effort check: does the provider have a usable API key?
 
-    Looks at the project's secrets module first, falls back to env. NEVER
-    raises — missing key is a normal "skip" path, not an error.
+    Reads env vars only — ``main_multi_provider`` calls
+    ``secrets.export_to_env()`` once at start so a Keychain-stored key
+    populates the env var BEFORE this check fires. NEVER raises —
+    missing key is a normal "skip" path, not an error.
     """
     if provider == "ollama":
         return True  # daemon liveness checked separately at run time
@@ -325,13 +327,7 @@ def _provider_has_key(provider: str) -> bool:
     }.get(provider)
     if env_var and os.environ.get(env_var):
         return True
-    try:
-        from localsmartz import secrets as _secrets
-
-        val = _secrets.get(f"{provider}_api_key")
-        return bool(isinstance(val, str) and val.strip())
-    except Exception:  # noqa: BLE001
-        return False
+    return False
 
 
 def _parse_cloud_models(raw: str | None) -> dict[str, list[str]]:
@@ -457,6 +453,16 @@ def write_scorecard_md(results: list[ModelEvalResult], path: Path, *, skips: lis
 
 def main_multi_provider(args: argparse.Namespace) -> int:
     """Entry point for ``--multi-provider`` mode. Always exit 0 on graceful skip."""
+    # Bridge Keychain-stored keys into env vars BEFORE _provider_has_key
+    # runs. The cloud SDKs and the env-var probe both look at os.environ;
+    # without this, a Groq/Anthropic/OpenAI key stored only in Keychain
+    # would cause the eval to silently skip the provider.
+    try:
+        from localsmartz import secrets as _secrets
+
+        _secrets.export_to_env()
+    except Exception:  # noqa: BLE001 — best-effort; missing module is a skip
+        pass
     cloud_models = _parse_cloud_models(args.cloud_models)
     ollama_models = _parse_models(args.models, limit=max(1, args.limit_models))
     tasks = list(MODEL_EVAL_TASKS)

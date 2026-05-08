@@ -86,17 +86,28 @@ def test_provider_has_key_missing(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    # Patch the secrets module to return nothing.
-    with patch("localsmartz.secrets.get", return_value=None):
-        assert _provider_has_key("anthropic") is False
-        assert _provider_has_key("openai") is False
-        assert _provider_has_key("groq") is False
+    # _provider_has_key reads env only — main_multi_provider runs
+    # secrets.export_to_env() at startup so Keychain → env happens once.
+    assert _provider_has_key("anthropic") is False
+    assert _provider_has_key("openai") is False
+    assert _provider_has_key("groq") is False
 
 
-def test_provider_has_key_via_secrets(monkeypatch):
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    with patch("localsmartz.secrets.get", return_value="gsk-test"):
-        assert _provider_has_key("groq") is True
+def test_provider_has_key_via_export_to_env(monkeypatch):
+    """Keychain → env bridge happens upstream in main_multi_provider.
+
+    This regression-tests the fix for the 2026-05-08 bug where
+    ``_provider_has_key`` looked up ``secrets.get(f"{provider}_api_key")``
+    (e.g. ``"groq_api_key"``) — which never matched the canonical
+    capitalized provider name (``"Groq"``) used in PRESET_PROVIDERS.
+
+    After the fix, the helper reads env vars only; the upstream caller
+    (``main_multi_provider``) runs ``secrets.export_to_env()`` to populate
+    them from Keychain. We simulate the post-export state by setting the
+    env var directly.
+    """
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+    assert _provider_has_key("groq") is True
 
 
 # --- run_multi_provider --------------------------------------------------
@@ -223,6 +234,9 @@ def test_cli_multi_provider_writes_scorecards(monkeypatch, tmp_path: Path, capsy
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    # Stub the Keychain bridge so a real local Groq key in Keychain doesn't
+    # leak into the test (this test simulates "no keys anywhere").
+    monkeypatch.setattr("localsmartz.secrets.export_to_env", lambda: 0)
 
     fake_ollama = [_fake_result("ollama", "qwen3:8b")]
 
@@ -250,3 +264,39 @@ def test_cli_multi_provider_writes_scorecards(monkeypatch, tmp_path: Path, capsy
     assert sorted(p["provider"] for p in payload["providers_skipped"]) == [
         "anthropic", "groq", "openai",
     ]
+
+
+def test_main_multi_provider_calls_export_to_env(monkeypatch, tmp_path: Path):
+    """The Keychain → env bridge MUST fire before _provider_has_key runs.
+
+    Regression test for the 2026-05-08 fix. If a future change skips the
+    ``secrets.export_to_env()`` call at the top of ``main_multi_provider``,
+    a Keychain-only Groq key would silently disappear from the scorecard.
+    """
+    import argparse
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    called = {"export": 0}
+
+    def _fake_export() -> int:
+        called["export"] += 1
+        return 0
+
+    monkeypatch.setattr("localsmartz.secrets.export_to_env", _fake_export)
+
+    args = argparse.Namespace(
+        cloud_models="",
+        models="",
+        limit_models=1,
+        limit_tasks=1,
+        out_dir=str(tmp_path),
+        stamp="2026-05-08-export-test",
+        json=False,
+    )
+    with patch("localsmartz.model_eval.run_model_matrix", return_value=[]):
+        rc = model_eval.main_multi_provider(args)
+    assert rc == 0
+    assert called["export"] == 1

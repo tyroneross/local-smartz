@@ -44,12 +44,14 @@ def test_resolve_anthropic_researcher_cheap():
     assert resolve_model_for_role("researcher", "anthropic") == "claude-haiku-4"
 
 
-def test_resolve_groq_all_tiers_same_model():
-    """Per the user brief, Groq currently maps all tiers to one high-throughput model."""
-    expected = "llama-3.3-70b-versatile"
-    assert resolve_model_for_role("writer", "groq") == expected
-    assert resolve_model_for_role("researcher", "groq") == expected
-    assert resolve_model_for_role("planner", "groq") == expected
+def test_resolve_groq_tiered_models():
+    """Groq tier table (refreshed 2026-05-08): cheap=8b-instant, mid=70b-versatile, strong=Llama-4 Maverick."""
+    # writer → strong tier
+    assert resolve_model_for_role("writer", "groq") == "meta-llama/llama-4-maverick-17b-128e-instruct"
+    # researcher → cheap tier
+    assert resolve_model_for_role("researcher", "groq") == "llama-3.1-8b-instant"
+    # planner → mid tier
+    assert resolve_model_for_role("planner", "groq") == "llama-3.3-70b-versatile"
 
 
 def test_resolve_openai_strong_vs_cheap():

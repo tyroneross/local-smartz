@@ -647,14 +647,12 @@ CLOUD_TIER_TABLE: dict[str, dict[str, str]] = {
         "mid": "gpt-4o-mini",
         "strong": "gpt-4o",
     },
-    # Groq currently exposes a single high-throughput inference model in our
-    # cost table. The user's preferred cloud fallback per the plan: all tiers
-    # land on llama-3.3-70b-versatile until additional Groq models are added
-    # to cost.RATES.
+    # Groq tier table (refreshed 2026-05-08). User-picked strong tier:
+    # Maverick (vision + function-calling + JSON-mode + 128K context).
     "groq": {
-        "cheap": "llama-3.3-70b-versatile",
+        "cheap": "llama-3.1-8b-instant",
         "mid": "llama-3.3-70b-versatile",
-        "strong": "llama-3.3-70b-versatile",
+        "strong": "meta-llama/llama-4-maverick-17b-128e-instruct",
     },
 }
 
