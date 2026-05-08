@@ -445,6 +445,15 @@ textarea::placeholder { color: var(--fg-muted); }
   background: var(--teal-dim); color: var(--teal); border-radius: 3px;
 }
 .err-line { display: block; color: var(--red); padding: 2px 0; font-size: 13px; }
+.stage-line {
+  display: block; color: var(--fg-muted); padding: 4px 0; font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.02em;
+}
+.pulse-line {
+  display: block; color: var(--fg-muted); padding: 2px 0; font-size: 12px;
+  font-style: italic; opacity: 0.7;
+}
 .err-block {
   display: block; color: var(--red); padding: 8px 12px; margin: 8px 0;
   border-left: 3px solid var(--red); font-size: 13px;
@@ -561,6 +570,46 @@ textarea::placeholder { color: var(--fg-muted); }
     else if (d.type === 'tool_error') {
       flushBufferedText();
       append(makeEl('span', 'err-line', '[' + d.name + '] ' + d.message));
+    }
+    else if (d.type === 'stage') {
+      // Progress signal: graph nodes / subagents announce themselves.
+      // Render as a muted line so the user sees activity during long
+      // model-load + per-role execution gaps.
+      flushBufferedText();
+      const human = (d.stage || 'working')
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, function(c) { return c.toUpperCase(); });
+      append(makeEl('span', 'stage-line', '▸ ' + human));
+    }
+    else if (d.type === 'status') {
+      // Model-readiness signal emitted by the server before/after warmup.
+      // Show a one-time muted line so user knows the model is loaded.
+      flushBufferedText();
+      let label;
+      if (d.stage === 'ready') {
+        const ms = (d.warmup_ms || 0) > 0
+          ? ' (warmed in ' + Math.round(d.warmup_ms / 1000) + 's)'
+          : ' (resident)';
+        label = 'Model ready: ' + (d.model || 'unknown') + ms;
+      } else if (d.stage === 'loading') {
+        label = 'Loading model: ' + (d.model || '...');
+      } else {
+        label = (d.stage || 'status') + (d.model ? ': ' + d.model : '');
+      }
+      append(makeEl('span', 'stage-line', '▸ ' + label));
+    }
+    else if (d.type === 'heartbeat') {
+      // Keep-alive ticks from _HeartbeatPulse — coalesced into a single
+      // updating line so they don't spam the output. Real shape is
+      // {type: "heartbeat", elapsed_s: N}.
+      const sec = typeof d.elapsed_s === 'number' ? d.elapsed_s : 0;
+      const text = '⋯ still working (' + sec + 's)';
+      const last = currentRoot && currentRoot.lastChild;
+      if (last && last.classList && last.classList.contains('pulse-line')) {
+        last.textContent = text;
+      } else {
+        append(makeEl('span', 'pulse-line', text));
+      }
     }
     else if (d.type === 'done') {
       flushBufferedText();
@@ -1545,6 +1594,14 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
 
         start_time = time.time()
         first_text = ""
+        # Immediate progress signal — fired before any model load so the UI
+        # never shows blank silence between Run-click and first token.
+        # Empirically gemma4:26b (18 GB) cold-loads in 30-60s; without this,
+        # the user has no indication anything is happening.
+        try:
+            self._send_event({"type": "stage", "stage": "starting"})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         pulse = _HeartbeatPulse(self._send_event, interval_s=15.0)
         pulse.start()
         tracer = get_tracer("local-smartz.research")
@@ -1627,6 +1684,13 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         start_time = time.time()
         tools_used: set[str] = set()
         client_disconnected = False
+
+        # Immediate progress signal — fired before graph build so the UI
+        # never shows blank silence during model warmup + node execution.
+        try:
+            self._send_event({"type": "stage", "stage": "starting"})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
         # Heartbeat pulse — per-role tool loops can run for tens of seconds
         # each, so without this the client sees long silent gaps.
@@ -1747,6 +1811,13 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         from localsmartz.threads import append_entry
         from localsmartz.validation import LoopDetector, TurnCallDeduplicator, IntentAnchor
         from localsmartz.drift import create_drift_detector
+
+        # Immediate progress signal — fired before agent build (which can
+        # take seconds on cold load) so the UI never shows blank silence.
+        try:
+            self._send_event({"type": "stage", "stage": "starting"})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
         # Focus mode: create_agent now scopes the main agent's tools + swaps
         # system prompt (see agent.create_agent focus-mode branch). The

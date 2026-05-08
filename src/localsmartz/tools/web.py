@@ -68,6 +68,15 @@ def _extract_main_content(soup: BeautifulSoup, extract_tables: bool) -> str:
 
 def _extract_text(element, extract_tables: bool) -> str:
     """Convert an HTML element to clean markdown-like text."""
+    # Entry guard: callers may pass a NavigableString (text node) rather
+    # than a Tag — soup.select_one('[role="main"]') and similar selectors
+    # can return a NavigableString in edge cases. NavigableString has no
+    # .children attribute, so iterating it raises AttributeError. The
+    # graph_pipeline crashed on this path 2026-05-08 with the message
+    # "'NavigableString' object has no attribute 'children'".
+    if not hasattr(element, "children"):
+        return str(element).strip()
+
     parts: list[str] = []
 
     for child in element.children:
