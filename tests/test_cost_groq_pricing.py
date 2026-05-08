@@ -30,11 +30,22 @@ def test_llama_3_1_8b_instant_added():
     assert "groq" in rate["note"].lower()
 
 
-def test_llama_4_maverick_added():
+def test_llama_4_maverick_preserved_for_billing_history():
+    """Maverick was deprecated on Groq 2026-05-08 but the row stays for
+    historical-billing accuracy; profiles no longer routes to it."""
     rate = RATES.get("meta-llama/llama-4-maverick-17b-128e-instruct")
     assert rate is not None
     assert rate["input_per_1m"] > 0
     assert rate["output_per_1m"] > 0
+    assert "DEPRECATED" in rate["note"]
+
+
+def test_gpt_oss_120b_added():
+    """openai/gpt-oss-120b is the new strong tier on Groq."""
+    rate = RATES.get("openai/gpt-oss-120b")
+    assert rate is not None
+    assert rate["input_per_1m"] == 0.15
+    assert rate["output_per_1m"] == 0.60
 
 
 def test_llama_4_scout_added():
@@ -69,7 +80,7 @@ def test_groq_tier_table_uses_new_models():
     groq = CLOUD_TIER_TABLE["groq"]
     assert groq["cheap"] == "llama-3.1-8b-instant"
     assert groq["mid"] == "llama-3.3-70b-versatile"
-    assert groq["strong"] == "meta-llama/llama-4-maverick-17b-128e-instruct"
+    assert groq["strong"] == "openai/gpt-oss-120b"
 
 
 def test_groq_tier_models_all_in_rates():

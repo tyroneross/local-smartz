@@ -45,9 +45,10 @@ def test_resolve_anthropic_researcher_cheap():
 
 
 def test_resolve_groq_tiered_models():
-    """Groq tier table (refreshed 2026-05-08): cheap=8b-instant, mid=70b-versatile, strong=Llama-4 Maverick."""
+    """Groq tier table (refreshed 2026-05-08): cheap=8b-instant, mid=70b-versatile,
+    strong=openai/gpt-oss-120b (Maverick deprecated on Groq 2026-05-08)."""
     # writer → strong tier
-    assert resolve_model_for_role("writer", "groq") == "meta-llama/llama-4-maverick-17b-128e-instruct"
+    assert resolve_model_for_role("writer", "groq") == "openai/gpt-oss-120b"
     # researcher → cheap tier
     assert resolve_model_for_role("researcher", "groq") == "llama-3.1-8b-instant"
     # planner → mid tier

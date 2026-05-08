@@ -91,6 +91,10 @@ RATES: dict[str, Rate] = {
     # while the row remains in CLOUD_TIER_TABLE expectations; the note
     # field tells the UI to display "Rate approximate".
     "groq/compound": {"input_per_1m": 0.50, "output_per_1m": 0.85, "note": "groq compound — system, no published per-token rate; approximate"},
+    # Verified 2026-05-08 against https://groq.com/pricing (Large Language Models table).
+    "openai/gpt-oss-120b": {"input_per_1m": 0.15, "output_per_1m": 0.60, "note": "groq production strong — replaces deprecated llama-4-maverick"},
+    "openai/gpt-oss-20b": {"input_per_1m": 0.075, "output_per_1m": 0.30, "note": "groq production"},
+    "qwen/qwen3-32b": {"input_per_1m": 0.29, "output_per_1m": 0.59, "note": "groq production"},
 }
 
 

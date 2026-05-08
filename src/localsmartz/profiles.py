@@ -647,12 +647,16 @@ CLOUD_TIER_TABLE: dict[str, dict[str, str]] = {
         "mid": "gpt-4o-mini",
         "strong": "gpt-4o",
     },
-    # Groq tier table (refreshed 2026-05-08). User-picked strong tier:
-    # Maverick (vision + function-calling + JSON-mode + 128K context).
+    # Groq tier table (refreshed 2026-05-08; strong-tier repointed 2026-05-08).
+    # Maverick was deprecated on Groq's hosted endpoint (verified absent from
+    # console.groq.com/docs/models AND live /v1/models). Replacement strong
+    # tier is openai/gpt-oss-120b: 120B params, reasoning, tool use, function
+    # calling, JSON mode. No vision-capable model is currently on Groq's chat
+    # lineup; vision dimension exits with Maverick — separate concern.
     "groq": {
         "cheap": "llama-3.1-8b-instant",
         "mid": "llama-3.3-70b-versatile",
-        "strong": "meta-llama/llama-4-maverick-17b-128e-instruct",
+        "strong": "openai/gpt-oss-120b",
     },
 }
 
