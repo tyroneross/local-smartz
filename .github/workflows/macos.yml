@@ -54,9 +54,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          APP_PATH=$(find app/build -type d -name "LocalSmartz.app" -path "*/Release/*" | head -n 1)
+          # Bundle product name is "Local Smartz" (with space), set in app/project.yml.
+          APP_PATH=$(find app/build -type d -name "Local Smartz.app" -path "*/Release/*" | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "LocalSmartz.app not found under app/build" >&2
+            echo "'Local Smartz.app' not found under app/build" >&2
+            find app/build -type d -name "*.app" -path "*/Release/*" | head -n 5 >&2 || true
             exit 1
           fi
           echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
