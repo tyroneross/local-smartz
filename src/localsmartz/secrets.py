@@ -17,7 +17,7 @@ Read API:
     export_to_env()          -> int   # number of vars exported
 
 Known providers (presets shown in the UI):
-    OpenAI, Anthropic, Tavily, Serper, Brave, Exa, Cohere, OpenRouter, LangSmith
+    OpenAI, Anthropic, Tavily, Groq, Brave, Exa, Cohere, OpenRouter, LangSmith
 Custom providers are stored under their own name and surfaced under the
 ``custom`` group in the UI.
 """
@@ -38,7 +38,7 @@ PRESET_PROVIDERS: list[tuple[str, str]] = [
     ("OpenAI", "OPENAI_API_KEY"),
     ("Anthropic", "ANTHROPIC_API_KEY"),
     ("Tavily", "TAVILY_API_KEY"),
-    ("Serper", "SERPER_API_KEY"),
+    ("Groq", "GROQ_API_KEY"),
     ("Brave", "BRAVE_API_KEY"),
     ("Exa", "EXA_API_KEY"),
     ("Cohere", "COHERE_API_KEY"),

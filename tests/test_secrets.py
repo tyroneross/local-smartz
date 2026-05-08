@@ -68,14 +68,14 @@ def test_delete_clears(secrets_mod):
 
 def test_export_to_env_populates_os_environ(secrets_mod, monkeypatch):
     secrets_mod.set("OpenAI", "sk-openai-abcd")
-    secrets_mod.set("Serper", "srp-0000-1111")
+    secrets_mod.set("Groq", "gsk-test-1111")
     # export_to_env only fills unset env vars.
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     n = secrets_mod.export_to_env()
     assert n >= 2
     assert os.environ.get("OPENAI_API_KEY") == "sk-openai-abcd"
-    assert os.environ.get("SERPER_API_KEY") == "srp-0000-1111"
+    assert os.environ.get("GROQ_API_KEY") == "gsk-test-1111"
 
 
 def test_get_prefers_env_var_over_stored(secrets_mod, monkeypatch):
