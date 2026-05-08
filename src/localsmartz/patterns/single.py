@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator
 
-from localsmartz.patterns.base import PatternEvent, make_root_span
+from localsmartz.patterns.base import BudgetTracker, PatternEvent, make_root_span
 from localsmartz.runners import AgentRunner
 
 
@@ -25,6 +25,7 @@ async def run(
 ) -> AsyncIterator[PatternEvent]:
     """Yield ``pattern_start``, one ``turn``, one ``done``."""
     thread_id = (ctx or {}).get("thread_id")
+    budget = BudgetTracker()
     span_cm, attrs = make_root_span("single", profile, thread_id)
     with span_cm as span:
         for k, v in attrs.items():
@@ -50,4 +51,7 @@ async def run(
             "content": turn.get("content", ""),
             "tool_calls": list(turn.get("tool_calls", []) or []),
         }
+        warn = budget.tick(turn.get("usage"), model_ref.get("provider", "ollama"))
+        if warn is not None:
+            yield warn
         yield {"type": "done", "thread_id": thread_id or ""}

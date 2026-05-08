@@ -28,7 +28,7 @@ import re
 from typing import Any, AsyncIterator
 
 from localsmartz.observability import get_tracer
-from localsmartz.patterns.base import PatternEvent, make_root_span
+from localsmartz.patterns.base import BudgetTracker, PatternEvent, make_root_span
 from localsmartz.runners import AgentRunner
 
 log = logging.getLogger(__name__)
@@ -143,6 +143,7 @@ async def run(
 
     span_cm, attrs = make_root_span("critic_loop", profile, thread_id)
     tracer = get_tracer("localsmartz.patterns.critic_loop")
+    budget_tracker = BudgetTracker()
     with span_cm as root_span:
         for k, v in attrs.items():
             root_span.set_attribute(k, v)
@@ -184,6 +185,9 @@ async def run(
                     "content": last_content,
                     "iteration": iteration,
                 }
+                warn = budget_tracker.tick(writer_turn.get("usage"), writer_ref.get("provider", "ollama"))
+                if warn is not None:
+                    yield warn
 
                 # Critic turn ------------------------------------------------
                 critic_prompt = (
@@ -215,6 +219,9 @@ async def run(
                     "verdict": verdict,
                     "content": feedback,
                 }
+                warn = budget_tracker.tick(critic_turn.get("usage"), critic_ref.get("provider", "ollama"))
+                if warn is not None:
+                    yield warn
 
                 if verdict == "pass" or score >= threshold:
                     break

@@ -55,7 +55,7 @@ from typing import Any, AsyncIterator
 
 from localsmartz.artifacts import register as register_artifact
 from localsmartz.observability import get_tracer
-from localsmartz.patterns.base import PatternEvent, make_root_span
+from localsmartz.patterns.base import BudgetTracker, PatternEvent, make_root_span
 from localsmartz.runners import AgentRunner
 
 log = logging.getLogger(__name__)
@@ -408,6 +408,7 @@ async def run(
 
     span_cm, attrs = make_root_span("orchestrator", profile, thread_id)
     tracer = get_tracer("localsmartz.patterns.orchestrator")
+    budget_tracker = BudgetTracker()
 
     with span_cm as root_span:
         for k, v in attrs.items():
@@ -454,6 +455,9 @@ async def run(
             "role": "orchestrator.plan",
             "content": plan_body,
         }
+        warn = budget_tracker.tick(plan_turn.get("usage"), lead_ref.get("provider", "ollama"))
+        if warn is not None:
+            yield warn
 
         if not tasks:
             log.warning(
@@ -561,6 +565,9 @@ async def run(
             "role": "final",
             "content": final_body,
         }
+        warn = budget_tracker.tick(synth_turn.get("usage"), lead_ref.get("provider", "ollama"))
+        if warn is not None:
+            yield warn
         yield {"type": "done", "thread_id": thread_id or ""}
 
 

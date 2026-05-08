@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator
 
-from localsmartz.patterns.base import PatternEvent, make_root_span
+from localsmartz.patterns.base import BudgetTracker, PatternEvent, make_root_span
 from localsmartz.runners import AgentRunner
 
 
@@ -50,6 +50,7 @@ async def run(
     specialists = (ctx or {}).get("specialists") or []
     allowed = [s.get("label") for s in specialists if s.get("label")]
     default_label = allowed[0] if allowed else "generalist"
+    budget = BudgetTracker()
 
     span_cm, attrs = make_root_span("router", profile, thread_id)
     with span_cm as span:
@@ -81,6 +82,9 @@ async def run(
             "role": "router",
             "content": router_turn.get("content", "") or "",
         }
+        warn = budget.tick(router_turn.get("usage"), router_model.get("provider", "ollama"))
+        if warn is not None:
+            yield warn
 
         specialist_slot = next(
             (s for s in specialists if s.get("label") == label),
@@ -104,4 +108,7 @@ async def run(
             "content": specialist_turn.get("content", "") or "",
             "tool_calls": list(specialist_turn.get("tool_calls", []) or []),
         }
+        warn = budget.tick(specialist_turn.get("usage"), specialist_model.get("provider", "ollama"))
+        if warn is not None:
+            yield warn
         yield {"type": "done", "thread_id": thread_id or ""}

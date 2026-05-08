@@ -39,7 +39,7 @@ import time
 from typing import Any, AsyncIterator
 
 from localsmartz.observability import get_tracer
-from localsmartz.patterns.base import PatternEvent, make_root_span
+from localsmartz.patterns.base import BudgetTracker, PatternEvent, make_root_span
 from localsmartz.runners import AgentRunner
 
 log = logging.getLogger(__name__)
@@ -160,6 +160,7 @@ async def run(
 
     # ctx-scoped counter the tests can read to verify semaphore bound.
     concurrency_tracker = {"current": 0, "peak": 0}
+    budget = BudgetTracker()
 
     with span_cm as root_span:
         for k, v in attrs.items():
@@ -203,9 +204,11 @@ async def run(
                                 ctx=turn_ctx,
                             )
                             content = turn.get("content", "") or ""
+                            usage = turn.get("usage") or {}
                         except Exception as exc:  # noqa: BLE001
                             status = "error"
                             content = f"sample raised: {exc}"
+                            usage = {}
                             log.warning(
                                 "parallel: sample %d failed: %s", index, exc
                             )
@@ -219,6 +222,7 @@ async def run(
                         "content": content,
                         "status": status,
                         "duration_ms": duration_ms,
+                        "usage": usage,
                     }
                 finally:
                     concurrency_tracker["current"] -= 1
@@ -233,6 +237,9 @@ async def run(
                 "role": f"sampler.{s['index']}",
                 "content": s["content"],
             }
+            warn = budget.tick(s.get("usage"), sampler_ref.get("provider", "ollama"))
+            if warn is not None:
+                yield warn
 
         root_span.set_attribute("ls.parallel.peak_concurrency", concurrency_tracker["peak"])
 
@@ -264,4 +271,7 @@ async def run(
             final_body = synth_turn.get("content", "") or ""
 
         yield {"type": "turn", "role": "final", "content": final_body}
+        warn = budget.tick(synth_turn.get("usage"), synthesizer_ref.get("provider", "ollama"))
+        if warn is not None:
+            yield warn
         yield {"type": "done", "thread_id": thread_id or ""}
