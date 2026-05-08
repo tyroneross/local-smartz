@@ -73,14 +73,12 @@ RATES: dict[str, Rate] = {
     # AND present in the live /v1/models API. Tier=preview, may be promoted
     # or deprecated; revisit on PRICING_STALE_AFTER_DAYS rollover.
     "meta-llama/llama-4-scout-17b-16e-instruct": {"input_per_1m": 0.11, "output_per_1m": 0.34, "note": "groq preview, 17B 16E"},
-    # Maverick: VERIFICATION RESULT 2026-05-08 — no longer appears in either
-    # the Groq production OR preview docs table (models.md), AND the live
-    # GET /openai/v1/models API does not return it. Treat as DEPRECATED on
-    # Groq's hosted endpoint. Profiles still references it as the strong
-    # tier (CLOUD_TIER_TABLE["groq"]["strong"]); a follow-up commit should
-    # repoint it (e.g. to openai/gpt-oss-120b in production tier). Until
-    # that lands, the row is preserved with rate_estimate=True so the
-    # cost report flags the staleness rather than silently returning zero.
+    # Maverick: DEPRECATED on Groq's hosted endpoint 2026-05-08 — verified
+    # absent from console.groq.com/docs/models (production AND preview tiers)
+    # AND the live GET /openai/v1/models API. Profiles strong tier was
+    # repointed to openai/gpt-oss-120b in commit 66d49cc. Row preserved here
+    # for historical-billing accuracy on prior calls; new routing does NOT
+    # land here.
     "meta-llama/llama-4-maverick-17b-128e-instruct": {"input_per_1m": 0.20, "output_per_1m": 0.60, "note": "DEPRECATED on Groq 2026-05-08 — verify before use"},
     # groq/compound: VERIFICATION RESULT 2026-05-08 — Groq does not publish
     # per-token pricing for the compound systems (the docs models.md table
