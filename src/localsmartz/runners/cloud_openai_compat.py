@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from localsmartz.runners._retry import with_retry
 from localsmartz.runners.base import AssistantTurn, ModelRef, ToolCall, Usage
 
 
@@ -129,7 +130,12 @@ class CloudOpenAICompatRunner:
         if mx is not None:
             create_kwargs["max_tokens"] = mx
 
-        resp = await client.chat.completions.create(**create_kwargs)
+        # Wrap the SDK call in retry/backoff (feat: c4). Same policy as
+        # the Anthropic runner: transient + 429 retry up to 3, others fail.
+        async def _do_call() -> Any:
+            return await client.chat.completions.create(**create_kwargs)
+
+        resp = await with_retry(_do_call)
 
         choice = resp.choices[0] if getattr(resp, "choices", None) else None
         msg = getattr(choice, "message", None) if choice is not None else None

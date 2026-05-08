@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from localsmartz.runners._retry import with_retry
 from localsmartz.runners.base import AssistantTurn, ModelRef, ToolCall, Usage
 
 
@@ -123,7 +124,13 @@ class CloudAnthropicRunner:
             }
             create_kwargs["tools"] = tools_with_cache
 
-        resp = await client.messages.create(**create_kwargs)
+        # Wrap the SDK call in retry/backoff (feat: c4). Transient errors
+        # (httpx.TransportError, httpx.TimeoutException) and 429 retry up to
+        # 3 attempts; auth/4xx fail loud immediately.
+        async def _do_call() -> Any:
+            return await client.messages.create(**create_kwargs)
+
+        resp = await with_retry(_do_call)
 
         content = ""
         tool_calls: list[ToolCall] = []
