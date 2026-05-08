@@ -1594,14 +1594,6 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
 
         start_time = time.time()
         first_text = ""
-        # Immediate progress signal — fired before any model load so the UI
-        # never shows blank silence between Run-click and first token.
-        # Empirically gemma4:26b (18 GB) cold-loads in 30-60s; without this,
-        # the user has no indication anything is happening.
-        try:
-            self._send_event({"type": "stage", "stage": "starting"})
-        except (BrokenPipeError, ConnectionResetError):
-            pass
         pulse = _HeartbeatPulse(self._send_event, interval_s=15.0)
         pulse.start()
         tracer = get_tracer("local-smartz.research")
@@ -1612,6 +1604,14 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         fast_path_span.set_attribute("agent.focus", focus_agent or "none")
         fast_path_span.set_attribute("model.name", model)
         try:
+            # Immediate progress signal — fired before model load so the UI
+            # never shows blank silence between Run-click and first token.
+            # If the client disconnected already, bail through finally so
+            # pulse.stop() still runs (test_sse_cancellation enforces this).
+            try:
+                self._send_event({"type": "stage", "stage": "starting"})
+            except (BrokenPipeError, ConnectionResetError):
+                return
             for event in fast_path_stream(prompt, profile, model_override=model_override):
                 pulse.touch()
                 try:
@@ -1685,15 +1685,11 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         tools_used: set[str] = set()
         client_disconnected = False
 
-        # Immediate progress signal — fired before graph build so the UI
-        # never shows blank silence during model warmup + node execution.
-        try:
-            self._send_event({"type": "stage", "stage": "starting"})
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-
         # Heartbeat pulse — per-role tool loops can run for tens of seconds
-        # each, so without this the client sees long silent gaps.
+        # each, so without this the client sees long silent gaps. Started
+        # BEFORE the immediate stage emit so pulse.stop() runs in the
+        # finally block even if the client disconnected before our first
+        # send (test_sse_cancellation enforces this).
         pulse = _HeartbeatPulse(self._send_event, interval_s=15.0)
         pulse.start()
 
@@ -1709,6 +1705,13 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                 pass
 
         try:
+            # Immediate progress signal — first thing in the try so pulse.stop()
+            # runs through finally if the client already disconnected.
+            try:
+                self._send_event({"type": "stage", "stage": "starting"})
+            except (BrokenPipeError, ConnectionResetError):
+                client_disconnected = True
+                return
             agents = _pipeline._build_agents_for_roles(profile)
             graph = _pipeline.build_graph(profile=profile, sink=_sink, agents=agents)
 
@@ -1812,13 +1815,6 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         from localsmartz.validation import LoopDetector, TurnCallDeduplicator, IntentAnchor
         from localsmartz.drift import create_drift_detector
 
-        # Immediate progress signal — fired before agent build (which can
-        # take seconds on cold load) so the UI never shows blank silence.
-        try:
-            self._send_event({"type": "stage", "stage": "starting"})
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-
         # Focus mode: create_agent now scopes the main agent's tools + swaps
         # system prompt (see agent.create_agent focus-mode branch). The
         # banner stays — it's what the user sees in the UI.
@@ -1887,6 +1883,15 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         full_span.set_attribute("profile.name", profile.get("name", "unknown"))
 
         try:
+            # Immediate progress signal — first thing in the try so pulse.stop()
+            # runs through finally if the client already disconnected. Empirically
+            # gemma4:26b cold-loads in 30-60s and that gap was previously blank.
+            try:
+                self._send_event({"type": "stage", "stage": "starting"})
+            except (BrokenPipeError, ConnectionResetError):
+                client_disconnected = True
+                return
+
             # Multi-mode stream: "updates" emits node-boundary state (tool calls
             # + tool results), "messages" emits per-token deltas from the LLM.
             # Without messages mode, the UI shows "Thinking…" until the AI
