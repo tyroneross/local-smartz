@@ -28,6 +28,24 @@ LAST_VERIFIED = LAST_UPDATED
 PRICING_STALE_AFTER_DAYS = 30
 
 
+# Anthropic prompt-caching billing multipliers (verified 2026-05-08 against
+# https://www.anthropic.com/pricing — TAG:UNVERIFIED until automated refresh
+# script confirms; manual numbers below match the standard 5-min ephemeral
+# cache tier).
+#
+#   Cache writes (cache_creation_input_tokens): 1.25× the base input rate
+#     (premium for storing the prefix).
+#   Cache reads (cache_read_input_tokens):     0.10× the base input rate
+#     (90% discount on subsequent hits).
+#
+# These coefficients are encoded as named constants so the
+# pricing-freshness signal (cost.pricing_freshness) is the right gate for
+# refreshing them. If Anthropic changes the discount, bump LAST_VERIFIED
+# and update both constants.
+CACHE_WRITE_MULTIPLIER = 1.25
+CACHE_READ_MULTIPLIER = 0.10
+
+
 class Rate(TypedDict):
     input_per_1m: float
     output_per_1m: float
@@ -144,17 +162,27 @@ def cost_from_usage(*, model: str, usage: dict, pattern: str = "single") -> dict
 
     ``usage`` is the dict returned by the cloud runners (see
     ``runners.base.Usage``). Keys read: ``input_tokens``, ``output_tokens``,
-    plus optional Anthropic cache fields ``cache_creation_input_tokens`` and
-    ``cache_read_input_tokens`` (surfaced verbatim in the envelope; cache-
-    discount math is deferred — see ``.build-loop/issues/cache-discount-math.md``).
+    plus optional Anthropic cache fields ``cache_creation_input_tokens``
+    and ``cache_read_input_tokens``.
+
+    Anthropic cache billing (applied here as of 2026-05-08):
+
+      effective_input_tokens = input_tokens - cache_creation - cache_read
+        (the tokens billed at the FULL input rate)
+
+      cache_write_cost = cache_creation × input_rate × CACHE_WRITE_MULTIPLIER (1.25)
+      cache_read_cost  = cache_read × input_rate × CACHE_READ_MULTIPLIER  (0.10)
+      output_cost      = output_tokens × output_rate
+
+      total = effective_input_cost + cache_write_cost + cache_read_cost + output_cost
+
+    The envelope adds ``effective_input_tokens`` for clarity. Existing
+    callers that read ``input_tokens`` see the unmodified raw count from
+    the SDK — only the cost math splits the buckets.
 
     Returns the same envelope shape as ``estimate_cost_usd`` plus a
     ``source`` field: ``"sdk"`` when ``usage`` carries non-zero token
     counts, ``"estimate"`` when it doesn't (caller passed an empty dict).
-
-    The deepagents memory note: this function is what every NEW caller
-    should use; ``estimate_cost_usd`` is kept for the no-usage (pre-call)
-    case where we only have a prompt string.
     """
     if not usage or not isinstance(usage, dict):
         # Fall back to estimate. Caller must pass prompt separately for
@@ -173,6 +201,12 @@ def cost_from_usage(*, model: str, usage: dict, pattern: str = "single") -> dict
         envelope["source"] = "estimate"
         return envelope
 
+    # Effective input = total input minus the cache-bucketed tokens.
+    # Anthropic's usage.input_tokens is the AGGREGATE (full-price + cache
+    # buckets); subtracting yields the full-price portion. Floor at 0 so
+    # a malformed payload (cache > input) never produces a negative cost.
+    effective_input_tokens = max(0, input_tokens - cache_creation - cache_read)
+
     rate = RATES.get(model)
     if rate is None:
         return {
@@ -182,20 +216,21 @@ def cost_from_usage(*, model: str, usage: dict, pattern: str = "single") -> dict
             "output_tokens": output_tokens,
             "cache_creation_input_tokens": cache_creation,
             "cache_read_input_tokens": cache_read,
+            "effective_input_tokens": effective_input_tokens,
             "estimated_usd": 0.0,
             "rate_known": False,
             "source": "sdk",
             "last_updated": LAST_UPDATED.isoformat(),
         }
 
-    # NOTE: Cache discount math is deferred. Anthropic charges cache reads
-    # at ~10% of the input rate and cache writes at ~125%, but we surface
-    # the raw counts here and let downstream UI / billing apply the math.
-    # See .build-loop/issues/cache-discount-math.md.
-    cost = (
-        input_tokens * rate["input_per_1m"] / 1_000_000
-        + output_tokens * rate["output_per_1m"] / 1_000_000
-    )
+    input_rate = rate["input_per_1m"]
+    output_rate = rate["output_per_1m"]
+    effective_input_cost = effective_input_tokens * input_rate / 1_000_000
+    cache_write_cost = cache_creation * input_rate * CACHE_WRITE_MULTIPLIER / 1_000_000
+    cache_read_cost = cache_read * input_rate * CACHE_READ_MULTIPLIER / 1_000_000
+    output_cost = output_tokens * output_rate / 1_000_000
+    cost = effective_input_cost + cache_write_cost + cache_read_cost + output_cost
+
     return {
         "model": model,
         "pattern": pattern,
@@ -203,6 +238,7 @@ def cost_from_usage(*, model: str, usage: dict, pattern: str = "single") -> dict
         "output_tokens": output_tokens,
         "cache_creation_input_tokens": cache_creation,
         "cache_read_input_tokens": cache_read,
+        "effective_input_tokens": effective_input_tokens,
         "estimated_usd": round(cost, 4),
         "rate_known": True,
         "source": "sdk",
