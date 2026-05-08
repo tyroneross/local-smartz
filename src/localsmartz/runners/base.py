@@ -34,6 +34,10 @@ class Usage(TypedDict, total=False):
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    # Anthropic prompt caching (feat: c2). Surfaced verbatim from
+    # response.usage when present; absent for providers without cache support.
+    cache_creation_input_tokens: int
+    cache_read_input_tokens: int
 
 
 class AssistantTurn(TypedDict, total=False):

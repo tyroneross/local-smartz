@@ -99,10 +99,29 @@ class CloudAnthropicRunner:
             "max_tokens": (ctx or {}).get("max_tokens", 4096),
             "messages": [{"role": "user", "content": prompt}],
         }
+        # Prompt caching (Anthropic ephemeral cache, feat: c2).
+        # Cache the system prompt and the tools array — these are the long-
+        # lived prefixes worth amortizing across turns. The user message is
+        # the variable part; never cached. Anthropic's idiom: attach
+        # `cache_control` to the LAST entry in the tools array (caches all
+        # preceding tool definitions) and to the system block.
         if system:
-            create_kwargs["system"] = system
+            # System becomes a list of typed blocks so we can attach cache_control.
+            create_kwargs["system"] = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
         if tool_schemas:
-            create_kwargs["tools"] = tool_schemas
+            tools_with_cache = list(tool_schemas)
+            # Mutate a copy of the last tool dict so we don't shadow the input.
+            tools_with_cache[-1] = {
+                **tools_with_cache[-1],
+                "cache_control": {"type": "ephemeral"},
+            }
+            create_kwargs["tools"] = tools_with_cache
 
         resp = await client.messages.create(**create_kwargs)
 
@@ -132,6 +151,15 @@ class CloudAnthropicRunner:
                     + (getattr(um, "output_tokens", 0) or 0)
                 ),
             }
+            # Anthropic cache fields (feat: c2). Pass through verbatim when
+            # present; the SDK exposes them on the usage object only when
+            # the request used cache_control blocks.
+            cache_creation = getattr(um, "cache_creation_input_tokens", None)
+            cache_read = getattr(um, "cache_read_input_tokens", None)
+            if cache_creation is not None:
+                usage["cache_creation_input_tokens"] = int(cache_creation or 0)
+            if cache_read is not None:
+                usage["cache_read_input_tokens"] = int(cache_read or 0)
 
         return {
             "content": content,
