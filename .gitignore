@@ -29,3 +29,6 @@ build/
 
 # Bookmark snapshot data
 .claude/bookmarks/
+
+# Build-loop runtime artifact (auto-capture log)
+.episodic/
