@@ -147,3 +147,50 @@ def test_preflight_model_skips_loading_event_when_model_already_loaded(monkeypat
     assert [e.get("stage") for e in status_events] == ["ready"]
     assert status_events[0]["warmup_ms"] == 0
     assert status_events[0]["resident"] is True
+
+
+def test_stream_research_routes_action_coding_to_coding_loop(monkeypatch, tmp_path):
+    handler = _FakeHandler()
+    fake_profile = {
+        "name": "full",
+        "planning_model": "gpt-oss:20b",
+        "execution_model": "qwen2.5-coder:32b-instruct-q5_K_M",
+        "max_turns": 5,
+    }
+    calls: list[dict] = []
+
+    monkeypatch.setattr("localsmartz.serve._saved_model_override", lambda _cwd: None)
+    monkeypatch.setattr(
+        serve.LocalSmartzHandler,
+        "_preflight_model",
+        lambda _self, _profile_name, _model_override: (
+            fake_profile,
+            fake_profile["planning_model"],
+            None,
+            tmp_path,
+        ),
+    )
+
+    def fake_coding_loop(self, **kwargs):
+        calls.append(kwargs)
+
+    def fail_coding_harness(self, **kwargs):
+        raise AssertionError("coding_harness should not handle action coding tasks")
+
+    monkeypatch.setattr(serve.LocalSmartzHandler, "_run_coding_loop", fake_coding_loop)
+    monkeypatch.setattr(
+        serve.LocalSmartzHandler,
+        "_run_coding_harness",
+        fail_coding_harness,
+    )
+
+    serve.LocalSmartzHandler._stream_research(
+        handler,
+        prompt="implement a model selector for the local coding harness",
+        profile_name="full",
+        thread_id=None,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["model"] == "qwen2.5-coder:32b-instruct-q5_K_M"
+    assert calls[0]["profile"]["planning_model"] == "qwen2.5-coder:32b-instruct-q5_K_M"

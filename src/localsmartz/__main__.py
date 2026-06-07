@@ -674,6 +674,42 @@ def _run_coding_harness_cli(
     return "".join(chunks).strip()
 
 
+def _run_coding_loop_cli(
+    prompt: str,
+    profile: dict,
+    *,
+    cwd: Path,
+    model_override: str | None,
+    verbose: bool,
+) -> str:
+    """Run the guarded coding loop for action-oriented workspace prompts."""
+    from localsmartz.coding_loop import coding_loop_stream
+
+    chunks: list[str] = []
+    for event in coding_loop_stream(
+        prompt,
+        profile,
+        cwd=cwd,
+        model_override=model_override,
+    ):
+        event_type = event.get("type")
+        if event_type == "text":
+            content = event.get("content", "")
+            if isinstance(content, str):
+                if content.startswith("[coding-loop]"):
+                    continue
+                chunks.append(content)
+        elif event_type == "stage" and verbose:
+            stage = event.get("stage", "unknown")
+            print(f"  ▸ {stage}", file=sys.stderr)
+        elif event_type == "tool_error" and verbose:
+            print(
+                f"  Coding-loop warning: {event.get('message', 'unknown error')}",
+                file=sys.stderr,
+            )
+    return "".join(chunks).strip()
+
+
 def _run_graph_pipeline_cli(
     prompt: str,
     profile: dict,
@@ -715,7 +751,7 @@ def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
     # Preflight check
     profile = get_profile(args.profile, model_override=effective_override)
     route = select_research_runtime(prompt)
-    if route == "coding_harness":
+    if route in ("coding_harness", "coding_loop"):
         from localsmartz.coding_harness import resolve_coding_model
 
         profile = dict(profile)
@@ -724,7 +760,7 @@ def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
         profile["execution_model"] = coding_model
     if not _preflight(profile):
         sys.exit(1)
-    if route == "coding_harness":
+    if route in ("coding_harness", "coding_loop"):
         profile["execution_model"] = profile["planning_model"]
 
     # Ensure storage directories exist
@@ -750,6 +786,15 @@ def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
     elif route == "coding_harness":
         result = {"messages": []}
         response = _run_coding_harness_cli(
+            prompt,
+            profile,
+            cwd=cwd,
+            model_override=effective_override,
+            verbose=verbose,
+        )
+    elif route == "coding_loop":
+        result = {"messages": []}
+        response = _run_coding_loop_cli(
             prompt,
             profile,
             cwd=cwd,

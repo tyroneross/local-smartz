@@ -13,7 +13,13 @@ import re
 from typing import Literal
 
 
-ResearchRuntime = Literal["fast_path", "graph_pipeline", "full_agent", "coding_harness"]
+ResearchRuntime = Literal[
+    "fast_path",
+    "graph_pipeline",
+    "full_agent",
+    "coding_harness",
+    "coding_loop",
+]
 AgentRole = Literal["planner", "researcher", "analyzer", "fact_checker", "writer"]
 
 _ROLE_ORDER: tuple[AgentRole, ...] = (
@@ -116,7 +122,6 @@ _CODING_STRONG_TERMS = (
 )
 
 _CODING_ACTION_TERMS = (
-    "build",
     "implement",
     "wire",
     "wire up",
@@ -126,6 +131,23 @@ _CODING_ACTION_TERMS = (
     "test",
     "debug",
     "fix",
+)
+
+_CODING_LOOP_ACTION_TERMS = (
+    "implement",
+    "fix",
+    "refactor",
+    "edit",
+    "patch",
+    "test",
+    "add",
+    "update",
+    "change",
+    "wire",
+    "wire up",
+    "build a",
+    "build out",
+    "create",
 )
 
 _CODING_OBJECT_TERMS = (
@@ -199,6 +221,22 @@ def is_coding_intent(prompt: str) -> bool:
     return False
 
 
+def is_coding_loop_intent(prompt: str) -> bool:
+    """True for action-oriented local coding tasks.
+
+    ``coding_harness`` answers questions from repo context. ``coding_loop`` is
+    the stronger route for prompts that ask Local Smartz to build, fix, patch,
+    or refactor something. The separate predicate keeps explanatory prompts
+    like "how can we use this as a coding harness?" read-only.
+    """
+    if not isinstance(prompt, str):
+        return False
+    t = prompt.lower().strip()
+    if not t or not is_coding_intent(prompt):
+        return False
+    return _any_term_in_text(t, _CODING_LOOP_ACTION_TERMS)
+
+
 def select_research_runtime(
     prompt: str,
     *,
@@ -207,6 +245,7 @@ def select_research_runtime(
     """Return the runtime path for ``prompt``.
 
     Routing policy:
+    - action-oriented local coding prompts use ``coding_loop``
     - local coding prompts use ``coding_harness`` unless focus mode is pinned
     - trivial prompts use ``fast_path`` unless focus mode pins a non-planner
       agent
@@ -217,6 +256,9 @@ def select_research_runtime(
     """
     from localsmartz import pipeline as _pipeline
     from localsmartz.profiles import is_fast_path
+
+    if focus_agent is None and is_coding_loop_intent(prompt):
+        return "coding_loop"
 
     if focus_agent is None and is_coding_intent(prompt):
         return "coding_harness"
@@ -266,6 +308,7 @@ __all__ = [
     "AgentRole",
     "ResearchRuntime",
     "is_coding_intent",
+    "is_coding_loop_intent",
     "select_agent_roles",
     "select_research_runtime",
 ]

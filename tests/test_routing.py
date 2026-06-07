@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from localsmartz.routing import is_coding_intent, select_research_runtime
+from localsmartz.routing import (
+    is_coding_intent,
+    is_coding_loop_intent,
+    select_research_runtime,
+)
 
 
 def test_select_research_runtime_prefers_fast_path(monkeypatch):
@@ -38,6 +42,7 @@ def test_coding_intent_detects_airplane_harness_prompt():
         "of the on device plugins and /Users/tyroneross/dev/git-folder/build-loop"
     )
     assert is_coding_intent(prompt) is True
+    assert is_coding_loop_intent(prompt) is False
     assert select_research_runtime(prompt) == "coding_harness"
 
 
@@ -47,7 +52,15 @@ def test_coding_intent_is_typo_tolerant_for_harness_prompt():
         "I want a harnes with model selecto from ollama or other local models"
     )
     assert is_coding_intent(prompt) is True
+    assert is_coding_loop_intent(prompt) is False
     assert select_research_runtime(prompt) == "coding_harness"
+
+
+def test_action_coding_intent_uses_coding_loop():
+    prompt = "implement a model selector for the local coding harness"
+    assert is_coding_intent(prompt) is True
+    assert is_coding_loop_intent(prompt) is True
+    assert select_research_runtime(prompt) == "coding_loop"
 
 
 def test_generic_model_selection_stays_research_graph(monkeypatch):
@@ -166,5 +179,63 @@ def test_cli_run_uses_coding_harness(monkeypatch, tmp_path, capsys):
     assert "coding answer" in captured.out
     assert preflight_models == ["qwen2.5-coder:32b-instruct-q5_K_M"]
     assert calls["coding"] == 1
+    assert calls["graph"] == 0
+    assert calls["full_agent"] == 0
+
+
+def test_cli_run_uses_coding_loop(monkeypatch, tmp_path, capsys):
+    from localsmartz import __main__ as main_mod
+
+    fake_profile = {
+        "name": "full",
+        "planning_model": "gpt-oss:20b",
+        "execution_model": "qwen2.5-coder:32b-instruct-q5_K_M",
+        "max_turns": 5,
+    }
+    calls = {"coding_loop": 0, "graph": 0, "full_agent": 0}
+    preflight_models: list[str] = []
+
+    def fake_coding_loop(prompt, profile, *, cwd, model_override, verbose):
+        calls["coding_loop"] += 1
+        assert "model selector" in prompt
+        assert cwd == tmp_path
+        assert model_override is None
+        assert profile["planning_model"] == "qwen2.5-coder:32b-instruct-q5_K_M"
+        return "coding loop answer"
+
+    def fake_graph_run(*args, **kwargs):
+        calls["graph"] += 1
+        return {"final_answer": "graph answer", "messages": []}
+
+    def fake_run_research(*args, **kwargs):
+        calls["full_agent"] += 1
+        return {"messages": []}
+
+    def fake_preflight(profile):
+        preflight_models.append(profile["planning_model"])
+        return True
+
+    monkeypatch.setattr(main_mod, "_preflight", fake_preflight)
+    monkeypatch.setattr("localsmartz.config.resolve_model", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "localsmartz.profiles.get_profile",
+        lambda *_a, **_k: fake_profile.copy(),
+    )
+    monkeypatch.setattr(
+        "localsmartz.routing.select_research_runtime",
+        lambda *_a, **_k: "coding_loop",
+    )
+    monkeypatch.setattr(main_mod, "_run_coding_loop_cli", fake_coding_loop)
+    monkeypatch.setattr("localsmartz.pipeline.run", fake_graph_run)
+    monkeypatch.setattr("localsmartz.agent.run_research", fake_run_research)
+    monkeypatch.setattr("localsmartz.agent.review_output", lambda *_a, **_k: None)
+
+    args = SimpleNamespace(quiet=True, thread=None, profile="full", model=None)
+    main_mod._run("implement a model selector for the local coding harness", args, tmp_path)
+
+    captured = capsys.readouterr()
+    assert "coding loop answer" in captured.out
+    assert preflight_models == ["qwen2.5-coder:32b-instruct-q5_K_M"]
+    assert calls["coding_loop"] == 1
     assert calls["graph"] == 0
     assert calls["full_agent"] == 0

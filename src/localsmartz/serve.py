@@ -1725,6 +1725,74 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _run_coding_loop(
+        self,
+        prompt: str,
+        profile: dict,
+        model: str,
+        model_override: str | None,
+        thread_id: str | None,
+        cwd: Path,
+    ) -> None:
+        """Guarded build-loop-style coding path for local workspace prompts."""
+        from localsmartz.coding_loop import coding_loop_stream
+        from localsmartz.observability import get_tracer
+        from localsmartz.threads import append_entry
+
+        start_time = time.time()
+        first_text = ""
+        pulse = _HeartbeatPulse(self._send_event, interval_s=15.0)
+        pulse.start()
+        tracer = get_tracer("local-smartz.research")
+        span_cm = tracer.start_as_current_span("research.coding_loop")
+        span = span_cm.__enter__()
+        span.set_attribute("routing.path", "coding_loop")
+        span.set_attribute("model.name", model)
+        span.set_attribute("profile.name", profile.get("name", "unknown"))
+        try:
+            try:
+                self._send_event({"type": "stage", "stage": "starting"})
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            for event in coding_loop_stream(
+                prompt,
+                profile,
+                cwd=cwd,
+                model_override=model_override,
+            ):
+                pulse.touch()
+                try:
+                    if event.get("type") == "done":
+                        self._send_event({
+                            "type": "done",
+                            "duration_ms": int((time.time() - start_time) * 1000),
+                            "thread_id": thread_id or "",
+                        })
+                        continue
+                    if event.get("type") == "text":
+                        content = event.get("content", "")
+                        if isinstance(content, str):
+                            first_text += content
+                    self._send_event(event)
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+        finally:
+            pulse.stop()
+            span_cm.__exit__(None, None, None)
+
+        if thread_id:
+            try:
+                append_entry(
+                    thread_id=thread_id,
+                    cwd=str(cwd),
+                    query=prompt,
+                    summary=first_text[:500],
+                    artifacts=[],
+                    turns=1,
+                )
+            except Exception:
+                pass
+
     def _run_graph_pipeline(
         self,
         prompt: str,
@@ -2519,15 +2587,20 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
 
         route = select_research_runtime(prompt, focus_agent=focus_agent)
 
-        # ── Coding harness ───────────────────────────────────────────────
-        if route == "coding_harness":
+        # ── Coding harness / loop ────────────────────────────────────────
+        if route in ("coding_harness", "coding_loop"):
             from localsmartz.coding_harness import resolve_coding_model
 
             coding_profile = dict(profile)
             coding_model = resolve_coding_model(coding_profile, model_override)
             coding_profile["planning_model"] = coding_model
             coding_profile["execution_model"] = coding_model
-            self._run_coding_harness(
+            runner = (
+                self._run_coding_loop
+                if route == "coding_loop"
+                else self._run_coding_harness
+            )
+            runner(
                 prompt=prompt,
                 profile=coding_profile,
                 model=coding_model,
