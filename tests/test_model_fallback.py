@@ -85,6 +85,26 @@ def test_preflight_mutates_profile_to_fallback(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "llama3.1:70b" in err
     assert "gpt-oss:120b" in err
+    assert "Preparing model: gpt-oss:120b" in err
+    assert "Model ready in 0 ms." in err
+    assert "Loading model" not in err
+
+
+def test_preflight_loaded_model_is_silent(monkeypatch, capsys):
+    from localsmartz import __main__ as main_mod
+
+    profile = {"planning_model": "qwen3:8b-q4_K_M", "name": "lite"}
+    monkeypatch.setattr("localsmartz.ollama.check_server", lambda: True)
+    monkeypatch.setattr(
+        "localsmartz.ollama.resolve_available_model",
+        lambda requested: (requested, None),
+    )
+    monkeypatch.setattr("localsmartz.ollama.is_model_loaded", lambda _m: True)
+
+    ok = main_mod._preflight(profile)
+
+    assert ok is True
+    assert capsys.readouterr().err == ""
 
 
 def test_preflight_returns_false_when_no_fallback(monkeypatch, capsys):

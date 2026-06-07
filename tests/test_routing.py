@@ -103,7 +103,7 @@ def test_cli_run_uses_graph_pipeline(monkeypatch, tmp_path, capsys):
         calls["full_agent"] += 1
         return {"messages": []}
 
-    monkeypatch.setattr(main_mod, "_preflight", lambda _profile: True)
+    monkeypatch.setattr(main_mod, "_preflight", lambda _profile, **_kwargs: True)
     monkeypatch.setattr("localsmartz.config.resolve_model", lambda *_a, **_k: None)
     monkeypatch.setattr(
         "localsmartz.profiles.get_profile",
@@ -123,6 +123,86 @@ def test_cli_run_uses_graph_pipeline(monkeypatch, tmp_path, capsys):
     assert "graph answer" in captured.out
     assert calls["graph"] == 1
     assert calls["full_agent"] == 0
+
+
+def test_cli_run_uses_plain_status_without_quality_review(monkeypatch, tmp_path, capsys):
+    from localsmartz import __main__ as main_mod
+
+    fake_profile = {
+        "name": "full",
+        "planning_model": "gpt-oss:20b",
+        "execution_model": "qwen2.5-coder:32b-instruct-q5_K_M",
+        "max_turns": 5,
+    }
+
+    def fail_review(*_args, **_kwargs):
+        raise AssertionError("review_output should be opt-in for normal CLI use")
+
+    monkeypatch.delenv("LOCALSMARTZ_CLI_QUALITY_REVIEW", raising=False)
+    monkeypatch.setattr(main_mod, "_preflight", lambda _profile, **_kwargs: True)
+    monkeypatch.setattr("localsmartz.config.resolve_model", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "localsmartz.profiles.get_profile",
+        lambda *_a, **_k: fake_profile,
+    )
+    monkeypatch.setattr(
+        "localsmartz.routing.select_research_runtime",
+        lambda *_a, **_k: "fast_path",
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_run_fast_path_cli",
+        lambda *_a, **_k: "direct answer",
+    )
+    monkeypatch.setattr("localsmartz.agent.review_output", fail_review)
+
+    args = SimpleNamespace(quiet=False, thread=None, profile="full", model=None)
+    main_mod._run("what is 2+2?", args, tmp_path)
+
+    captured = capsys.readouterr()
+    assert "direct answer" in captured.out
+    assert "Answering directly because this looks simple." in captured.err
+    assert "Route:" not in captured.err
+    assert "fast_path" not in captured.err
+    assert "Quality Review" not in captured.err
+
+
+def test_cli_stage_output_uses_plain_language(monkeypatch, tmp_path, capsys):
+    from localsmartz import __main__ as main_mod
+
+    fake_profile = {
+        "name": "lite",
+        "planning_model": "qwen3:8b-q4_K_M",
+        "execution_model": "qwen3:8b-q4_K_M",
+        "max_turns": 5,
+    }
+
+    def fake_graph_run(prompt, profile=None, sink=None, with_agents=False):
+        if sink is not None:
+            sink({"type": "stage", "stage": "writer"})
+        return {"final_answer": "graph answer", "messages": []}
+
+    monkeypatch.setattr(main_mod, "_preflight", lambda _profile, **_kwargs: True)
+    monkeypatch.setattr("localsmartz.config.resolve_model", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "localsmartz.profiles.get_profile",
+        lambda *_a, **_k: fake_profile,
+    )
+    monkeypatch.setattr(
+        "localsmartz.routing.select_research_runtime",
+        lambda *_a, **_k: "graph_pipeline",
+    )
+    monkeypatch.setattr("localsmartz.pipeline.run", fake_graph_run)
+
+    args = SimpleNamespace(quiet=False, thread=None, profile="lite", model=None)
+    main_mod._run("research the market", args, tmp_path)
+
+    captured = capsys.readouterr()
+    assert "graph answer" in captured.out
+    assert "Researching with local tools" in captured.err
+    assert "Writing the answer." in captured.err
+    assert "▸ writer" not in captured.err
+    assert "graph_pipeline" not in captured.err
 
 
 def test_cli_run_uses_coding_harness(monkeypatch, tmp_path, capsys):
@@ -153,7 +233,7 @@ def test_cli_run_uses_coding_harness(monkeypatch, tmp_path, capsys):
         calls["full_agent"] += 1
         return {"messages": []}
 
-    def fake_preflight(profile):
+    def fake_preflight(profile, **_kwargs):
         preflight_models.append(profile["planning_model"])
         return True
 
@@ -211,7 +291,7 @@ def test_cli_run_uses_coding_loop(monkeypatch, tmp_path, capsys):
         calls["full_agent"] += 1
         return {"messages": []}
 
-    def fake_preflight(profile):
+    def fake_preflight(profile, **_kwargs):
         preflight_models.append(profile["planning_model"])
         return True
 

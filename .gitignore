@@ -13,6 +13,12 @@ build/
 *.dmg.tmp
 *.app
 .env
+.DS_Store
+
+# Local agent/tooling artifacts
+.claude-code-debugger/
+.ibr/
+.navgator/
 
 # >>> NavGator safety guard (auto-managed)
 # These files are regenerated from .env on every NavGator scan and contain

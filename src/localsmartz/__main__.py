@@ -371,7 +371,7 @@ def _setup(args):
     print(f"\n  \033[1mSetup complete!\033[0m Run 'localsmartz' to start researching.\n")
 
 
-def _preflight(profile: dict) -> bool:
+def _preflight(profile: dict, *, verbose: bool = True) -> bool:
     """Quick Ollama check before running. Returns True if ready.
 
     Mutates `profile["planning_model"]` to a fallback if the configured one
@@ -396,21 +396,23 @@ def _preflight(profile: dict) -> bool:
         print(f"Error: {msg}", file=sys.stderr)
         return False
     if msg:
-        print(f"  \033[33m!\033[0m {msg}", file=sys.stderr)
+        if verbose:
+            print(f"  \033[33m!\033[0m {msg}", file=sys.stderr)
         profile["planning_model"] = chosen
 
     target = profile["planning_model"]
     if is_model_loaded(target):
-        print(f"  Model {target}: already loaded", file=sys.stderr)
         return True
 
-    print(f"  Loading model {target}...", end="", flush=True, file=sys.stderr)
+    if verbose:
+        print(f"  Preparing model: {target}", file=sys.stderr)
+        print("  Ollama may need a moment to load it into memory.", file=sys.stderr)
     ok, warm_ms, warm_err, _ = ensure_model_ready(target, keep_alive="30m")
-    if ok:
-        print(f" \033[32m\u2713\033[0m ({warm_ms} ms)", file=sys.stderr)
-    else:
+    if ok and verbose:
+        print(f"  Model ready in {warm_ms} ms.", file=sys.stderr)
+    elif not ok and verbose:
         # Non-fatal: the first real query will also trigger a load attempt.
-        print(f" \033[33m!\033[0m ({warm_err})", file=sys.stderr)
+        print(f"  Model warmup warning: {warm_err}", file=sys.stderr)
     return True
 
 
@@ -513,6 +515,41 @@ def _handle_command(cmd: str, args, cwd: Path, model_override: str | None, profi
         return "continue"
 
     return None  # Unknown command
+
+
+def _route_notice(route: str) -> str:
+    """Human-facing one-line explanation for a runtime route."""
+    notices = {
+        "fast_path": "Answering directly because this looks simple.",
+        "coding_harness": "Reading workspace context because this is about local code.",
+        "coding_loop": "Inspecting the workspace because this asks for a code change.",
+        "graph_pipeline": "Researching with local tools because this needs more than a direct answer.",
+        "full_agent": "Using the full local assistant for this request.",
+    }
+    return notices.get(route, "Working on the request.")
+
+
+def _stage_notice(stage: str) -> str:
+    """Convert internal stage names into plain CLI progress text."""
+    notices = {
+        "starting": "Starting.",
+        "workspace_context": "Reading workspace files.",
+        "researcher": "Gathering information.",
+        "analyzer": "Checking details.",
+        "fact_checker": "Checking the answer.",
+        "writer": "Writing the answer.",
+        "planner": "Planning the work.",
+        "apply": "Applying the change.",
+        "verify": "Checking the result.",
+    }
+    normalized = stage.strip().lower().replace("-", "_")
+    return notices.get(normalized, f"Working: {stage}.")
+
+
+def _cli_quality_review_enabled() -> bool:
+    """Quality review is useful for debugging, but too noisy for normal CLI use."""
+    val = os.environ.get("LOCALSMARTZ_CLI_QUALITY_REVIEW", "").strip().lower()
+    return val in ("1", "true", "yes", "on")
 
 
 def _interactive(args, cwd: Path):
@@ -665,7 +702,7 @@ def _run_coding_harness_cli(
                 chunks.append(content)
         elif event_type == "stage" and verbose:
             stage = event.get("stage", "unknown")
-            print(f"  ▸ {stage}", file=sys.stderr)
+            print(f"  {_stage_notice(str(stage))}", file=sys.stderr)
         elif event_type == "tool_error" and verbose:
             print(
                 f"  Coding-harness warning: {event.get('message', 'unknown error')}",
@@ -701,7 +738,7 @@ def _run_coding_loop_cli(
                 chunks.append(content)
         elif event_type == "stage" and verbose:
             stage = event.get("stage", "unknown")
-            print(f"  ▸ {stage}", file=sys.stderr)
+            print(f"  {_stage_notice(str(stage))}", file=sys.stderr)
         elif event_type == "tool_error" and verbose:
             print(
                 f"  Coding-loop warning: {event.get('message', 'unknown error')}",
@@ -724,7 +761,7 @@ def _run_graph_pipeline_cli(
             return
         if event.get("type") == "stage":
             stage = event.get("stage", "unknown")
-            print(f"  ▸ {stage}", file=sys.stderr)
+            print(f"  {_stage_notice(str(stage))}", file=sys.stderr)
 
     result = _pipeline.run(prompt, profile=profile, sink=_sink, with_agents=True)
     response = result.get("final_answer", "")
@@ -733,7 +770,7 @@ def _run_graph_pipeline_cli(
 
 def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
     """Execute a single research query."""
-    from localsmartz.agent import run_research, extract_final_response, review_output
+    from localsmartz.agent import run_research, extract_final_response
     from localsmartz.routing import select_research_runtime
     from localsmartz.threads import create_thread, append_entry
     from localsmartz.profiles import get_profile
@@ -758,7 +795,9 @@ def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
         coding_model = resolve_coding_model(profile, effective_override)
         profile["planning_model"] = coding_model
         profile["execution_model"] = coding_model
-    if not _preflight(profile):
+    if verbose:
+        print(f"  {_route_notice(route)}", file=sys.stderr)
+    if not _preflight(profile, verbose=verbose):
         sys.exit(1)
     if route in ("coding_harness", "coding_loop"):
         profile["execution_model"] = profile["planning_model"]
@@ -771,9 +810,6 @@ def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
     # Create/resume thread
     if thread_id:
         create_thread(thread_id, str(cwd), title=prompt[:60])
-
-    if verbose and route != "full_agent":
-        print(f"  Route: {route}", file=sys.stderr)
 
     if route == "fast_path":
         result = {"messages": []}
@@ -822,10 +858,13 @@ def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
 
     print(response)
 
-    # Quality gate (full profile only)
-    if verbose and profile["name"] == "full":
-        print("\n--- Quality Review ---", file=sys.stderr)
+    # Optional debug-only quality gate. Normal CLI use should not dump
+    # internal reviewer/tool-call text after the answer.
+    if verbose and profile["name"] == "full" and _cli_quality_review_enabled():
+        print("\n  Checking answer quality.", file=sys.stderr)
         try:
+            from localsmartz.agent import review_output
+
             review = review_output(prompt, response, profile, cwd)
             if review:
                 print(review, file=sys.stderr)
