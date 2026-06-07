@@ -184,6 +184,16 @@ def test_post_evals_run_rejects_empty_provider(server: int) -> None:
     assert status == 400
 
 
+def test_get_agent_scorecard(server: int) -> None:
+    status, data = _get_json(server, "/api/evals/agent-scorecard")
+
+    assert status == 200, data
+    assert data["grade"] == "pass"
+    assert data["score"] >= 90
+    assert data["rows"]
+    assert data["checks"]
+
+
 # ── Thread pattern pinning (Item 7) ──────────────────────────────────────
 
 def test_research_post_409_on_pattern_mismatch(tmp_path: Path, server: int, monkeypatch) -> None:

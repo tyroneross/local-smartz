@@ -1189,6 +1189,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_ollama_info()
         elif path == "/api/observability/info":
             self._handle_observability_info()
+        elif path == "/api/evals/agent-scorecard":
+            self._handle_agent_scorecard()
         elif path == "/api/folders":
             self._handle_folders()
         elif path == "/api/secrets":
@@ -1229,6 +1231,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_cloud_estimate()
         elif path == "/api/evals/run":
             self._handle_evals_run()
+        elif path == "/api/evals/agent-scorecard":
+            self._handle_agent_scorecard()
         elif path == "/api/patterns/active":
             self._handle_pattern_active_set()
         elif path == "/api/skills/refactor":
@@ -1636,6 +1640,78 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             fast_path_span_cm.__exit__(None, None, None)
 
         # Best-effort thread append — mirrors the full-path behavior.
+        if thread_id:
+            try:
+                append_entry(
+                    thread_id=thread_id,
+                    cwd=str(cwd),
+                    query=prompt,
+                    summary=first_text[:500],
+                    artifacts=[],
+                    turns=1,
+                )
+            except Exception:
+                pass
+
+    def _run_coding_harness(
+        self,
+        prompt: str,
+        profile: dict,
+        model: str,
+        model_override: str | None,
+        thread_id: str | None,
+        cwd: Path,
+    ) -> None:
+        """Read-only repo-grounded coding path.
+
+        This mirrors the fast-path event contract but uses deterministic
+        workspace context before asking the selected local model to answer.
+        """
+        from localsmartz.coding_harness import coding_harness_stream
+        from localsmartz.observability import get_tracer
+        from localsmartz.threads import append_entry
+
+        start_time = time.time()
+        first_text = ""
+        pulse = _HeartbeatPulse(self._send_event, interval_s=15.0)
+        pulse.start()
+        tracer = get_tracer("local-smartz.research")
+        span_cm = tracer.start_as_current_span("research.coding_harness")
+        span = span_cm.__enter__()
+        span.set_attribute("routing.path", "coding_harness")
+        span.set_attribute("model.name", model)
+        span.set_attribute("profile.name", profile.get("name", "unknown"))
+        try:
+            try:
+                self._send_event({"type": "stage", "stage": "starting"})
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            for event in coding_harness_stream(
+                prompt,
+                profile,
+                cwd=cwd,
+                model_override=model_override,
+            ):
+                pulse.touch()
+                try:
+                    if event.get("type") == "done":
+                        self._send_event({
+                            "type": "done",
+                            "duration_ms": int((time.time() - start_time) * 1000),
+                            "thread_id": thread_id or "",
+                        })
+                        continue
+                    if event.get("type") == "text":
+                        content = event.get("content", "")
+                        if isinstance(content, str):
+                            first_text += content
+                    self._send_event(event)
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+        finally:
+            pulse.stop()
+            span_cm.__exit__(None, None, None)
+
         if thread_id:
             try:
                 append_entry(
@@ -2443,6 +2519,24 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
 
         route = select_research_runtime(prompt, focus_agent=focus_agent)
 
+        # ── Coding harness ───────────────────────────────────────────────
+        if route == "coding_harness":
+            from localsmartz.coding_harness import resolve_coding_model
+
+            coding_profile = dict(profile)
+            coding_model = resolve_coding_model(coding_profile, model_override)
+            coding_profile["planning_model"] = coding_model
+            coding_profile["execution_model"] = coding_model
+            self._run_coding_harness(
+                prompt=prompt,
+                profile=coding_profile,
+                model=coding_model,
+                model_override=model_override,
+                thread_id=thread_id,
+                cwd=cwd,
+            )
+            return
+
         # ── Fast path ─────────────────────────────────────────────────────
         if route == "fast_path":
             self._run_fast_path(
@@ -3207,6 +3301,25 @@ Return ONLY the JSON, no prose, no code fences."""
             span.set_attribute("ls.eval.pass", result.pass_count)
             span.set_attribute("ls.eval.fail", result.fail_count)
         self._json_response(benchmark_to_dict(result))
+
+    def _handle_agent_scorecard(self):
+        """GET/POST /api/evals/agent-scorecard — score the agent harness.
+
+        This is deterministic and does not call a model. It verifies routing,
+        specialist-role selection, pattern availability, local tier gates, and
+        the audit/eval surfaces required before deeper multi-agent work.
+        """
+        from localsmartz.agent_scorecard import (
+            run_agent_scorecard,
+            scorecard_to_dict,
+        )
+
+        try:
+            result = run_agent_scorecard()
+        except Exception as exc:  # noqa: BLE001
+            self._json_response({"error": str(exc)}, 500)
+            return
+        self._json_response(scorecard_to_dict(result))
 
     # ── Model install SSE (Phase 1.5) ────────────────────────────────────
 

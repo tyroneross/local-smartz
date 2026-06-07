@@ -33,13 +33,74 @@ private struct EvalRunResponse: Decodable {
     let results: [EvalTaskResult]
 }
 
+private struct AgentScorecardRow: Decodable, Identifiable {
+    let name: String
+    let actualRuntime: String
+    let runtimeOk: Bool
+    let actualRoles: [String]
+    let rolesOk: Bool
+    let recommendedPattern: String
+    let patternAvailable: Bool
+    let patternTierOk: Bool
+    let score: Double
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case actualRuntime = "actual_runtime"
+        case runtimeOk = "runtime_ok"
+        case actualRoles = "actual_roles"
+        case rolesOk = "roles_ok"
+        case recommendedPattern = "recommended_pattern"
+        case patternAvailable = "pattern_available"
+        case patternTierOk = "pattern_tier_ok"
+        case score
+    }
+}
+
+private struct AgentScorecardCheck: Decodable, Identifiable {
+    let name: String
+    let category: String
+    let ok: Bool
+    let score: Double
+    let evidence: String
+    var id: String { name }
+}
+
+private struct AgentScorecardResponse: Decodable {
+    let score: Double
+    let grade: String
+    let tier: String
+    let pass: Int
+    let fail: Int
+    let checkPass: Int
+    let checkFail: Int
+    let rows: [AgentScorecardRow]
+    let checks: [AgentScorecardCheck]
+
+    enum CodingKeys: String, CodingKey {
+        case score
+        case grade
+        case tier
+        case pass
+        case fail
+        case checkPass = "check_pass"
+        case checkFail = "check_fail"
+        case rows
+        case checks
+    }
+}
+
 @MainActor
 private final class EvalsVM: ObservableObject {
     @Published var provider: String = "ollama"
     @Published var model: String = ""
     @Published var running = false
+    @Published var scorecardRunning = false
     @Published var error: String?
     @Published var result: EvalRunResponse?
+    @Published var scorecardError: String?
+    @Published var scorecard: AgentScorecardResponse?
 
     let providers = ["ollama", "anthropic", "openai", "groq"]
 
@@ -72,6 +133,32 @@ private final class EvalsVM: ObservableObject {
             self.result = try JSONDecoder().decode(EvalRunResponse.self, from: data)
         } catch {
             self.error = "Run failed: \(error.localizedDescription)"
+        }
+    }
+
+    func runAgentScorecard() async {
+        guard let base = await SettingsBackend.discover() else {
+            scorecardError = "Backend not reachable."
+            return
+        }
+        scorecardRunning = true
+        defer { scorecardRunning = false }
+        scorecardError = nil
+        scorecard = nil
+
+        let url = URL(string: "\(base)/api/evals/agent-scorecard")!
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 60
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
+                let msg = String(data: data, encoding: .utf8) ?? ""
+                scorecardError = "Scorecard failed (HTTP \(http.statusCode)): \(msg)"
+                return
+            }
+            self.scorecard = try JSONDecoder().decode(AgentScorecardResponse.self, from: data)
+        } catch {
+            self.scorecardError = "Scorecard failed: \(error.localizedDescription)"
         }
     }
 }
@@ -170,6 +257,87 @@ struct EvalTab: View {
                         .padding(.vertical, 2)
                     }
                 }
+
+                Divider().padding(.vertical, 2)
+
+                HStack {
+                    Text("Agent scorecard")
+                        .font(.system(size: 15, weight: .medium))
+                    Spacer()
+                    Button("Run agent scorecard") {
+                        Task { await vm.runAgentScorecard() }
+                    }
+                    .controlSize(.small)
+                    .disabled(vm.scorecardRunning)
+                    if vm.scorecardRunning { ProgressView().controlSize(.small) }
+                }
+
+                if let err = vm.scorecardError {
+                    Text(err)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.red)
+                }
+
+                if let scorecard = vm.scorecard {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text("\(scorecard.grade.uppercased()) · \(String(format: "%.1f", scorecard.score))")
+                            .font(.system(size: 14, weight: .medium, design: .monospaced))
+                            .foregroundStyle(scorecard.grade == "pass" ? .green : .orange)
+                        Text("tier \(scorecard.tier)")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                        Text("\(scorecard.pass) tasks passed")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                        Text("\(scorecard.checkPass) checks passed")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    ForEach(scorecard.rows) { row in
+                        HStack(spacing: 8) {
+                            Image(systemName: (row.runtimeOk && row.rolesOk && row.patternAvailable && row.patternTierOk) ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundStyle((row.runtimeOk && row.rolesOk && row.patternAvailable && row.patternTierOk) ? .green : .red)
+                                .accessibilityLabel((row.runtimeOk && row.rolesOk && row.patternAvailable && row.patternTierOk) ? "Passed" : "Failed")
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(row.name)
+                                    .font(.system(size: 14, weight: .medium))
+                                Text("\(row.actualRuntime) · \(row.recommendedPattern) · \(rolesText(row.actualRoles))")
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer()
+                            Text(String(format: "%.0f", row.score))
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 1)
+                    }
+
+                    Divider().padding(.vertical, 2)
+
+                    ForEach(scorecard.checks) { check in
+                        HStack(spacing: 8) {
+                            Image(systemName: check.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundStyle(check.ok ? .green : .red)
+                                .accessibilityLabel(check.ok ? "Passed" : "Failed")
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(check.name)
+                                    .font(.system(size: 14, weight: .medium))
+                                Text(check.category)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text(String(format: "%.0f", check.score))
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 1)
+                    }
+                }
             }
         }
     }
@@ -180,5 +348,9 @@ struct EvalTab: View {
                 .font(.system(size: 15, weight: .medium))
             Spacer()
         }
+    }
+
+    private func rolesText(_ roles: [String]) -> String {
+        roles.isEmpty ? "no roles" : roles.joined(separator: ",")
     }
 }

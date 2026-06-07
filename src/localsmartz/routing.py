@@ -9,10 +9,11 @@ about and avoids the CLI drifting away from the server defaults.
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 
-ResearchRuntime = Literal["fast_path", "graph_pipeline", "full_agent"]
+ResearchRuntime = Literal["fast_path", "graph_pipeline", "full_agent", "coding_harness"]
 AgentRole = Literal["planner", "researcher", "analyzer", "fact_checker", "writer"]
 
 _ROLE_ORDER: tuple[AgentRole, ...] = (
@@ -97,9 +98,105 @@ _WRITER_TERMS = (
     "compose",
 )
 
+_ABSOLUTE_OR_RELATIVE_PATH_RE = re.compile(
+    r"(?:^|\s)(?:~?/|/Users/|/private/|/tmp/|\./|\../)[^\s]+"
+)
+
+_CODING_STRONG_TERMS = (
+    "coding harness",
+    "code harness",
+    "coding work",
+    "light coding",
+    "local coding",
+    "build loop",
+    "build-loop",
+    "codebase",
+    "repo",
+    "repository",
+)
+
+_CODING_ACTION_TERMS = (
+    "build",
+    "implement",
+    "wire",
+    "wire up",
+    "refactor",
+    "edit",
+    "patch",
+    "test",
+    "debug",
+    "fix",
+)
+
+_CODING_OBJECT_TERMS = (
+    "harness",
+    "plugin",
+    "plugins",
+    "mcp",
+    "model selector",
+    "ollama",
+    "local model",
+    "local models",
+    "python",
+    "swift",
+    "pytest",
+)
+
+_CODING_TYPO_TERMS = (
+    "codieng",
+    "cidubg",
+    "harnes",
+    "garbess",
+    "vyukd",
+)
+
 
 def _ordered_roles(roles: set[AgentRole]) -> tuple[AgentRole, ...]:
     return tuple(role for role in _ROLE_ORDER if role in roles)
+
+
+def _term_in_text(text: str, term: str) -> bool:
+    if " " in term:
+        return term in text
+    return re.search(rf"\b{re.escape(term)}\b", text) is not None
+
+
+def _any_term_in_text(text: str, terms: tuple[str, ...]) -> bool:
+    return any(_term_in_text(text, term) for term in terms)
+
+
+def is_coding_intent(prompt: str) -> bool:
+    """Return True when the prompt should use repo-grounded coding context.
+
+    This is intentionally conservative: generic technical comparison prompts
+    such as "compare Python and Rust for a backend API" should still use the
+    research graph. The coding harness is for local workspace / plugin /
+    build-loop / edit-oriented prompts where answering without inspecting the
+    repo is likely to produce generic advice.
+    """
+    if not isinstance(prompt, str):
+        return False
+    t = prompt.lower().strip()
+    if not t:
+        return False
+
+    if _any_term_in_text(t, _CODING_STRONG_TERMS):
+        return True
+
+    has_path = _ABSOLUTE_OR_RELATIVE_PATH_RE.search(prompt) is not None
+    if has_path and _any_term_in_text(t, _CODING_OBJECT_TERMS):
+        return True
+
+    has_action = _any_term_in_text(t, _CODING_ACTION_TERMS)
+    has_object = _any_term_in_text(t, _CODING_OBJECT_TERMS)
+    if has_action and has_object:
+        return True
+
+    has_typo = _any_term_in_text(t, _CODING_TYPO_TERMS)
+    if has_typo and ("model" in t or "ollama" in t or "harness" in t):
+        return True
+
+    return False
 
 
 def select_research_runtime(
@@ -110,6 +207,7 @@ def select_research_runtime(
     """Return the runtime path for ``prompt``.
 
     Routing policy:
+    - local coding prompts use ``coding_harness`` unless focus mode is pinned
     - trivial prompts use ``fast_path`` unless focus mode pins a non-planner
       agent
     - the deterministic graph pipeline is the default non-focus path when
@@ -119,6 +217,9 @@ def select_research_runtime(
     """
     from localsmartz import pipeline as _pipeline
     from localsmartz.profiles import is_fast_path
+
+    if focus_agent is None and is_coding_intent(prompt):
+        return "coding_harness"
 
     allow_fast_path = focus_agent is None or focus_agent == "planner"
     if allow_fast_path and is_fast_path(prompt):
@@ -164,6 +265,7 @@ def select_agent_roles(prompt: str) -> tuple[AgentRole, ...]:
 __all__ = [
     "AgentRole",
     "ResearchRuntime",
+    "is_coding_intent",
     "select_agent_roles",
     "select_research_runtime",
 ]
