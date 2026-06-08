@@ -239,12 +239,12 @@ def build_coding_loop_prompt(
     """Build the full prompt packet and guardrail decision."""
     decision = classify_coding_loop_request(prompt, model_name)
     context = build_coding_context(prompt, cwd)
-    phase_lines = "\n".join(f"- {phase}" for phase in PHASES)
+    phase_lines = ", ".join(PHASES)
     user = f"""\
 ## User Task
 {prompt}
 
-## Coding Loop Phases
+## Coding Loop Phases To Use Internally
 {phase_lines}
 
 ## Guardrail Decision
@@ -254,17 +254,17 @@ def build_coding_loop_prompt(
 {context}
 
 ## Required Answer Shape
-Start with the direct recommendation. Then use these sections:
-1. Assess
-2. Plan
-3. Guardrails
-4. Execute Plan
-5. Verify
-6. Review and Iterate
-7. Report
+Start with one direct recommendation sentence. Then use only these sections:
+1. Current Read
+2. Exact Files
+3. Minimal Plan
+4. Verification
 
 Rules:
 - Do not claim to have edited files.
+- Do not say work was completed, implemented, refactored, added, or verified.
+- If a file exists in the workspace context, say it exists instead of calling it missing.
+- Prefer the smallest file-local plan over broad architecture rewrites unless the task asks for architecture migration.
 - Do not output shell commands that push, deploy, delete secrets, or mutate production.
 - If status is blocked, explain the block and give a safe alternative.
 - For small/pattern-local models, keep the plan narrow and ask for human review before patching.
@@ -276,10 +276,10 @@ Rules:
 _CODING_LOOP_SYSTEM_PROMPT = """\
 You are Local Smartz in coding-loop mode.
 
-Follow a compact Build Loop-inspired process: assess, plan, guardrail, execute
-plan, verify, review, iterate, report. You are operating in read-only mode.
+Follow a compact Build Loop-inspired process internally. You are operating in read-only mode.
 You may propose patch strategy and verification commands, but you must not
-claim that files were changed. Respect the guardrail decision exactly.
+claim that files were changed or that execution is complete. Respect the
+guardrail decision exactly.
 """
 
 

@@ -63,6 +63,26 @@ def test_action_coding_intent_uses_coding_loop():
     assert select_research_runtime(prompt) == "coding_loop"
 
 
+def test_nextjs_persona_planning_prompt_uses_coding_harness():
+    prompt = (
+        "In this Next.js persona app, propose a small implementation plan for "
+        "a competitive research screen."
+    )
+    assert is_coding_intent(prompt) is True
+    assert is_coding_loop_intent(prompt) is False
+    assert select_research_runtime(prompt) == "coding_harness"
+
+
+def test_nextjs_persona_build_prompt_uses_coding_loop():
+    prompt = (
+        "Build a competitive research screen in this Next.js persona app and "
+        "add fixture personas."
+    )
+    assert is_coding_intent(prompt) is True
+    assert is_coding_loop_intent(prompt) is True
+    assert select_research_runtime(prompt) == "coding_loop"
+
+
 def test_generic_model_selection_stays_research_graph(monkeypatch):
     monkeypatch.setattr("localsmartz.profiles.is_fast_path", lambda _prompt: False)
     monkeypatch.setattr("localsmartz.pipeline.is_enabled", lambda: True)

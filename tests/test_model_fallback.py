@@ -1,5 +1,5 @@
 """Profile model fallback — when the configured planning model isn't pulled
-in Ollama, fall back to the largest available model with a warning."""
+in Ollama, prefer a practical local substitute with a warning."""
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -17,16 +17,16 @@ def test_returns_requested_when_available():
     assert msg is None
 
 
-def test_falls_back_to_largest_available_when_requested_missing():
+def test_falls_back_to_preferred_light_model_when_requested_missing():
     available = [("tiny:1b", 0.5), ("qwen3:8b-q4_K_M", 5.2), ("gpt-oss:120b", 65.0)]
     with patch("localsmartz.ollama.check_server", return_value=True), \
          patch("localsmartz.ollama.model_available", return_value=False), \
          patch("localsmartz.ollama.list_models_with_size", return_value=available):
         chosen, msg = resolve_available_model("llama3.1:70b-instruct-q5_K_M")
-    assert chosen == "gpt-oss:120b"
+    assert chosen == "qwen3:8b-q4_K_M"
     assert msg is not None
     assert "llama3.1:70b" in msg
-    assert "gpt-oss:120b" in msg
+    assert "qwen3:8b-q4_K_M" in msg
     assert "ollama pull" in msg
 
 
@@ -81,11 +81,11 @@ def test_preflight_mutates_profile_to_fallback(monkeypatch, capsys):
     )
     ok = main_mod._preflight(profile)
     assert ok is True
-    assert profile["planning_model"] == "gpt-oss:120b"
+    assert profile["planning_model"] == "qwen3:8b-q4_K_M"
     err = capsys.readouterr().err
     assert "llama3.1:70b" in err
-    assert "gpt-oss:120b" in err
-    assert "Preparing model: gpt-oss:120b" in err
+    assert "qwen3:8b-q4_K_M" in err
+    assert "Preparing model: qwen3:8b-q4_K_M" in err
     assert "Model ready in 0 ms." in err
     assert "Loading model" not in err
 

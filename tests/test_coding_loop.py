@@ -70,6 +70,8 @@ def test_coding_loop_prompt_contains_phase_and_guardrail_contract(tmp_path: Path
 
     assert decision.status == "review_required"
     for phase in PHASES:
-        assert f"- {phase}" in prompt
+        assert phase in prompt
+    assert "Coding Loop Phases To Use Internally" in prompt
     assert "can_apply_edits: False" in prompt
     assert "Do not claim to have edited files." in prompt
+    assert "Do not say work was completed" in prompt

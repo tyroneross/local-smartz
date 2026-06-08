@@ -84,8 +84,10 @@ def test_research_falls_back_when_planning_model_missing(monkeypatch, tmp_path):
             f"regression: model fallback skipped, got error: {e}"
         )
 
-    # We should have emitted a [note] text event mentioning the substitute.
-    assert any("gpt-oss:120b" in e.get("content", "") for e in text_events), handler.events
+    # We should have emitted a [note] text event mentioning the lighter substitute.
+    assert any(
+        "qwen3:8b-q4_K_M" in e.get("content", "") for e in text_events
+    ), handler.events
 
 
 def test_research_still_errors_when_no_fallback_exists(monkeypatch):

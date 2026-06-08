@@ -36,6 +36,15 @@ SUGGESTED_MODELS: list[dict] = [
     {"name": "gpt-oss:120b",                      "size_gb_estimate": 65.0, "ram_class": "heavy", "note": "Largest OSS model supported"},
 ]
 
+PREFERRED_LOCAL_FALLBACKS: tuple[str, ...] = (
+    "qwen3:8b-q4_K_M",
+    "qwen3:8b",
+    "qwen2.5-coder:32b-instruct-q5_K_M",
+    "gpt-oss:20b",
+    "llama3.2:3b",
+)
+_HEAVY_MODEL_GB = 40.0
+
 
 def ollama_models_path() -> Path:
     """Return the path Ollama uses to store models.
@@ -132,6 +141,33 @@ def _model_name_matches(requested: str, candidate: str) -> bool:
     if requested == candidate:
         return True
     return _model_variant_key(requested) == _model_variant_key(candidate)
+
+
+def preferred_available_model(
+    models: list[tuple[str, float]],
+    *,
+    min_gb: float = 1.0,
+) -> str | None:
+    """Choose a practical local fallback model.
+
+    Prefer small Qwen/coding-capable models that are already installed. Falling
+    back to the largest model made offline coding brittle because it often
+    selected 70B/120B models when an 8B/32B local model was sufficient.
+    """
+    candidates = [(name, size) for name, size in models if size >= min_gb]
+    if not candidates:
+        return None
+
+    for preferred in PREFERRED_LOCAL_FALLBACKS:
+        for name, _size in candidates:
+            if _model_name_matches(preferred, name):
+                return name
+
+    non_heavy = [(name, size) for name, size in candidates if size < _HEAVY_MODEL_GB]
+    if non_heavy:
+        return min(non_heavy, key=lambda item: item[1])[0]
+
+    return min(candidates, key=lambda item: item[1])[0]
 
 
 def model_available(model_name: str) -> bool:
@@ -301,7 +337,13 @@ def resolve_available_model(
             f"Model '{requested}' not pulled and no other suitable model found. "
             f"Pull one with: {suggest_pull(requested)}",
         )
-    chosen = candidates[-1][0]  # largest available
+    chosen = preferred_available_model(candidates, min_gb=min_gb)
+    if not chosen:
+        return (
+            None,
+            f"Model '{requested}' not pulled and no other suitable model found. "
+            f"Pull one with: {suggest_pull(requested)}",
+        )
     warning = (
         f"Model '{requested}' not pulled — using '{chosen}' instead. "
         f"For the recommended model: {suggest_pull(requested)}"

@@ -22,6 +22,7 @@ from localsmartz.profiles import get_model
 
 _SKIP_DIRS = {
     ".git",
+    ".next",
     ".venv",
     ".build-loop",
     ".claude-code-debugger",
@@ -61,6 +62,53 @@ _ROOT_CONTEXT_FILES = (
     ".codex-plugin/plugin.json",
 )
 
+_NEXT_APP_CONTEXT_FILES = (
+    "app/page.tsx",
+    "app/layout.tsx",
+    "components/AppShell.tsx",
+    "src/lib/fixtures.ts",
+    "src/lib/persona.ts",
+    "src/lib/repository.ts",
+    "package.json",
+    "tsconfig.json",
+)
+
+_PERSONA_CONTEXT_FILES = (
+    "src/lib/fixtures.ts",
+    "src/lib/persona.ts",
+    "src/lib/repository.ts",
+    "app/page.tsx",
+    "components/AppShell.tsx",
+)
+
+_GENERIC_ROUTE_TERMS = {
+    "app",
+    "build",
+    "change",
+    "component",
+    "components",
+    "create",
+    "edit",
+    "exact",
+    "files",
+    "implementation",
+    "inspect",
+    "local",
+    "next",
+    "nextjs",
+    "page",
+    "plan",
+    "propose",
+    "react",
+    "repo",
+    "repository",
+    "screen",
+    "small",
+    "this",
+    "tsx",
+    "would",
+}
+
 _RELEVANT_FILES_BY_TERM = {
     "plugin": (
         "src/localsmartz/plugins/agent_integration.py",
@@ -97,6 +145,18 @@ _RELEVANT_FILES_BY_TERM = {
         "skills/build-loop/SKILL.md",
         ".codex-plugin/plugin.json",
     ),
+    "next": _NEXT_APP_CONTEXT_FILES,
+    "nextjs": _NEXT_APP_CONTEXT_FILES,
+    "react": _NEXT_APP_CONTEXT_FILES,
+    "app": _NEXT_APP_CONTEXT_FILES,
+    "screen": _NEXT_APP_CONTEXT_FILES,
+    "ui": _NEXT_APP_CONTEXT_FILES,
+    "component": _NEXT_APP_CONTEXT_FILES,
+    "components": _NEXT_APP_CONTEXT_FILES,
+    "persona": _PERSONA_CONTEXT_FILES,
+    "personas": _PERSONA_CONTEXT_FILES,
+    "fixture": _PERSONA_CONTEXT_FILES,
+    "fixtures": _PERSONA_CONTEXT_FILES,
 }
 
 _PATH_RE = re.compile(r"(?:~|/Users/|/private/|/tmp/|\./|\../)[^\s,;:)]+")
@@ -271,6 +331,37 @@ def _prompt_terms(prompt: str) -> list[str]:
     return terms[:24]
 
 
+def _add_matching_app_routes(
+    parts: list[str],
+    root: Path,
+    seen: set[Path],
+    prompt_terms: list[str],
+) -> None:
+    app_dir = root / "app"
+    if not app_dir.is_dir():
+        return
+
+    route_terms = [
+        term.replace("_", "-")
+        for term in prompt_terms
+        if len(term) > 3 and term not in _GENERIC_ROUTE_TERMS
+    ]
+    if not route_terms:
+        return
+
+    for path in sorted(app_dir.rglob("page.tsx")):
+        if path in seen:
+            continue
+        try:
+            rel = str(path.relative_to(root))
+        except ValueError:
+            continue
+        normalized = rel.lower().replace("_", "-")
+        if any(term in normalized for term in route_terms):
+            seen.add(path)
+            parts.append(f"### {rel} relevant excerpt\n{_excerpt(path, prompt_terms)}")
+
+
 def _add_root_context(parts: list[str], root: Path, label: str, prompt_terms: list[str]) -> None:
     parts.append(f"## {label}: {root}")
     git_root = _git_root(root)
@@ -279,16 +370,8 @@ def _add_root_context(parts: list[str], root: Path, label: str, prompt_terms: li
         status = _run_cmd(["git", "status", "--short", "--branch"], git_root)
         parts.append(f"Git status:\n{status or '(clean)'}")
 
-    files = _iter_files(root)
-    if files:
-        parts.append("File inventory (truncated):\n" + "\n".join(files[:140]))
-
     seen: set[Path] = set()
-    for rel in _ROOT_CONTEXT_FILES:
-        path = root / rel
-        if path.is_file():
-            seen.add(path)
-            parts.append(f"### {rel}\n{_safe_read(path)}")
+    _add_matching_app_routes(parts, root, seen, prompt_terms)
 
     term_text = " ".join(prompt_terms)
     for term, rels in _RELEVANT_FILES_BY_TERM.items():
@@ -299,6 +382,16 @@ def _add_root_context(parts: list[str], root: Path, label: str, prompt_terms: li
             if path.is_file() and path not in seen:
                 seen.add(path)
                 parts.append(f"### {rel} relevant excerpt\n{_excerpt(path, prompt_terms)}")
+
+    for rel in _ROOT_CONTEXT_FILES:
+        path = root / rel
+        if path.is_file() and path not in seen:
+            seen.add(path)
+            parts.append(f"### {rel}\n{_safe_read(path)}")
+
+    files = _iter_files(root, limit=80)
+    if files:
+        parts.append("File inventory (truncated):\n" + "\n".join(files[:80]))
 
 
 def build_coding_context(prompt: str, cwd: Path) -> str:

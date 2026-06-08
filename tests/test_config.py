@@ -134,18 +134,18 @@ def test_first_run_picker_ctrl_c_no_partial_config(tmp_path, monkeypatch):
 
 
 def test_first_run_picker_empty_input_selects_recommended(tmp_path, monkeypatch):
-    """Empty input (Enter key) selects the recommended (largest) model."""
+    """Empty input (Enter key) selects the recommended practical local model."""
     from localsmartz.config import first_run_picker
 
     with patch("localsmartz.config.check_server", return_value=True), \
          patch("localsmartz.config.list_models_with_size",
-               return_value=[("small:8b", 5.0), ("large:70b", 40.0)]), \
+               return_value=[("qwen3:8b-q4_K_M", 5.0), ("large:70b", 40.0)]), \
          patch("localsmartz.config.get_version", return_value="0.15.2"), \
          patch("localsmartz.config.detect_profile", return_value="full"):
         monkeypatch.setattr("builtins.input", lambda _: "")  # Enter key
         monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: True})())
         result = first_run_picker(tmp_path, "full")
-        assert result == "large:70b"
+        assert result == "qwen3:8b-q4_K_M"
 
 
 def test_save_config_merges_existing_keys(tmp_path):

@@ -15,6 +15,7 @@ from localsmartz.ollama import (
     get_version,
     list_models_with_size,
     model_available,
+    preferred_available_model,
     resolve_available_model,
 )
 from localsmartz.profiles import detect_profile
@@ -144,7 +145,7 @@ def first_run_picker(cwd: Path, profile_name: str | None = None) -> str:
 
     1. Check Ollama is running (exit 1 if not)
     2. List available models with sizes
-    3. Recommend largest
+    3. Recommend a practical local model
     4. User selects (or auto-select if non-interactive)
     5. Save to config.json
     6. Return model name
@@ -168,8 +169,11 @@ def first_run_picker(cwd: Path, profile_name: str | None = None) -> str:
         print("    ollama pull llama3.1:70b        (40 GB, powerful)", file=sys.stderr)
         sys.exit(1)
 
-    # Recommend largest model
-    recommended_idx = len(models) - 1
+    recommended_model = preferred_available_model(models) or models[0][0]
+    recommended_idx = next(
+        (idx for idx, (name, _size) in enumerate(models) if name == recommended_model),
+        0,
+    )
 
     # Banner
     print()
