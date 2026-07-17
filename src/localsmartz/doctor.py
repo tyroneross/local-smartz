@@ -75,11 +75,12 @@ def _check_models_present() -> tuple[str, str, str]:
         return ("models_present", _FAIL, "could not parse /api/tags response")
 
     try:
-        from localsmartz.profiles import get_profile
+        from localsmartz.profiles import get_profile, global_pinned_model
 
         profile = get_profile()
     except Exception:
         profile = None
+        global_pinned_model = None  # type: ignore[assignment]
 
     if isinstance(profile, dict) and profile.get("planning_model"):
         installed = set(names)
@@ -87,6 +88,14 @@ def _check_models_present() -> tuple[str, str, str]:
         execution_model = profile.get("execution_model")
         if execution_model and execution_model not in required:
             required.append(execution_model)
+        # active_model single-model-mode pin (F4): when set, it's the
+        # effective model runtime actually uses for every role — prepend it
+        # so --check validates what will actually run, not just the
+        # profile's planning/execution defaults which the pin overrides.
+        if callable(global_pinned_model):
+            pinned = global_pinned_model()
+            if pinned and pinned not in required:
+                required.insert(0, pinned)
         missing = [m for m in required if m not in installed]  # EXACT match only
         if not missing:
             return (

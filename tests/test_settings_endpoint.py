@@ -207,6 +207,41 @@ def test_get_agents_includes_enabled_flag(server):
 
 # ── GET /api/status gains active_model + local_only ───────────────────────
 
+# ── SEC-003: local_only flip mid-session scrubs process env ──────────────
+
+def test_post_settings_local_only_true_scrubs_cloud_and_langsmith_env(server, monkeypatch):
+    """Flipping local_only on via POST /api/settings must scrub cloud-LLM +
+    LangSmith env vars from THIS PROCESS immediately (export_to_env() only
+    runs at boot) and force LANGSMITH_TRACING off. Values are not deleted
+    from the store — only the process env."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-live-openai")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-live-anthropic")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-live-groq")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "ls-live-key")
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+
+    status, body = _post(server, "/api/settings", {"local_only": True})
+    assert status == 200
+    assert body["local_only"] is True
+
+    import os
+    assert os.environ.get("OPENAI_API_KEY") is None
+    assert os.environ.get("ANTHROPIC_API_KEY") is None
+    assert os.environ.get("GROQ_API_KEY") is None
+    assert os.environ.get("LANGSMITH_API_KEY") is None
+    assert os.environ.get("LANGSMITH_TRACING") == "false"
+
+
+def test_post_settings_local_only_false_does_not_scrub(server, monkeypatch):
+    """Regression: turning local_only OFF (or leaving it alone) must not
+    touch unrelated env vars."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-live-openai")
+    status, body = _post(server, "/api/settings", {"local_only": False})
+    assert status == 200
+    import os
+    assert os.environ.get("OPENAI_API_KEY") == "sk-live-openai"
+
+
 def test_status_includes_active_model_and_local_only(server, monkeypatch):
     mock_profile = {"name": "lite", "planning_model": "qwen3:8b", "execution_model": "qwen3:8b"}
     global_config.set("active_model", "pinned:model")

@@ -197,6 +197,39 @@ def test_delete_removes_from_index_and_storage(tmp_path, monkeypatch):
     assert "MyCustomAPI" not in rows
 
 
+# ── SEC-001: Local-Only must block LangSmith key export (trace egress) ─────
+
+def test_export_to_env_skips_langsmith_under_local_only(secrets_mod, monkeypatch):
+    """local_only=True must skip LANGSMITH_API_KEY export too, not just the
+    cloud LLM providers — a key that stays in os.environ is what lets
+    LangChain auto-discover it and ship traces to smith.langchain.com."""
+    from localsmartz import global_config
+
+    secrets_mod.set("LangSmith", "ls-test-key-1234")
+    secrets_mod.set("OpenAI", "sk-openai-abcd")
+    monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    global_config.save_global({"local_only": True})
+    secrets_mod.export_to_env()
+
+    assert os.environ.get("LANGSMITH_API_KEY") is None
+    assert os.environ.get("OPENAI_API_KEY") is None
+
+
+def test_export_to_env_exports_langsmith_when_local_only_off(secrets_mod, monkeypatch):
+    """Regression: with local_only off, LangSmith export is unchanged."""
+    from localsmartz import global_config
+
+    secrets_mod.set("LangSmith", "ls-test-key-5678")
+    monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+
+    global_config.save_global({"local_only": False})
+    secrets_mod.export_to_env()
+
+    assert os.environ.get("LANGSMITH_API_KEY") == "ls-test-key-5678"
+
+
 def test_custom_provider_via_file_fallback_still_visible(secrets_mod):
     """When keyring is unavailable, custom providers land in secrets.json and
     are naturally discoverable. Verify masked_all() surfaces them."""

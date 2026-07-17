@@ -327,7 +327,7 @@ private struct GeneralTab: View {
                     )
                     .labelsHidden()
                     .disabled(!backendVM.reachable || backendVM.saving)
-                    Text("Blocks cloud providers — all inference stays on this Mac.")
+                    Text("Blocks cloud AI providers — model inference stays on this Mac. Web search tools may still reach the internet.")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                     if !backendVM.reachable {

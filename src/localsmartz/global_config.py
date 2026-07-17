@@ -163,6 +163,39 @@ def save_global(data: dict[str, Any]) -> None:
         raise
 
 
+def local_only_state() -> tuple[bool, bool]:
+    """Return ``(value, degraded)`` for the ``local_only`` privacy boundary.
+
+    ``degraded`` is True iff ``global.json`` EXISTS but could not be parsed
+    or read (corrupt JSON, non-dict root, or an OSError while reading it —
+    e.g. a permissions problem). A MISSING file is a fresh install, not a
+    degraded state: it returns ``(False, False)``, same as the schema
+    default.
+
+    Callers that enforce the local_only boundary (runners, agent.py,
+    serve.py, secrets.py) MUST treat ``degraded=True`` as local_only=ON
+    (fail closed, cloud denied) — this is the opposite of ``load_global()``,
+    which silently falls back to all-defaults (local_only=False) on a read
+    error. That polarity is correct for a general config loader but wrong
+    for a privacy boundary, where an unreadable file must never quietly
+    re-open cloud access.
+    """
+    path = _global_file()
+    if not path.exists():
+        return False, False
+    try:
+        raw_text = path.read_text()
+        data = json.loads(raw_text)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return True, True
+    if not isinstance(data, dict):
+        return True, True
+    value = data.get("local_only", False)
+    if not isinstance(value, bool):
+        value = False
+    return value, False
+
+
 def get(key: str) -> Any:
     """Get one key, returning the default if the file is missing the key.
 

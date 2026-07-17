@@ -297,6 +297,24 @@ def _effective_pinned_model(profile: dict) -> str | None:
     return global_pinned_model()
 
 
+def effective_pinned_model(profile: dict) -> str | None:
+    """Public wrapper over ``_effective_pinned_model`` for callers outside
+    profiles.py that arbitrate their OWN ``model_override`` parameter
+    against the frozen precedence (CLI --model this-run > global
+    active_model pin > everything else) without duplicating the
+    cli_pin-vs-global-pin discrimination.
+
+    Used by ``agent.fast_path_stream`` and ``coding_harness.resolve_coding_model``:
+    both take a ``model_override`` that may be a genuine CLI/REPL pin
+    (already stashed on ``profile["_cli_pinned_model"]`` by
+    ``get_profile(..., cli_pin=True)``) or a lesser-precedence value (a
+    serve-selected/project model). Checking this FIRST and falling back to
+    ``model_override`` only when it returns None reproduces exactly the
+    precedence ``get_model``/``get_agent_model`` already enforce.
+    """
+    return _effective_pinned_model(profile)
+
+
 def _disabled_agents() -> set[str]:
     """Read ``global_config.disabled_agents`` defensively. Never raises."""
     try:

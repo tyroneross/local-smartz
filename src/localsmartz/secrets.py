@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import stat
+import sys
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -56,13 +57,31 @@ _CLOUD_LLM_PROVIDERS: frozenset[str] = frozenset({"OpenAI", "Anthropic", "Groq"}
 
 
 def _local_only_enabled() -> bool:
-    """Read ``global_config.local_only`` defensively — fails open (False)."""
+    """Read ``global_config.local_only``. Fails CLOSED (cloud denied) when
+    ~/.localsmartz/global.json exists but can't be parsed/read — this is a
+    privacy boundary, so a corrupt config must never silently re-open cloud
+    access. A missing file (fresh install) is not degraded and reads as
+    local_only=False, same as the schema default."""
     try:
         from localsmartz import global_config
 
-        return bool(global_config.get("local_only"))
-    except Exception:  # noqa: BLE001
-        return False
+        value, degraded = global_config.local_only_state()
+        if degraded:
+            print(
+                "Warning: could not read Local-Only setting — failing "
+                "closed, cloud providers disabled: global.json exists but "
+                "could not be parsed",
+                file=sys.stderr,
+            )
+            return True
+        return value
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"Warning: could not read Local-Only setting — failing closed, "
+            f"cloud providers disabled: {exc}",
+            file=sys.stderr,
+        )
+        return True
 
 
 def _file_path() -> Path:
@@ -318,16 +337,26 @@ def export_to_env() -> int:
     auto-discovered API keys. Custom providers are not auto-exported (they have
     no canonical env var name).
 
-    When ``global_config.local_only`` is True, cloud LLM presets (OpenAI,
-    Anthropic, Groq) are skipped — this closes T3 from the local_only threat
-    model: a cloud SDK that auto-discovers its key from the process env
-    could otherwise still reach the network even though the runner-level
-    ``LocalOnlyError`` blocks the LangChain construction path.
+    When ``global_config.local_only`` is True (including the fail-closed
+    degraded state), cloud LLM presets (OpenAI, Anthropic, Groq) are skipped —
+    this closes T3 from the local_only threat model: a cloud SDK that
+    auto-discovers its key from the process env could otherwise still reach
+    the network even though the runner-level ``LocalOnlyError`` blocks the
+    LangChain construction path.
+
+    LangSmith is ALSO skipped under local_only (SEC-001), even though it's
+    not a cloud LLM provider: exporting LANGSMITH_API_KEY is what lets
+    LangChain's tracing callbacks ship every prompt/completion — including
+    local ChatOllama runs — to smith.langchain.com. Search/observability
+    presets other than LangSmith (Tavily, Brave, Exa, Cohere, OpenRouter)
+    are left alone: they aren't LLM invocation or trace-egress paths, and
+    skipping them would silently break tools (e.g. web_search) that have
+    nothing to do with the cloud-model privacy boundary.
     """
     local_only = _local_only_enabled()
     n = 0
     for name, env_name in PRESET_PROVIDERS:
-        if local_only and name in _CLOUD_LLM_PROVIDERS:
+        if local_only and (name in _CLOUD_LLM_PROVIDERS or name == "LangSmith"):
             continue
         if env_name in os.environ and os.environ[env_name]:
             continue

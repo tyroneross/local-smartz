@@ -18,6 +18,8 @@ Export surface:
 """
 from __future__ import annotations
 
+import sys
+
 from localsmartz.runners.base import (
     AgentRunner,
     AssistantTurn,
@@ -39,15 +41,31 @@ except ImportError:  # pragma: no cover
 
 
 def _local_only_enabled() -> bool:
-    """Read ``global_config.local_only`` defensively — never raises, fails
-    open (False) on any read error so a config glitch can't lock a user
-    into local-only silently."""
+    """Read ``global_config.local_only``. Fails CLOSED (cloud denied) when
+    ~/.localsmartz/global.json exists but can't be parsed/read — this is a
+    privacy boundary, so a corrupt config must never silently re-open cloud
+    access. A missing file (fresh install) is not degraded and reads as
+    local_only=False, same as the schema default."""
     try:
         from localsmartz import global_config
 
-        return bool(global_config.get("local_only"))
-    except Exception:  # noqa: BLE001
-        return False
+        value, degraded = global_config.local_only_state()
+        if degraded:
+            print(
+                "Warning: could not read Local-Only setting — failing "
+                "closed, cloud providers disabled: global.json exists but "
+                "could not be parsed",
+                file=sys.stderr,
+            )
+            return True
+        return value
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"Warning: could not read Local-Only setting — failing closed, "
+            f"cloud providers disabled: {exc}",
+            file=sys.stderr,
+        )
+        return True
 
 
 def get_runner(provider: str) -> AgentRunner:

@@ -38,19 +38,38 @@ Exported at package level via ``runners.__init__``.
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any
 
 from localsmartz.runners.base import LocalOnlyError
 
 
 def _local_only_enabled() -> bool:
-    """Read ``global_config.local_only`` defensively — fails open (False)."""
+    """Read ``global_config.local_only``. Fails CLOSED (cloud denied) when
+    ~/.localsmartz/global.json exists but can't be parsed/read — this is a
+    privacy boundary, so a corrupt config must never silently re-open cloud
+    access. A missing file (fresh install) is not degraded and reads as
+    local_only=False, same as the schema default."""
     try:
         from localsmartz import global_config
 
-        return bool(global_config.get("local_only"))
-    except Exception:  # noqa: BLE001
-        return False
+        value, degraded = global_config.local_only_state()
+        if degraded:
+            print(
+                "Warning: could not read Local-Only setting — failing "
+                "closed, cloud providers disabled: global.json exists but "
+                "could not be parsed",
+                file=sys.stderr,
+            )
+            return True
+        return value
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"Warning: could not read Local-Only setting — failing closed, "
+            f"cloud providers disabled: {exc}",
+            file=sys.stderr,
+        )
+        return True
 
 
 def create_langchain_model(provider: str, model_ref: dict) -> Any:

@@ -127,21 +127,95 @@ def _saved_model_override(cwd: Path) -> str | None:
 
 _CLOUD_PROVIDERS = frozenset({"anthropic", "openai", "groq"})
 
+# SEC-002: state-changing env vars scrubbed from the process when local_only
+# flips on mid-session (POST /api/settings), and skipped by _handle_secrets_set
+# while local_only is already on. Includes LangSmith (SEC-001 trace egress)
+# alongside the cloud LLM providers.
+_LOCAL_ONLY_SCRUBBED_ENV_VARS: tuple[str, ...] = (
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY", "LANGSMITH_API_KEY",
+)
+_LOCAL_ONLY_SCRUBBED_PRESETS: frozenset[str] = frozenset(
+    {"OpenAI", "Anthropic", "Groq", "LangSmith"}
+)
 
-def _local_only_enabled() -> bool:
-    """Read ``global_config.local_only`` defensively — fails open (False)
-    so a config read error never silently locks the server into a state
-    where cloud requests get a confusing 500 instead of proceeding."""
+
+def _local_hosts() -> frozenset[str]:
+    return frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _origin_is_local(origin: str) -> bool:
+    """True iff ``origin`` (an HTTP ``Origin`` header value) points at
+    localhost/127.0.0.1/::1 on any port. Used by the SEC-002 CORS gate: only
+    same-machine origins may call state-changing endpoints cross-origin."""
+    try:
+        hostname = urlparse(origin).hostname
+    except (ValueError, AttributeError):
+        return False
+    return hostname in _local_hosts()
+
+
+def _scrub_local_only_env() -> None:
+    """Remove cloud-LLM + LangSmith env vars from THIS PROCESS's environment
+    and force tracing off. Called when local_only flips on mid-session
+    (SEC-003) — values remain in the Keychain/file store, only the process
+    env is scrubbed, so re-disabling local_only later can re-export them."""
+    for env_name in _LOCAL_ONLY_SCRUBBED_ENV_VARS:
+        os.environ.pop(env_name, None)
+    os.environ["LANGSMITH_TRACING"] = "false"
+
+
+def _local_only_state() -> tuple[bool, bool]:
+    """Read ``global_config.local_only_state()``. Fails CLOSED (cloud
+    denied) when ~/.localsmartz/global.json exists but can't be parsed/read
+    — this is a privacy boundary, so a corrupt config must never silently
+    re-open cloud access. A missing file (fresh install) is not degraded
+    and reads as local_only=False, same as the schema default. Returns
+    ``(enabled, degraded)``."""
     try:
         from localsmartz import global_config
 
-        return bool(global_config.get("local_only"))
-    except Exception:  # noqa: BLE001
-        return False
+        value, degraded = global_config.local_only_state()
+        if degraded:
+            print(
+                "Warning: could not read Local-Only setting — failing "
+                "closed, cloud providers disabled: global.json exists but "
+                "could not be parsed",
+                file=sys.stderr,
+            )
+            return True, True
+        return value, False
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"Warning: could not read Local-Only setting — failing closed, "
+            f"cloud providers disabled: {exc}",
+            file=sys.stderr,
+        )
+        return True, True
 
 
-def _local_only_blocked_response(detail: str = "cloud providers disabled by Local-Only setting") -> dict:
-    """The frozen 403 error shape for every local_only-gated endpoint."""
+def _local_only_enabled() -> bool:
+    """Bool-only accessor over ``_local_only_state()`` for call sites that
+    don't need the degraded detail (e.g. the SSE coercion path, /api/status,
+    /api/settings)."""
+    enabled, _degraded = _local_only_state()
+    return enabled
+
+
+def _local_only_blocked_response(
+    detail: str = "cloud providers disabled by Local-Only setting",
+    *,
+    degraded: bool = False,
+) -> dict:
+    """The frozen 403 error shape for every local_only-gated endpoint.
+
+    When ``degraded`` is True (global.json exists but couldn't be parsed),
+    the detail names the actual cause instead of the generic message so the
+    caller knows this is a config-health issue, not a deliberate toggle."""
+    if degraded:
+        detail = (
+            "Local-Only config is unreadable — failing closed, cloud "
+            "providers disabled"
+        )
     return {"error": "local_only", "detail": detail}
 
 
@@ -1225,6 +1299,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._json_response({"error": "Not found"}, 404)
 
     def do_PUT(self):
+        if self._reject_if_forbidden_origin():
+            return
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
         if path.startswith("/api/agents/") and path.endswith("/prompt"):
@@ -1234,6 +1310,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._json_response({"error": "Not found"}, 404)
 
     def do_POST(self):
+        if self._reject_if_forbidden_origin():
+            return
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
 
@@ -1283,11 +1361,21 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._json_response({"error": "Not found"}, 404)
 
     def do_OPTIONS(self):
+        origin = self.headers.get("Origin")
+        if origin and not _origin_is_local(origin):
+            # Preflight for a forbidden cross-origin caller — deny before the
+            # browser ever sends the real state-changing request.
+            self.send_response(403)
+            self._cors_headers()
+            self.end_headers()
+            return
         self.send_response(204)
         self._cors_headers()
         self.end_headers()
 
     def do_DELETE(self):
+        if self._reject_if_forbidden_origin():
+            return
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
         if path == "/api/folders":
@@ -1304,9 +1392,55 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
     # ── Helpers ──
 
     def _cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # SEC-002: state-changing methods (and their OPTIONS preflight) never
+        # send ACAO:* — only requests with no Origin (native app URLSession,
+        # curl) or a verified-local Origin get an allow header. GET keeps the
+        # permissive "*" to avoid breaking the app/dashboard for read-only
+        # calls, which carry no state-changing risk.
+        if self.command in ("POST", "PUT", "DELETE", "OPTIONS"):
+            origin = self.headers.get("Origin")
+            if origin:
+                if _origin_is_local(origin):
+                    self.send_header("Access-Control-Allow-Origin", origin)
+                    self.send_header("Vary", "Origin")
+                # else: forbidden origin — no ACAO header at all.
+            else:
+                self.send_header("Access-Control-Allow-Origin", "*")
+        else:
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def _reject_if_forbidden_origin(self) -> bool:
+        """SEC-002: reject state-changing (POST/PUT/DELETE) requests whose
+        Origin header host isn't localhost/127.0.0.1/::1. Requests with no
+        Origin header (native app, curl) are not browsers and always
+        proceed. Returns True if the request was rejected — caller must stop
+        dispatch immediately."""
+        origin = self.headers.get("Origin")
+        if origin and not _origin_is_local(origin):
+            # Drain any request body BEFORE responding: rejecting this early
+            # means the normal handlers (which read the body via
+            # _read_json_body) never run, so unread bytes would sit in the
+            # socket's receive queue when the connection closes — that
+            # triggers an intermittent TCP RST that can race the client's
+            # read of this very response.
+            self._drain_request_body()
+            self._json_response({"error": "forbidden_origin"}, 403)
+            return True
+        return False
+
+    def _drain_request_body(self) -> None:
+        """Read and discard the request body per Content-Length, if any."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            length = 0
+        if length > 0:
+            try:
+                self.rfile.read(length)
+            except OSError:
+                pass
 
     def _json_response(self, data: dict, status: int = 200):
         body = json.dumps(data).encode("utf-8")
@@ -3243,6 +3377,15 @@ Return ONLY the JSON, no prose, no code fences."""
             self._json_response({"error": f"Invalid value: {exc}"}, 400)
             return
 
+        # SEC-003: flipping local_only on mid-session must scrub cloud-LLM +
+        # LangSmith env vars from THIS PROCESS immediately — export_to_env()
+        # only runs at boot, so without this a key exported before the
+        # toggle would remain live in os.environ for the rest of the run.
+        # Values stay in the Keychain/file store; only the process env is
+        # cleared.
+        if updates.get("local_only") is True:
+            _scrub_local_only_env()
+
         self._handle_settings_get()
 
     @_json_body
@@ -3451,9 +3594,13 @@ Return ONLY the JSON, no prose, no code fences."""
                 {"error": f"unknown provider: {provider!r}"}, 400
             )
             return
-        if provider in _CLOUD_PROVIDERS and _local_only_enabled():
-            self._json_response(_local_only_blocked_response(), 403)
-            return
+        if provider in _CLOUD_PROVIDERS:
+            enabled, degraded = _local_only_state()
+            if enabled:
+                self._json_response(
+                    _local_only_blocked_response(degraded=degraded), 403
+                )
+                return
         try:
             save_config(Path.cwd(), {"pattern": pattern, "provider": provider})
         except Exception as exc:  # noqa: BLE001
@@ -3483,8 +3630,11 @@ Return ONLY the JSON, no prose, no code fences."""
         """
         from localsmartz.cost import estimate_cost_usd
 
-        if _local_only_enabled():
-            self._json_response(_local_only_blocked_response(), 403)
+        enabled, degraded = _local_only_state()
+        if enabled:
+            self._json_response(
+                _local_only_blocked_response(degraded=degraded), 403
+            )
             return
 
         model = body.get("model", "")
@@ -3538,9 +3688,13 @@ Return ONLY the JSON, no prose, no code fences."""
         if model is not None and not isinstance(model, str):
             self._json_response({"error": "model must be a string"}, 400)
             return
-        if provider.strip().lower() in _CLOUD_PROVIDERS and _local_only_enabled():
-            self._json_response(_local_only_blocked_response(), 403)
-            return
+        if provider.strip().lower() in _CLOUD_PROVIDERS:
+            enabled, degraded = _local_only_state()
+            if enabled:
+                self._json_response(
+                    _local_only_blocked_response(degraded=degraded), 403
+                )
+                return
 
         tracer = get_tracer("localsmartz.serve.evals")
         with tracer.start_as_current_span("ls.eval.run") as span:
@@ -3585,13 +3739,13 @@ Return ONLY the JSON, no prose, no code fences."""
             if isinstance(body, dict):
                 provider = body.get("provider")
 
-        if (
-            isinstance(provider, str)
-            and provider.strip().lower() in _CLOUD_PROVIDERS
-            and _local_only_enabled()
-        ):
-            self._json_response(_local_only_blocked_response(), 403)
-            return
+        if isinstance(provider, str) and provider.strip().lower() in _CLOUD_PROVIDERS:
+            enabled, degraded = _local_only_state()
+            if enabled:
+                self._json_response(
+                    _local_only_blocked_response(degraded=degraded), 403
+                )
+                return
 
         try:
             result = run_agent_scorecard()
@@ -3841,8 +3995,15 @@ Return ONLY the JSON, no prose, no code fences."""
         except Exception as e:  # noqa: BLE001
             self._json_response({"error": str(e)}, 500)
             return
+        # SEC-003: while local_only is on, cloud-LLM + LangSmith secrets are
+        # still persisted to the Keychain/file store (so they survive toggling
+        # local_only back off), but must NOT be written into this process's
+        # environment — that would hand a live key to any code path that
+        # auto-discovers credentials from os.environ.
         env_name = _secrets.PRESET_BY_NAME.get(provider)
-        if env_name:
+        if env_name and not (
+            provider in _LOCAL_ONLY_SCRUBBED_PRESETS and _local_only_enabled()
+        ):
             os.environ[env_name] = value
         log_buffer.info("secrets", f"set {provider} ({source})")
         self._json_response({"ok": True, "source": source})

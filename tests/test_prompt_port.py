@@ -21,7 +21,7 @@ def test_orchestrator_prompt_keeps_anti_hallucination_guardrail() -> None:
     namespace"); pinning the literal string makes this test fight normal
     prompt tuning instead of guarding the actual invariant."""
     body = load_prompt("orchestrator")
-    assert "invent" in body.lower()
+    assert "never invent" in body.lower()
     assert "orchestrator" in body.lower()
 
 

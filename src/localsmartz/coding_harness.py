@@ -182,10 +182,22 @@ Default posture:
 def resolve_coding_model(profile: dict, model_override: str | None = None) -> str:
     """Pick the model for coding prompts.
 
-    Explicit CLI/UI overrides win. Otherwise use the execution model so
+    Frozen precedence: a genuine CLI/REPL pin (stashed on
+    ``profile["_cli_pinned_model"]`` by ``get_profile(..., cli_pin=True)``)
+    or the global ``active_model`` pin both outrank ``model_override`` —
+    ``model_override`` here is typically a serve-selected/project model
+    (NOT a CLI pin), so it must lose to ``profiles.global_pinned_model()``
+    when one is set. ``effective_pinned_model()`` returns the CLI pin
+    first if present, so a real CLI ``--model`` / REPL ``/model`` override
+    still wins. Falling through both, use the execution model so
     full-profile installs prefer the coder model instead of the general
     planning model.
     """
+    from localsmartz.profiles import effective_pinned_model
+
+    pinned = effective_pinned_model(profile)
+    if pinned:
+        return pinned
     if model_override:
         return model_override
     return (

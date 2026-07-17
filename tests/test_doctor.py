@@ -137,6 +137,63 @@ def test_models_present_exact_tags_installed_reports_ready():
     assert status["models_present"][0] == "ok"
 
 
+def test_models_present_pinned_active_model_uninstalled_reports_not_ready():
+    """F4: profiles.global_pinned_model() overrides planning/execution for
+    every role at runtime, so --check must validate the PIN's tag too —
+    not just the profile defaults it overrides. Pre-fix, --check ignored
+    the pin entirely and could report "ready" while the model runtime
+    will actually use is not pulled."""
+    tags_body = json.dumps({
+        "models": [{"name": "gpt-oss:20b"}, {"name": "qwen2.5-coder:32b"}],
+    }).encode()
+    opener = _url_opener({
+        "http://localhost:11434/api/tags": _FakeResp(200, tags_body),
+        "http://localhost:11435": ConnectionRefusedError("down"),
+        "http://localhost:11436": ConnectionRefusedError("down"),
+    })
+    mock_profile = {
+        "name": "full",
+        "planning_model": "gpt-oss:20b",
+        "execution_model": "qwen2.5-coder:32b",
+    }
+    with patch("urllib.request.urlopen", side_effect=opener), \
+         patch("localsmartz.profiles.get_profile", return_value=mock_profile), \
+         patch("localsmartz.profiles.global_pinned_model", return_value="pinned:not-installed"):
+        results = doctor.run_doctor()
+
+    status = {name: (s, h) for (name, s, h) in results}
+    assert status["models_present"][0] == "fail"
+    assert "pinned:not-installed" in status["models_present"][1]
+
+
+def test_models_present_pinned_active_model_installed_reports_ready():
+    """Pin set AND its tag pulled — still ready (no false-negative)."""
+    tags_body = json.dumps({
+        "models": [
+            {"name": "gpt-oss:20b"},
+            {"name": "qwen2.5-coder:32b"},
+            {"name": "pinned:installed"},
+        ],
+    }).encode()
+    opener = _url_opener({
+        "http://localhost:11434/api/tags": _FakeResp(200, tags_body),
+        "http://localhost:11435": ConnectionRefusedError("down"),
+        "http://localhost:11436": ConnectionRefusedError("down"),
+    })
+    mock_profile = {
+        "name": "full",
+        "planning_model": "gpt-oss:20b",
+        "execution_model": "qwen2.5-coder:32b",
+    }
+    with patch("urllib.request.urlopen", side_effect=opener), \
+         patch("localsmartz.profiles.get_profile", return_value=mock_profile), \
+         patch("localsmartz.profiles.global_pinned_model", return_value="pinned:installed"):
+        results = doctor.run_doctor()
+
+    status = {name: (s, h) for (name, s, h) in results}
+    assert status["models_present"][0] == "ok"
+
+
 def test_fast_path_classifier_check_matches_profiles():
     # This check is pure code: positive case is fast-path, negative is not.
     name, status, _hint = doctor._check_fast_path_classifier()

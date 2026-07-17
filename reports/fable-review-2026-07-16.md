@@ -85,10 +85,23 @@ runtime ignores, and pass `--check` on a model that 404s at run time.
     `<provider>_api_key` while `cloud_anthropic` reads `get_secret("anthropic")`
     — unify to one helper so a key stored via the UI is found by every runner.
 
+## Review-pass additions (independent auditor + security reviewer, same day)
+Auditor verdict: yay — 4 findings, all fixed same run: local_only now fails
+CLOSED on unreadable config (degraded state + stderr warning); active_model pin
+extended to fast-path and coding routes (precedence tests); doctor validates the
+pin; test assertion polarity restored. Security review found 2 HIGH beyond the
+model choke points, both fixed: LangSmith tracing egress now gated under
+Local-Only (key export skipped, LANGSMITH_TRACING forced off, mid-session env
+scrub), and state-changing HTTP endpoints now reject non-localhost Origins
+(drive-by CORS flip of the privacy toggle closed). Plus: UI copy no longer
+over-claims (web search residual named), researcher/fact_checker prompts gained
+untrusted-content lines.
+
 ## Verification status
-- ✅ Comparison legs + oracles: deterministic scripts (runner.py, verify.py),
-  artifacts under scratchpad/compare/.
+- ✅ Comparison legs + oracles: deterministic scripts (runner.py, verify.py) +
+  independent Opus judge on raw artifacts.
 - ✅ Code findings: file:line cites from read code (three explorer maps).
-- ⚠️ C1/C2/C3 outcomes summarized above are per-implementer reports + orchestrator
-  spot-checks; full-suite pytest + xcodebuild + live smoke are the gate before
-  commit (see build run report).
+- ✅ Build: full suite 1003 passed / 4 skipped (orchestrator re-ran, not just
+  implementer claims); xcodebuild Debug BUILD SUCCEEDED; live serve smoke of
+  /api/settings round-trip, 403 local-only, 403 forbidden-origin, agent
+  disable, pin visible in /api/status; user global.json restored after smoke.

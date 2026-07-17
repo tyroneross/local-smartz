@@ -171,6 +171,22 @@ localhost-bound (same trust model as existing endpoints; no auth change).
 Residual risk: env vars set outside the app are not scrubbed (documented).
 security-reviewer runs at Review-A.
 
+F1 follow-up (independent-auditor finding, fixed): a corrupt/unreadable
+`~/.localsmartz/global.json` used to make `load_global()` silently return
+all-defaults, so every `_local_only_enabled()` helper reported False (cloud
+allowed) — a privacy boundary failing OPEN. Fixed via
+`global_config.local_only_state() -> (value, degraded)`, where `degraded`
+is True only when the file exists but can't be parsed (a missing file is a
+fresh install, not degraded, and stays permissive). All 5 call sites
+(runners/__init__.py, runners/factory.py, agent.py, serve.py, secrets.py)
+now treat degraded as local_only=ON (fail closed) and emit a stderr
+warning; serve.py's 403 detail names the config as unreadable in that case.
+Residual risk: the degraded state is not surfaced in `/api/status` or
+`GET /api/settings` (both still read the plain defaulted value), so a user
+relying only on the UI toggle state won't see that enforcement is
+currently stricter than the displayed setting — only the stderr warning
+and the 403 detail reveal it.
+
 ## Parallel decision record
 parallel_batch: [C1, C2, C3] — disjoint write-sets (C1 backend py files,
 C2 prompts dir, C3 app/LocalSmartz). C3's read-dependency on C1 is satisfied by

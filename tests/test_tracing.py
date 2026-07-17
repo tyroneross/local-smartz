@@ -4,6 +4,16 @@ import os
 from localsmartz.tracing import configure_tracing
 
 
+def _set_local_only(tmp_path, monkeypatch, value: bool) -> None:
+    """Isolate HOME and persist local_only via the real global_config path,
+    matching how serve.py/CLI would set it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    from localsmartz import global_config
+
+    global_config.save_global({"local_only": value})
+
+
 def test_returns_false_when_no_env(tmp_path, monkeypatch):
     """No .env, no env vars → tracing disabled."""
     monkeypatch.delenv("LANGSMITH_TRACING", raising=False)
@@ -56,3 +66,39 @@ def test_strips_quotes(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text('LANGSMITH_TRACING=true\nLANGSMITH_PROJECT="QuotedProject"\n')
     configure_tracing(tmp_path)
     assert os.environ["LANGSMITH_PROJECT"] == "QuotedProject"
+
+
+# ── SEC-001: Local-Only must block LangSmith tracing egress ────────────────
+
+def test_local_only_blocks_trace_flag(tmp_path, monkeypatch):
+    """local_only on + the --trace path (force=True, mirrors __main__.py
+    pre-setting LANGSMITH_TRACING=true) → tracing stays disabled."""
+    _set_local_only(tmp_path, monkeypatch, True)
+    result = configure_tracing(tmp_path, force=True)
+    assert result is False
+    assert os.environ["LANGSMITH_TRACING"] == "false"
+
+
+def test_local_only_overrides_preset_env_var(tmp_path, monkeypatch):
+    """A pre-set LANGSMITH_TRACING=true (e.g. inherited from a parent shell)
+    cannot re-enable tracing for this process while local_only is on."""
+    _set_local_only(tmp_path, monkeypatch, True)
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    result = configure_tracing(tmp_path)
+    assert result is False
+    assert os.environ["LANGSMITH_TRACING"] == "false"
+
+
+def test_local_only_prints_stderr_notice(tmp_path, monkeypatch, capsys):
+    _set_local_only(tmp_path, monkeypatch, True)
+    configure_tracing(tmp_path, force=True)
+    captured = capsys.readouterr()
+    assert "Local-Only: LangSmith tracing disabled" in captured.err
+
+
+def test_local_only_off_leaves_trace_flag_unchanged(tmp_path, monkeypatch):
+    """local_only off (explicit) → --trace path behaves exactly as before."""
+    _set_local_only(tmp_path, monkeypatch, False)
+    result = configure_tracing(tmp_path, force=True)
+    assert result is True
+    assert os.environ["LANGSMITH_TRACING"] == "true"

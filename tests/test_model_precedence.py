@@ -132,3 +132,76 @@ def test_get_profile_stashes_when_cli_pin_true():
 def test_get_profile_no_stash_when_cli_pin_true_but_no_override():
     profile = get_profile("full", cli_pin=True)
     assert profile.get("_cli_pinned_model") is None
+
+
+# ── F2: fast_path_stream + resolve_coding_model must honor the SAME
+# precedence (CLI pin > active_model pin > model_override > profile
+# default) instead of letting model_override win unconditionally. The
+# pre-fix bug: both took an explicit model_override that always won,
+# never consulting profiles.global_pinned_model() — so a serve-selected/
+# project model silently bypassed the active_model single-model-mode pin.
+
+def test_fast_path_stream_active_model_pin_wins_over_serve_override():
+    """A NON-CLI model_override (e.g. serve.py's _model_override /
+    _saved_model_override) must lose to the global active_model pin."""
+    from localsmartz.agent import fast_path_stream
+
+    global_config.set("active_model", "global:pin")
+    profile = get_profile("full")  # serve-style: no cli_pin
+    gen = fast_path_stream("hi", profile, model_override="serve:override")
+    try:
+        first = next(gen)
+    finally:
+        gen.close()
+    assert "global:pin" in first["content"]
+    assert "serve:override" not in first["content"]
+
+
+def test_fast_path_stream_cli_pin_wins_over_active_model():
+    """A genuine CLI --model / REPL /model pin still wins over active_model."""
+    from localsmartz.agent import fast_path_stream
+
+    global_config.set("active_model", "global:pin")
+    profile = get_profile("full", model_override="cli:pin", cli_pin=True)
+    gen = fast_path_stream("hi", profile, model_override="cli:pin")
+    try:
+        first = next(gen)
+    finally:
+        gen.close()
+    assert "cli:pin" in first["content"]
+
+
+def test_fast_path_stream_override_wins_when_no_pin():
+    """With no active_model pin set, model_override still resolves normally."""
+    from localsmartz.agent import fast_path_stream
+
+    profile = get_profile("full")
+    gen = fast_path_stream("hi", profile, model_override="serve:override")
+    try:
+        first = next(gen)
+    finally:
+        gen.close()
+    assert "serve:override" in first["content"]
+
+
+def test_resolve_coding_model_active_model_pin_wins_over_serve_override():
+    from localsmartz.coding_harness import resolve_coding_model
+
+    global_config.set("active_model", "global:pin")
+    profile = get_profile("full")  # serve-style: no cli_pin
+    assert resolve_coding_model(profile, "serve:override") == "global:pin"
+
+
+def test_resolve_coding_model_cli_pin_wins_over_active_model():
+    from localsmartz.coding_harness import resolve_coding_model
+
+    global_config.set("active_model", "global:pin")
+    profile = get_profile("full", model_override="cli:pin", cli_pin=True)
+    assert resolve_coding_model(profile, "cli:pin") == "cli:pin"
+
+
+def test_resolve_coding_model_override_wins_when_no_pin():
+    from localsmartz.coding_harness import resolve_coding_model
+
+    profile = get_profile("full")
+    assert resolve_coding_model(profile, "serve:override") == "serve:override"

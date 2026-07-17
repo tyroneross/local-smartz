@@ -217,3 +217,126 @@ def test_evals_run_ollama_unaffected_by_local_only(server, monkeypatch):
     monkeypatch.setattr(benchmarking, "benchmark_to_dict", lambda r: {"pass": r.pass_count, "fail": r.fail_count})
     status, _body = _post(server, "/api/evals/run", {"provider": "ollama"})
     assert status == 200
+
+
+# ── F1: degraded (corrupt global.json) fails CLOSED, missing file is open ──
+# A privacy boundary must fail closed on an unreadable config, not open —
+# the pre-fix bug was that a corrupt ~/.localsmartz/global.json made
+# global_config.load_global() silently return all-defaults, so every
+# _local_only_enabled() helper reported False (cloud allowed) instead of
+# denying it. These tests pin the corrected polarity at all 3 Python
+# model-construction choke points, plus the missing-file (fresh install)
+# case that must stay permissive.
+
+def _write_corrupt_global_json(home: "object") -> None:
+    config_dir = home / ".localsmartz"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "global.json").write_text("{not valid json")
+
+
+def test_get_runner_denies_cloud_and_warns_when_config_corrupt(fake_home, capsys):
+    from localsmartz.runners import get_runner
+
+    _write_corrupt_global_json(fake_home)
+    with pytest.raises(LocalOnlyError):
+        get_runner("anthropic")
+    err = capsys.readouterr().err
+    assert "failing closed" in err
+    assert "cloud providers disabled" in err
+
+
+def test_get_runner_allows_cloud_when_config_missing(fake_home):
+    from localsmartz.runners import get_runner
+
+    # No global.json at all — fresh install, not degraded.
+    assert not (fake_home / ".localsmartz" / "global.json").exists()
+    try:
+        get_runner("anthropic")
+    except LocalOnlyError:
+        pytest.fail("LocalOnlyError raised for a missing (non-degraded) config")
+    except ImportError:
+        pass  # anthropic SDK may not be installed — proves the gate didn't fire
+
+
+def test_create_langchain_model_denies_cloud_and_warns_when_config_corrupt(fake_home, capsys):
+    from localsmartz.runners.factory import create_langchain_model
+
+    _write_corrupt_global_json(fake_home)
+    with pytest.raises(LocalOnlyError):
+        create_langchain_model("anthropic", {"name": "claude-sonnet-4-6"})
+    err = capsys.readouterr().err
+    assert "failing closed" in err
+    assert "cloud providers disabled" in err
+
+
+def test_create_langchain_model_allows_cloud_when_config_missing(monkeypatch, fake_home):
+    from localsmartz.runners.factory import create_langchain_model
+
+    assert not (fake_home / ".localsmartz" / "global.json").exists()
+
+    class FakeChatOllama:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    # Route through ollama (no cloud SDK dependency) to prove the gate
+    # didn't block — LocalOnlyError would only ever fire for provider !=
+    # ollama, so this call succeeding at all demonstrates no false-positive.
+    monkeypatch.setattr("langchain_ollama.ChatOllama", FakeChatOllama)
+    model = create_langchain_model("ollama", {"name": "qwen3:8b"})
+    assert isinstance(model, FakeChatOllama)
+
+
+def test_agent_create_model_denies_cloud_and_warns_when_config_corrupt(fake_home, capsys, monkeypatch):
+    from localsmartz import agent as agent_mod
+    from localsmartz.profiles import get_profile
+
+    _write_corrupt_global_json(fake_home)
+    monkeypatch.setattr(agent_mod, "_active_provider", lambda: "anthropic")
+    profile = get_profile("full")
+    with pytest.raises(LocalOnlyError):
+        agent_mod._create_model(profile, "planning")
+    err = capsys.readouterr().err
+    assert "failing closed" in err
+    assert "cloud providers disabled" in err
+
+
+def test_agent_create_model_allows_cloud_when_config_missing(fake_home, monkeypatch):
+    from localsmartz import agent as agent_mod
+    from localsmartz.profiles import get_profile
+
+    assert not (fake_home / ".localsmartz" / "global.json").exists()
+    monkeypatch.setattr(agent_mod, "_active_provider", lambda: "anthropic")
+    profile = get_profile("full")
+
+    class FakeChatAnthropic:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(agent_mod, "_create_anthropic_model", lambda name: FakeChatAnthropic())
+    model = agent_mod._create_model(profile, "planning")
+    assert isinstance(model, FakeChatAnthropic)
+
+
+def test_secrets_export_denies_cloud_presets_and_warns_when_config_corrupt(fake_home, capsys, monkeypatch):
+    from localsmartz import secrets as secrets_mod
+
+    monkeypatch.setattr(secrets_mod, "_keyring", lambda: None)
+    for _name, env_name in secrets_mod.PRESET_PROVIDERS:
+        monkeypatch.delenv(env_name, raising=False)
+
+    secrets_mod.set("OpenAI", "sk-openai-abcd")
+    _write_corrupt_global_json(fake_home)
+
+    n = secrets_mod.export_to_env()
+    err = capsys.readouterr().err
+    assert "failing closed" in err
+    assert "OPENAI_API_KEY" not in __import__("os").environ
+    assert n == 0
+
+
+def test_patterns_active_403_degraded_detail_names_unreadable_config(server, fake_home):
+    _write_corrupt_global_json(fake_home)
+    status, body = _post(server, "/api/patterns/active", {"pattern": "single", "provider": "anthropic"})
+    assert status == 403
+    assert body["error"] == "local_only"
+    assert "unreadable" in body["detail"].lower()

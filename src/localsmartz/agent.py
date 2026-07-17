@@ -274,15 +274,31 @@ def _create_model(profile: dict, role: str, *, model_name: str | None = None):
 
 
 def _local_only_enabled() -> bool:
-    """Read ``global_config.local_only`` defensively. Defaults to False —
-    a config read failure must never silently lock a user into local-only
-    (fail open on the read, not on the enforcement)."""
+    """Read ``global_config.local_only``. Fails CLOSED (cloud denied) when
+    ~/.localsmartz/global.json exists but can't be parsed/read — this is a
+    privacy boundary, so a corrupt config must never silently re-open cloud
+    access. A missing file (fresh install) is not degraded and reads as
+    local_only=False, same as the schema default."""
     try:
         from localsmartz import global_config
 
-        return bool(global_config.get("local_only"))
-    except Exception:  # noqa: BLE001
-        return False
+        value, degraded = global_config.local_only_state()
+        if degraded:
+            print(
+                "Warning: could not read Local-Only setting — failing "
+                "closed, cloud providers disabled: global.json exists but "
+                "could not be parsed",
+                file=sys.stderr,
+            )
+            return True
+        return value
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"Warning: could not read Local-Only setting — failing closed, "
+            f"cloud providers disabled: {exc}",
+            file=sys.stderr,
+        )
+        return True
 
 
 def _active_provider() -> str:
@@ -451,9 +467,19 @@ def fast_path_stream(
     the final ``done`` event on the serve layer if needed.
     """
     import time as _time
+    from localsmartz.profiles import effective_pinned_model
 
-    # Pick model: explicit override wins, then 'fast' role, then planning fallback.
-    if model_override:
+    # Pick model. Frozen precedence: a genuine CLI/REPL pin (stashed on
+    # profile["_cli_pinned_model"] by get_profile(..., cli_pin=True)) or the
+    # global active_model pin both outrank model_override — model_override
+    # here is typically a serve-selected/project model (NOT a CLI pin), so
+    # it must lose to profiles.global_pinned_model() when one is set.
+    # effective_pinned_model() already returns the CLI pin first if present,
+    # so a real CLI --model / REPL /model override still wins.
+    pinned = effective_pinned_model(profile)
+    if pinned:
+        model_name = pinned
+    elif model_override:
         model_name = model_override
     else:
         fast_role = get_model(profile, "fast")

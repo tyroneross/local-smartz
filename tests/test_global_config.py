@@ -252,3 +252,38 @@ def test_local_only_and_disabled_agents_round_trip_and_persist(isolate_home):
     raw = json.loads((isolate_home / ".localsmartz" / "global.json").read_text())
     assert raw["local_only"] is True
     assert raw["disabled_agents"] == ["writer"]
+
+
+# ── local_only_state() — degraded-vs-missing polarity (F1 fix) ───────────
+
+def test_local_only_state_missing_file_is_not_degraded(isolate_home):
+    """Fresh install: no global.json at all. Must read as
+    (False, False) — NOT degraded. This is the case that must stay
+    permissive (cloud allowed) after the fail-closed fix."""
+    assert global_config.local_only_state() == (False, False)
+
+
+def test_local_only_state_corrupt_file_is_degraded_and_fails_closed(isolate_home):
+    config_dir = isolate_home / ".localsmartz"
+    config_dir.mkdir()
+    (config_dir / "global.json").write_text("{not valid json")
+    value, degraded = global_config.local_only_state()
+    assert degraded is True
+    assert value is True  # fail closed regardless of what local_only "was"
+
+
+def test_local_only_state_non_dict_json_is_degraded_and_fails_closed(isolate_home):
+    config_dir = isolate_home / ".localsmartz"
+    config_dir.mkdir()
+    (config_dir / "global.json").write_text("[1, 2, 3]")
+    value, degraded = global_config.local_only_state()
+    assert degraded is True
+    assert value is True
+
+
+def test_local_only_state_valid_file_reads_through_not_degraded(isolate_home):
+    global_config.save_global({"local_only": True})
+    assert global_config.local_only_state() == (True, False)
+
+    global_config.save_global({"local_only": False})
+    assert global_config.local_only_state() == (False, False)
