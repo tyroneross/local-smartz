@@ -33,6 +33,15 @@ private struct EvalRunResponse: Decodable {
     let results: [EvalTaskResult]
 }
 
+/// Minimal shape we need off GET /api/settings — just local_only.
+private struct LocalOnlyResponse: Decodable {
+    let localOnly: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case localOnly = "local_only"
+    }
+}
+
 private struct AgentScorecardRow: Decodable, Identifiable {
     let name: String
     let actualRuntime: String
@@ -102,7 +111,27 @@ private final class EvalsVM: ObservableObject {
     @Published var scorecardError: String?
     @Published var scorecard: AgentScorecardResponse?
 
-    let providers = ["ollama", "anthropic", "openai", "groq"]
+    /// When true, cloud providers are hidden — GET /api/settings local_only.
+    @Published var localOnly: Bool = false
+
+    let allProviders = ["ollama", "anthropic", "openai", "groq"]
+
+    /// Providers actually shown in the picker — cloud hidden under Local-Only.
+    var providers: [String] {
+        localOnly ? ["ollama"] : allProviders
+    }
+
+    func loadSettings() async {
+        guard let base = await SettingsBackend.discover(),
+              let url = URL(string: "\(base)/api/settings") else { return }
+        if let (data, _) = try? await URLSession.shared.data(from: url),
+           let decoded = try? JSONDecoder().decode(LocalOnlyResponse.self, from: data) {
+            localOnly = decoded.localOnly
+            if localOnly && provider != "ollama" {
+                provider = "ollama"
+            }
+        }
+    }
 
     func run() async {
         guard let base = await SettingsBackend.discover() else {
@@ -126,8 +155,14 @@ private final class EvalsVM: ObservableObject {
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
-                let msg = String(data: data, encoding: .utf8) ?? ""
-                error = "Run failed (HTTP \(http.statusCode)): \(msg)"
+                if http.statusCode == 403 {
+                    localOnly = true
+                    provider = "ollama"
+                    error = "Local-Only is on — cloud providers hidden"
+                } else {
+                    let msg = String(data: data, encoding: .utf8) ?? ""
+                    error = "Run failed (HTTP \(http.statusCode)): \(msg)"
+                }
                 return
             }
             self.result = try JSONDecoder().decode(EvalRunResponse.self, from: data)
@@ -183,12 +218,19 @@ struct EvalTab: View {
                 Divider().padding(.vertical, 2)
 
                 SettingsTabsRow("Provider") {
-                    Picker("Provider", selection: $vm.provider) {
-                        ForEach(vm.providers, id: \.self) { prov in
-                            Text(prov).tag(prov)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Picker("Provider", selection: $vm.provider) {
+                            ForEach(vm.providers, id: \.self) { prov in
+                                Text(prov).tag(prov)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        if vm.localOnly {
+                            Text("Local-Only is on — cloud providers hidden")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    .pickerStyle(.segmented)
                 }
 
                 SettingsTabsRow("Model (optional)") {
@@ -340,6 +382,7 @@ struct EvalTab: View {
                 }
             }
         }
+        .task { await vm.loadSettings() }
     }
 
     private var header: some View {

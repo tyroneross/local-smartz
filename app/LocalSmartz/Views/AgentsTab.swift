@@ -49,6 +49,10 @@ fileprivate final class AgentsVM: ObservableObject {
     /// keep the surface small and the Save/Cancel affordance obvious.
     @Published var editingAgent: String?
 
+    /// Name of the agent with an enable/disable toggle in flight — disables
+    /// that one toggle while the POST is outstanding.
+    @Published var togglingAgent: String?
+
     func refresh() async {
         loading = true
         defer { loading = false }
@@ -176,6 +180,40 @@ fileprivate final class AgentsVM: ObservableObject {
         editingAgent = nil
         await refresh()
     }
+
+    /// POST /api/agents/<name>/enabled { enabled }. 400 responses (unknown
+    /// role, orchestrator, would-disable-all) surface inline via saveError;
+    /// the toggle itself re-syncs from the backend afterward either way so
+    /// it never drifts from server state.
+    func setEnabled(_ agent: AgentInfo, enabled: Bool) async {
+        guard let base = await SettingsBackend.discover() else {
+            saveError = "Backend not reachable."
+            return
+        }
+        togglingAgent = agent.name
+        defer { togglingAgent = nil }
+        saveError = nil
+
+        let url = URL(string: "\(base)/api/agents/\(agent.name)/enabled")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["enabled": enabled])
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
+                if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let msg = obj["error"] as? String {
+                    saveError = msg
+                } else {
+                    saveError = "Update failed (HTTP \(http.statusCode))"
+                }
+            }
+        } catch {
+            saveError = "Update failed: \(error.localizedDescription)"
+        }
+        await refresh()
+    }
 }
 
 struct AgentsTab: View {
@@ -217,9 +255,13 @@ struct AgentsTab: View {
                                 set: { vm.draftPrompt[agent.name] = $0 }
                             ),
                             saving: vm.saving,
+                            toggling: vm.togglingAgent == agent.name,
                             onEdit: { vm.beginEdit(agent) },
                             onCancel: { vm.cancelEdit() },
-                            onSave: { Task { await vm.save(agent) } }
+                            onSave: { Task { await vm.save(agent) } },
+                            onToggleEnabled: { newValue in
+                                Task { await vm.setEnabled(agent, enabled: newValue) }
+                            }
                         )
                     }
                     if let err = vm.saveError {
@@ -286,16 +328,28 @@ private struct AgentCard: View {
     @Binding var draftModel: String
     @Binding var draftPrompt: String
     let saving: Bool
+    let toggling: Bool
     let onEdit: () -> Void
     let onCancel: () -> Void
     let onSave: () -> Void
+    let onToggleEnabled: (Bool) -> Void
 
     @State private var promptExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // Header row: title + model
+            // Header row: enable toggle + title + model
             HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Toggle("", isOn: Binding(
+                    get: { agent.enabled },
+                    set: { onToggleEnabled($0) }
+                ))
+                .labelsHidden()
+                .controlSize(.small)
+                .disabled(toggling)
+                .accessibilityLabel(agent.enabled ? "Disable \(agent.title)" : "Enable \(agent.title)")
+                .help(agent.enabled ? "Disable this agent" : "Enable this agent")
+
                 Text(agent.title)
                     .font(.system(size: 15, weight: .medium))
                 Spacer(minLength: 8)
@@ -359,6 +413,8 @@ private struct AgentCard: View {
             }
         }
         .padding(.vertical, 4)
+        // Dim disabled agents — signal via opacity, not a background badge.
+        .opacity(agent.enabled ? 1.0 : 0.5)
     }
 
     // Edit controls: compact form stacked below the card header.

@@ -127,10 +127,148 @@ struct SettingsView: View {
     }
 }
 
+// MARK: - Backend-owned settings (local_only, active_model, disabled_agents)
+//
+// These three keys are frozen-contract fields owned by the backend's
+// GET/POST /api/settings endpoint (~/.localsmartz/global.json, validated
+// server-side). Swift must not become a second, validation-bypassing writer
+// of these keys — GeneralTab talks to /api/settings directly and never
+// round-trips them through GlobalSettings.save().
+
+/// GET /api/models — existing endpoint, unchanged shape.
+private struct BackendModelOption: Decodable, Identifiable, Hashable {
+    let name: String
+    let sizeGB: Double
+
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case sizeGB = "size_gb"
+    }
+}
+
+private struct ModelsListResponse: Decodable {
+    let models: [BackendModelOption]
+    let current: String
+    let profile: String?
+}
+
+/// GET/POST /api/settings envelope.
+private struct BackendSettings: Decodable {
+    let localOnly: Bool
+    let activeModel: String
+    let disabledAgents: [String]
+    let profile: String
+
+    enum CodingKeys: String, CodingKey {
+        case localOnly = "local_only"
+        case activeModel = "active_model"
+        case disabledAgents = "disabled_agents"
+        case profile
+    }
+}
+
+/// Sentinel tag for "no global override — each agent uses its own model".
+private let perAgentDefaultSentinel = ""
+
+@MainActor
+private final class BackendSettingsVM: ObservableObject {
+    @Published var reachable = true
+    @Published var loading = false
+    @Published var models: [BackendModelOption] = []
+    @Published var localOnly: Bool = false
+    @Published var activeModel: String = ""
+    @Published var saveError: String?
+    @Published var saving = false
+
+    func refresh() async {
+        loading = true
+        defer { loading = false }
+        guard let base = await SettingsBackend.discover() else {
+            reachable = false
+            return
+        }
+        reachable = true
+        await loadModels(base: base)
+        await loadSettings(base: base)
+    }
+
+    private func loadModels(base: String) async {
+        guard let url = URL(string: "\(base)/api/models") else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoded = try JSONDecoder().decode(ModelsListResponse.self, from: data)
+            models = decoded.models
+        } catch {
+            // Non-fatal — picker just shows the sentinel option.
+        }
+    }
+
+    private func loadSettings(base: String) async {
+        guard let url = URL(string: "\(base)/api/settings") else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoded = try JSONDecoder().decode(BackendSettings.self, from: data)
+            localOnly = decoded.localOnly
+            activeModel = decoded.activeModel
+        } catch {
+            // Non-fatal — controls fall back to their published defaults.
+        }
+    }
+
+    /// POST /api/settings { active_model }. Only this one key — never
+    /// round-trips disabled_agents or local_only, so it can't clobber
+    /// concurrent edits from the Agents tab.
+    func setActiveModel(_ model: String) async {
+        await post(["active_model": model])
+    }
+
+    /// POST /api/settings { local_only }.
+    func setLocalOnly(_ value: Bool) async {
+        await post(["local_only": value])
+    }
+
+    private func post(_ body: [String: Any]) async {
+        guard let base = await SettingsBackend.discover() else {
+            reachable = false
+            return
+        }
+        saving = true
+        defer { saving = false }
+        saveError = nil
+
+        let url = URL(string: "\(base)/api/settings")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
+                if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let msg = obj["error"] as? String {
+                    saveError = msg
+                } else {
+                    saveError = "Save failed (HTTP \(http.statusCode))"
+                }
+                await loadSettings(base: base)  // resync — reject reverts UI
+                return
+            }
+            let decoded = try JSONDecoder().decode(BackendSettings.self, from: data)
+            localOnly = decoded.localOnly
+            activeModel = decoded.activeModel
+        } catch {
+            saveError = "Save failed: \(error.localizedDescription)"
+        }
+    }
+}
+
 // MARK: - General Tab
 
 private struct GeneralTab: View {
     @ObservedObject var vm: SettingsViewModel
+    @StateObject private var backendVM = BackendSettingsVM()
 
     var body: some View {
         SettingsForm {
@@ -142,9 +280,62 @@ private struct GeneralTab: View {
                 )
             }
             Divider().padding(.vertical, 2)
-            LabeledRow("Active model") {
-                TextField("e.g. gpt-oss:20b", text: $vm.settings.activeModel)
-                    .textFieldStyle(.roundedBorder)
+            LabeledRow("Model for all agents") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Picker("", selection: Binding(
+                        get: { backendVM.activeModel },
+                        set: { newValue in
+                            backendVM.activeModel = newValue
+                            Task { await backendVM.setActiveModel(newValue) }
+                        }
+                    )) {
+                        Text("Per-agent (default)").tag(perAgentDefaultSentinel)
+                        ForEach(backendVM.models) { model in
+                            Text(model.name).tag(model.name)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .disabled(!backendVM.reachable || backendVM.saving)
+                    Text("Use one model for all agents instead of each agent's own assignment.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !backendVM.reachable {
+                        Text("Backend offline — start the main window to change this.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.orange)
+                    } else if let err = backendVM.saveError {
+                        Text(err)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            Divider().padding(.vertical, 2)
+            LabeledRow("Local Only") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle(
+                        "Local Only",
+                        isOn: Binding(
+                            get: { backendVM.localOnly },
+                            set: { newValue in
+                                backendVM.localOnly = newValue
+                                Task { await backendVM.setLocalOnly(newValue) }
+                            }
+                        )
+                    )
+                    .labelsHidden()
+                    .disabled(!backendVM.reachable || backendVM.saving)
+                    Text("Blocks cloud providers — all inference stays on this Mac.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                    if !backendVM.reachable {
+                        Text("Backend offline — start the main window to change this.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.orange)
+                    }
+                }
             }
             Divider().padding(.vertical, 2)
             LabeledRow("Safety") {
@@ -173,6 +364,9 @@ private struct GeneralTab: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+        .task {
+            await backendVM.refresh()
         }
     }
 }

@@ -173,6 +173,20 @@ struct AgentRoutingTab: View {
     var body: some View {
         ScrollView {
             SettingsTabsForm {
+                // Deprecation notice (2026-07-16) — per-agent model routing is
+                // also editable from the Agents tab, which additionally
+                // supports enabling/disabling a role. This tab is unchanged
+                // functionally; consolidation is a recommendation, not
+                // executed this pass.
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.right.circle")
+                        .foregroundStyle(.secondary)
+                    Text("Model routing is also editable in the Agents tab.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                Divider().padding(.vertical, 2)
+
                 HStack(alignment: .firstTextBaseline) {
                     Text("Agent Routing")
                         .font(.system(size: 13, weight: .medium))

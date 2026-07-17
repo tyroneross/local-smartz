@@ -33,6 +33,17 @@ private struct PatternListResponse: Decodable {
     let patterns: [PatternRow]
 }
 
+/// Minimal shape we need off GET /api/settings — just local_only. A full
+/// BackendSettings decode lives in SettingsView.swift; this tab only cares
+/// about one field so it decodes its own narrow slice.
+private struct LocalOnlyResponse: Decodable {
+    let localOnly: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case localOnly = "local_only"
+    }
+}
+
 @MainActor
 private final class PatternsVM: ObservableObject {
     @Published var patterns: [PatternRow] = []
@@ -46,7 +57,15 @@ private final class PatternsVM: ObservableObject {
     @Published var selectedPattern: String = "single"
     @Published var selectedProvider: String = "ollama"
 
-    let providers = ["ollama", "anthropic", "openai", "groq"]
+    /// When true, cloud providers are hidden — GET /api/settings local_only.
+    @Published var localOnly: Bool = false
+
+    let allProviders = ["ollama", "anthropic", "openai", "groq"]
+
+    /// Providers actually shown in the picker — cloud hidden under Local-Only.
+    var providers: [String] {
+        localOnly ? ["ollama"] : allProviders
+    }
 
     func refresh() async {
         loading = true
@@ -59,6 +78,20 @@ private final class PatternsVM: ObservableObject {
         }
         await loadPatterns(base: base)
         await loadCurrent(base: base)
+        await loadLocalOnly(base: base)
+    }
+
+    private func loadLocalOnly(base: String) async {
+        guard let url = URL(string: "\(base)/api/settings") else { return }
+        if let (data, _) = try? await URLSession.shared.data(from: url),
+           let decoded = try? JSONDecoder().decode(LocalOnlyResponse.self, from: data) {
+            localOnly = decoded.localOnly
+            // Cloud selection is no longer valid — fall back so the picker
+            // never shows a hidden option as selected.
+            if localOnly && selectedProvider != "ollama" {
+                selectedProvider = "ollama"
+            }
+        }
     }
 
     private func loadPatterns(base: String) async {
@@ -110,9 +143,16 @@ private final class PatternsVM: ObservableObject {
             "provider": selectedProvider,
         ])
         do {
-            let (_, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await URLSession.shared.data(for: req)
             if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
-                saveError = "Save failed (HTTP \(http.statusCode))"
+                if http.statusCode == 403 {
+                    localOnly = true
+                    selectedProvider = "ollama"
+                    saveError = "Local-Only is on — cloud providers hidden"
+                } else {
+                    let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
+                    saveError = msg ?? "Save failed (HTTP \(http.statusCode))"
+                }
                 return
             }
             lastSavedMessage = "Saved. New threads will use this pattern."
@@ -192,15 +232,22 @@ struct PatternTab: View {
                 Divider().padding(.vertical, 2)
 
                 SettingsTabsRow("Provider") {
-                    Picker("Provider", selection: $vm.selectedProvider) {
-                        ForEach(vm.providers, id: \.self) { prov in
-                            Text(prov).tag(prov)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Picker("Provider", selection: $vm.selectedProvider) {
+                            ForEach(vm.providers, id: \.self) { prov in
+                                Text(prov).tag(prov)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        if vm.localOnly {
+                            Text("Local-Only is on — cloud providers hidden")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    .pickerStyle(.segmented)
                 }
 
-                if vm.selectedProvider != "ollama" {
+                if !vm.localOnly && vm.selectedProvider != "ollama" {
                     Text(
                         "Cloud provider: runs will prompt for cost confirmation "
                         + "before each query (estimate shown in USD)."

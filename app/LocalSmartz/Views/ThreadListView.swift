@@ -22,6 +22,11 @@ struct AgentInfo: Decodable, Identifiable {
     /// the Settings → Agents tab hides the "System prompt" disclosure when
     /// absent or empty.
     let systemFocus: String?
+    /// Whether this agent role participates in research runs (per-agent
+    /// enable/disable, Settings → Agents tab). Optional in the decoder
+    /// because older backends omit the field; defaults to enabled so
+    /// pre-existing behavior (all agents run) is preserved.
+    let enabled: Bool
     var id: String { name }
 
     enum CodingKeys: String, CodingKey {
@@ -33,6 +38,20 @@ struct AgentInfo: Decodable, Identifiable {
         case modelOverride = "model_override"
         case tools
         case systemFocus = "system_focus"
+        case enabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        title = try c.decode(String.self, forKey: .title)
+        summary = try c.decode(String.self, forKey: .summary)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        defaultModel = try c.decodeIfPresent(String.self, forKey: .defaultModel)
+        modelOverride = try c.decodeIfPresent(String.self, forKey: .modelOverride)
+        tools = try c.decodeIfPresent([String].self, forKey: .tools)
+        systemFocus = try c.decodeIfPresent(String.self, forKey: .systemFocus)
+        enabled = (try? c.decodeIfPresent(Bool.self, forKey: .enabled)) ?? true
     }
 }
 
