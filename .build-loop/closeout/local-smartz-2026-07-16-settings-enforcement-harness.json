@@ -1,0 +1,29 @@
+{
+  "candidate_aging": {
+    "aged_undisposed": 0,
+    "report_line": "candidate-aging: 0 aged undisposed enforce-from-retro candidates (>= 14d)"
+  },
+  "closeout_status": "no_durable_lesson",
+  "error": null,
+  "milestone": {
+    "drain": {
+      "drained": 0,
+      "remaining": 0,
+      "results": []
+    },
+    "status": "not_shipped"
+  },
+  "reason": "no raw or retro signal this run",
+  "run_id": "local-smartz-2026-07-16-settings-enforcement-harness",
+  "signal": {
+    "raw_candidates_flat": 0,
+    "raw_candidates_queued": 0,
+    "retro_durable_path": null,
+    "retro_enforce_candidates": 0,
+    "retro_summary_path": "/Users/tyroneross/dev/git-folder/local-smartz/.build-loop/retrospectives/2026-07-17/local-smartz-2026-07-16-settings-enforcement-harness.summary.md"
+  },
+  "source": "post-push",
+  "ts": "2026-07-17T01:26:46Z",
+  "workdir": "/Users/tyroneross/dev/git-folder/local-smartz",
+  "written_to": null
+}
