@@ -21,6 +21,7 @@ from __future__ import annotations
 from localsmartz.runners.base import (
     AgentRunner,
     AssistantTurn,
+    LocalOnlyError,
     ModelRef,
 )
 from localsmartz.runners.factory import create_langchain_model
@@ -37,12 +38,29 @@ except ImportError:  # pragma: no cover
     CloudOpenAICompatRunner = None  # type: ignore[assignment]
 
 
+def _local_only_enabled() -> bool:
+    """Read ``global_config.local_only`` defensively — never raises, fails
+    open (False) on any read error so a config glitch can't lock a user
+    into local-only silently."""
+    try:
+        from localsmartz import global_config
+
+        return bool(global_config.get("local_only"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def get_runner(provider: str) -> AgentRunner:
     """Return a concrete runner for a provider string.
 
     Raises ValueError for unknown provider, ImportError if the cloud SDK
-    for that provider isn't installed.
+    for that provider isn't installed, LocalOnlyError if
+    ``global_config.local_only`` is True and ``provider`` isn't ``"ollama"``.
     """
+    if provider != "ollama" and _local_only_enabled():
+        raise LocalOnlyError(
+            f"Local-Only is on — cloud provider {provider!r} is blocked."
+        )
     if provider == "ollama":
         return LocalOllamaRunner()
     if provider == "anthropic":
@@ -65,6 +83,7 @@ def get_runner(provider: str) -> AgentRunner:
 __all__ = [
     "AgentRunner",
     "AssistantTurn",
+    "LocalOnlyError",
     "ModelRef",
     "LocalOllamaRunner",
     "CloudAnthropicRunner",

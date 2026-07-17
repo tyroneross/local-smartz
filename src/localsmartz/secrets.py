@@ -47,6 +47,23 @@ PRESET_PROVIDERS: list[tuple[str, str]] = [
 ]
 PRESET_BY_NAME = dict(PRESET_PROVIDERS)
 
+# Cloud LLM providers — the ones ``agent.py``/``runners`` actually invoke as
+# a model backend. Search/observability presets (Tavily, Brave, Exa, Cohere,
+# OpenRouter, LangSmith) are left alone under local_only: they aren't LLM
+# invocation paths, and skipping them would silently break tools (e.g.
+# web_search) that have nothing to do with the cloud-model privacy boundary.
+_CLOUD_LLM_PROVIDERS: frozenset[str] = frozenset({"OpenAI", "Anthropic", "Groq"})
+
+
+def _local_only_enabled() -> bool:
+    """Read ``global_config.local_only`` defensively — fails open (False)."""
+    try:
+        from localsmartz import global_config
+
+        return bool(global_config.get("local_only"))
+    except Exception:  # noqa: BLE001
+        return False
+
 
 def _file_path() -> Path:
     return Path.home() / ".localsmartz" / "secrets.json"
@@ -300,9 +317,18 @@ def export_to_env() -> int:
     Call once at backend startup, BEFORE any tool registration that relies on
     auto-discovered API keys. Custom providers are not auto-exported (they have
     no canonical env var name).
+
+    When ``global_config.local_only`` is True, cloud LLM presets (OpenAI,
+    Anthropic, Groq) are skipped — this closes T3 from the local_only threat
+    model: a cloud SDK that auto-discovers its key from the process env
+    could otherwise still reach the network even though the runner-level
+    ``LocalOnlyError`` blocks the LangChain construction path.
     """
+    local_only = _local_only_enabled()
     n = 0
     for name, env_name in PRESET_PROVIDERS:
+        if local_only and name in _CLOUD_LLM_PROVIDERS:
+            continue
         if env_name in os.environ and os.environ[env_name]:
             continue
         val = _kr_get(name) or _read_file().get(name)

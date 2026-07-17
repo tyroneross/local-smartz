@@ -3,7 +3,16 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from localsmartz.cli import model as model_cli
+
+
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    return tmp_path
 
 
 def test_recommend_prints_full_tier_set(capsys, monkeypatch) -> None:
@@ -57,3 +66,109 @@ def test_doctor_runs_cleanly(capsys, monkeypatch) -> None:
     assert "Tier:" in out
     assert "Ollama:" in out
     assert "Phoenix:" in out
+
+
+# ── `localsmartz model local-only on|off|status` ──────────────────────────
+
+def test_local_only_status_defaults_off(capsys, fake_home) -> None:
+    rc = model_cli.main(["local-only", "status"])
+    assert rc == 0
+    assert "off" in capsys.readouterr().out
+
+
+def test_local_only_on_persists(capsys, fake_home) -> None:
+    from localsmartz import global_config
+
+    rc = model_cli.main(["local-only", "on"])
+    assert rc == 0
+    assert global_config.get("local_only") is True
+    out = capsys.readouterr().out
+    assert "on" in out
+
+    rc = model_cli.main(["local-only", "status"])
+    assert rc == 0
+    assert "on" in capsys.readouterr().out
+
+
+def test_local_only_off_persists(capsys, fake_home) -> None:
+    from localsmartz import global_config
+
+    global_config.set("local_only", True)
+    rc = model_cli.main(["local-only", "off"])
+    assert rc == 0
+    assert global_config.get("local_only") is False
+
+
+# ── `localsmartz model global <model|clear>` ──────────────────────────────
+
+def test_model_global_sets_pin_when_installed(capsys, fake_home, monkeypatch) -> None:
+    from localsmartz import global_config
+
+    monkeypatch.setattr("localsmartz.ollama.model_available", lambda name: True)
+    rc = model_cli.main(["global", "qwen3:8b"])
+    assert rc == 0
+    assert global_config.get("active_model") == "qwen3:8b"
+    assert "qwen3:8b" in capsys.readouterr().out
+
+
+def test_model_global_rejects_uninstalled(capsys, fake_home, monkeypatch) -> None:
+    from localsmartz import global_config
+
+    monkeypatch.setattr("localsmartz.ollama.model_available", lambda name: False)
+    rc = model_cli.main(["global", "not-installed:tag"])
+    assert rc == 1
+    assert global_config.get("active_model") == ""
+    assert "Error" in capsys.readouterr().err
+
+
+def test_model_global_clear(capsys, fake_home) -> None:
+    from localsmartz import global_config
+
+    global_config.set("active_model", "something")
+    rc = model_cli.main(["global", "clear"])
+    assert rc == 0
+    assert global_config.get("active_model") == ""
+
+
+# ── `localsmartz model agents enable|disable <role>` ──────────────────────
+
+def test_model_agents_disable_persists(capsys, fake_home) -> None:
+    from localsmartz import global_config
+
+    rc = model_cli.main(["agents", "disable", "analyzer"])
+    assert rc == 0
+    assert "analyzer" in global_config.get("disabled_agents")
+    assert "disabled" in capsys.readouterr().out
+
+
+def test_model_agents_enable_persists(capsys, fake_home) -> None:
+    from localsmartz import global_config
+
+    global_config.set("disabled_agents", ["analyzer"])
+    rc = model_cli.main(["agents", "enable", "analyzer"])
+    assert rc == 0
+    assert "analyzer" not in global_config.get("disabled_agents")
+
+
+def test_model_agents_disable_orchestrator_rejected(capsys, fake_home) -> None:
+    rc = model_cli.main(["agents", "disable", "orchestrator"])
+    assert rc == 1
+    assert "Error" in capsys.readouterr().err
+
+
+def test_model_agents_disable_unknown_role_rejected(capsys, fake_home) -> None:
+    rc = model_cli.main(["agents", "disable", "ghost"])
+    assert rc == 1
+    assert "Error" in capsys.readouterr().err
+
+
+def test_model_agents_disable_all_rejected(capsys, fake_home) -> None:
+    from localsmartz.profiles import RUNNABLE_ROLES
+
+    for role in RUNNABLE_ROLES[:-1]:
+        rc = model_cli.main(["agents", "disable", role])
+        assert rc == 0
+    capsys.readouterr()
+    rc = model_cli.main(["agents", "disable", RUNNABLE_ROLES[-1]])
+    assert rc == 1
+    assert "Error" in capsys.readouterr().err

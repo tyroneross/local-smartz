@@ -22,8 +22,11 @@ from localsmartz.profiles import (
     get_agent_model,
     get_model,
     get_profile,
+    get_role_prompt,
+    is_agent_disabled,
     is_fast_path,
 )
+from localsmartz.runners.base import LocalOnlyError
 from localsmartz.threads import load_context
 from localsmartz.tools.web import web_search, scrape_url
 from localsmartz.tools.documents import parse_pdf, read_spreadsheet, read_text_file
@@ -253,6 +256,12 @@ def _create_model(profile: dict, role: str, *, model_name: str | None = None):
     provider = _active_provider()
     name = model_name or get_model(profile, role)
 
+    if provider != "ollama" and _local_only_enabled():
+        raise LocalOnlyError(
+            f"Local-Only is on — cloud provider {provider!r} is blocked. "
+            "Turn off Local-Only in Settings to use cloud models."
+        )
+
     if provider == "ollama":
         return _create_ollama_model(name)
     if provider == "anthropic":
@@ -262,6 +271,18 @@ def _create_model(profile: dict, role: str, *, model_name: str | None = None):
     # Unknown provider → fall back to ollama. Never crash the agent graph
     # on a stray config key.
     return _create_ollama_model(name)
+
+
+def _local_only_enabled() -> bool:
+    """Read ``global_config.local_only`` defensively. Defaults to False —
+    a config read failure must never silently lock a user into local-only
+    (fail open on the read, not on the enforcement)."""
+    try:
+        from localsmartz import global_config
+
+        return bool(global_config.get("local_only"))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _active_provider() -> str:
@@ -285,7 +306,34 @@ def _active_provider() -> str:
 
 def _create_ollama_model(name: str) -> ChatOllama:
     """Build a bare ChatOllama. qwen3.5 family auto-injects ``reasoning: false``
-    (F22 — see ``runners/local_ollama.py::_should_disable_reasoning``)."""
+    (F22 — see ``runners/local_ollama.py::_should_disable_reasoning``).
+
+    DEFECT FIX (mirrors ``config.resolve_model``'s planning-model fallback):
+    every Ollama model construction — planning, execution, fast, and every
+    per-agent role — goes through this one function, so this is the single
+    choke point to apply an availability check + ``resolve_available_model``
+    fallback. Before this fix only the CLI's planning-model preflight
+    (``__main__._preflight``) checked availability; execution/agent-role
+    models had none, so an uninstalled tag (e.g. the old
+    ``qwen2.5-coder:32b-instruct-q5_K_M`` default) would 404 ~94s into a
+    run instead of degrading gracefully. A missing/unreachable Ollama
+    server is not fatal here — we just warn and keep the original name so
+    the downstream call raises the real connection error (unchanged
+    behavior when Ollama is down).
+    """
+    try:
+        from localsmartz.ollama import resolve_available_model
+
+        resolved, warning = resolve_available_model(name)
+        if resolved:
+            if resolved != name and warning:
+                print(f"Warning: {warning}", file=sys.stderr)
+            name = resolved
+        elif warning:
+            print(f"Warning: {warning}", file=sys.stderr)
+    except Exception:  # noqa: BLE001 — availability check is best-effort
+        pass
+
     import httpx  # local import: heavy, only needed for the timeout struct
 
     # Reuse the F22 registry check from runners/local_ollama — keeping a
@@ -578,6 +626,11 @@ def _build_subagent_specs(
     for role_name, meta in AGENT_ROLES.items():
         if role_name in _MAIN_AGENT_ONLY:
             continue
+        if is_agent_disabled(role_name):
+            # User disabled this role in Settings — don't register it as a
+            # delegation target at all. Orchestrator can't route to a role
+            # that was never registered as a subagent.
+            continue
         if "tools" not in meta:
             # Role has no explicit tool allow-list at all — skip rather
             # than inherit the flat set, so we don't re-open the
@@ -588,7 +641,13 @@ def _build_subagent_specs(
         spec: dict = {
             "name": role_name,
             "description": meta.get("summary", role_name),
-            "system_prompt": meta.get("system_focus", ""),
+            # Prefer the editable agents/prompts/<role>.md (what
+            # list_agents/the UI's prompt editor show); fall back to the
+            # AGENT_ROLES dict string. Reading straight from
+            # meta["system_focus"] here made the UI's PUT
+            # /api/agents/<role>/prompt edits invisible at runtime — the
+            # display and the executed prompt disagreed.
+            "system_prompt": get_role_prompt(role_name),
             # Empty list means "no custom tools" — DeepAgents middleware
             # still provides write_todos + filesystem built-ins.
             "tools": scoped,
@@ -622,6 +681,7 @@ def create_agent(
     include_mcp: bool = False,
     extra_system_prompt: str = "",
     focus_agent: str | None = None,
+    cli_pin: bool = False,
 ):
     """Create the Local Smartz research agent.
 
@@ -644,13 +704,17 @@ def create_agent(
             Defaults to True for full, False for lite.
         include_mcp: Start registered MCP servers and expose their tools.
             Default False -- opt in when ready; startup can be slow.
+        cli_pin: Passed through to ``get_profile`` — True when
+            ``model_override`` is a genuine per-run CLI ``--model``/REPL
+            ``/model`` choice, which outranks the global ``active_model``
+            pin. See ``profiles.get_profile``'s docstring.
 
     Returns:
         Tuple of (agent, profile, checkpointer, mcp_clients). ``mcp_clients``
         may be empty; caller should call ``close()`` on each at session end.
     """
     cwd = cwd or Path.cwd()
-    profile = get_profile(profile_name, model_override=model_override)
+    profile = get_profile(profile_name, model_override=model_override, cli_pin=cli_pin)
     is_lite = profile["name"] == "lite"
 
     # Profile-aware defaults: lite keeps its prompt + tool budget tight.
@@ -732,7 +796,11 @@ def create_agent(
         role_meta = AGENT_ROLES[focus_agent]
         wanted = agent_tool_names(focus_agent)
         scoped_tools = _scope_tools(tools, wanted)
-        role_prompt = role_meta.get("system_focus", "") or system_prompt
+        # Prefer the editable .md prompt (get_role_prompt) so the focus-mode
+        # main agent runs on the same prompt the UI's editor + list_agents
+        # display — reading role_meta["system_focus"] directly here made a
+        # PUT /api/agents/<role>/prompt edit invisible at runtime.
+        role_prompt = get_role_prompt(focus_agent) or system_prompt
         agent = create_deep_agent(
             model=model,
             tools=scoped_tools,
@@ -748,17 +816,32 @@ def create_agent(
         # Substitute the orchestrator system prompt when available. The
         # orchestrator is the top-level router — it emits ``task()`` calls
         # in parallel for multi-facet queries and drives the fact-check
-        # loop (AGENT_ROLES["orchestrator"].system_focus). Falls back to
-        # the generic system prompt if orchestrator isn't defined
-        # (backward-compatible with older profile configs).
-        orch_meta = AGENT_ROLES.get("orchestrator")
-        if isinstance(orch_meta, dict) and orch_meta.get("system_focus"):
+        # loop. Same .md-first lookup as above (get_role_prompt) so the
+        # UI's prompt editor actually affects the running orchestrator.
+        # Falls back to the generic system prompt if orchestrator isn't
+        # defined (backward-compatible with older profile configs).
+        orchestrator_prompt = get_role_prompt("orchestrator")
+        if orchestrator_prompt:
             main_system_prompt = (
-                orch_meta["system_focus"]
+                orchestrator_prompt
                 + (("\n\n" + extra_system_prompt) if extra_system_prompt else "")
             )
         else:
             main_system_prompt = system_prompt
+        # Runtime roster suffix: the orchestrator's static prompt text names
+        # a fixed role list, but ``disabled_agents`` can shrink the ACTUAL
+        # set of task()-able roles for this run. Appending the live roster
+        # here (rather than editing the prompt file, which is C2's owned
+        # surface) keeps the orchestrator from routing to a role that
+        # was never registered as a subagent.
+        _enabled_roster = [
+            r for r, meta in AGENT_ROLES.items()
+            if r != "orchestrator" and "tools" in meta and not is_agent_disabled(r)
+        ]
+        if _enabled_roster:
+            main_system_prompt += (
+                f"\n\nAvailable roles this run: {', '.join(_enabled_roster)}."
+            )
         agent = create_deep_agent(
             model=model,
             tools=tools,
@@ -779,6 +862,7 @@ def run_research(
     cwd: Path | None = None,
     verbose: bool = True,
     model_override: str | None = None,
+    cli_pin: bool = False,
 ) -> dict:
     """Run a research query through the Local Smartz agent with streaming.
 
@@ -788,6 +872,9 @@ def run_research(
         thread_id: Optional thread for context continuity
         cwd: Working directory
         verbose: Print progress to stderr
+        cli_pin: See ``create_agent``'s docstring — passed through to
+            ``get_profile`` so a genuine CLI ``--model`` pin outranks the
+            global ``active_model`` setting.
 
     Returns:
         Final agent state dict with messages
@@ -798,6 +885,7 @@ def run_research(
         thread_id=thread_id,
         cwd=cwd,
         model_override=model_override,
+        cli_pin=cli_pin,
         include_mcp=True,
     )
 

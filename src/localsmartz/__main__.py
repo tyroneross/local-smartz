@@ -197,27 +197,78 @@ def _legacy_main():
 
 
 def _check(args):
-    """Run Ollama health check and report status."""
-    from localsmartz.profiles import get_profile
-    from localsmartz.ollama import validate_for_profile, resolve_available_model
+    """Run Ollama health check and report status.
 
-    profile = get_profile(args.profile, model_override=args.model)
+    DEFECT FIX: this used to delegate readiness entirely to
+    ``ollama.validate_for_profile``, which calls ``model_available()`` — a
+    FUZZY match (same base family + variant prefix counts as "available").
+    That fuzzy match is right for a runtime fallback decision, but wrong
+    for a health check: it reported an uninstalled EXACT tag (e.g. the old
+    ``qwen2.5-coder:32b-instruct-q5_K_M`` full-profile default) as "ready"
+    whenever the base family (``qwen2.5-coder:32b``) happened to be
+    pulled — a tag absent from live Ollama tags must never be reported
+    ready. This function now checks exact tag membership against
+    ``list_models()`` directly for both planning and execution models, and
+    applies the same ``resolve_available_model`` fallback-with-warning to
+    EACH missing model (mirrors what execution/agent-model resolution now
+    does at runtime — see ``agent._create_ollama_model``).
+    """
+    from localsmartz.profiles import get_profile
+    from localsmartz.ollama import (
+        is_installed, check_server, get_version,
+        list_models, resolve_available_model,
+    )
+
+    cli_pin = bool(args.model)
+    profile = get_profile(args.profile, model_override=args.model, cli_pin=cli_pin)
     print(f"Profile: {profile['name']}")
     print(f"Planning model: {profile['planning_model']}")
     print(f"Execution model: {profile['execution_model']}")
     print()
 
-    ok, messages = validate_for_profile(profile)
-    for msg in messages:
-        print(msg)
+    if not is_installed():
+        print("Ollama is not installed.")
+        print("  Install: https://ollama.com/download")
+        print("  Then run: localsmartz --setup")
+        print("\nNot ready — run: localsmartz --setup")
+        sys.exit(1)
 
-    if not ok:
-        chosen, fallback_msg = resolve_available_model(profile["planning_model"])
-        if chosen and chosen != profile["planning_model"]:
-            print()
-            print(f"\033[33m!\033[0m {fallback_msg}")
-            profile["planning_model"] = chosen
-            ok = True
+    if not check_server():
+        print("Ollama is installed but not running.")
+        print("  Start it with: ollama serve")
+        print("\nNot ready — run: localsmartz --setup")
+        sys.exit(1)
+
+    version = get_version()
+    print(f"Ollama: running (v{version})" if version else "Ollama: running")
+
+    installed = set(list_models())  # EXACT tags only — no fuzzy/prefix match.
+    to_check = [("Planning", "planning_model")]
+    if profile["execution_model"] != profile["planning_model"]:
+        to_check.append(("Execution", "execution_model"))
+
+    ok = True
+    for label, key in to_check:
+        model = profile[key]
+        if model in installed:
+            print(f"  {label} model ({model}): ready")
+            continue
+        chosen, fallback_msg = resolve_available_model(model)
+        if chosen and chosen != model:
+            print(f"  {label} model ({model}): not found (exact tag not pulled)")
+            print(f"  \033[33m!\033[0m {fallback_msg}")
+            profile[key] = chosen
+        elif chosen == model:
+            # resolve_available_model can only return the same name back
+            # when model_available()'s fuzzy match found it — exact check
+            # above already ruled that out, so this branch shouldn't hit
+            # in practice; treat conservatively as not ready.
+            print(f"  {label} model ({model}): not found")
+            ok = False
+        else:
+            print(f"  {label} model ({model}): not found")
+            print(f"    → {fallback_msg}")
+            ok = False
 
     if ok:
         print("\nReady to go.")
@@ -348,11 +399,12 @@ def _setup(args):
     if selected_model and interactive:
         print('  Query: "What is artificial intelligence?"')
         try:
-            profile = get_profile(profile_name, model_override=selected_model)
+            profile = get_profile(profile_name, model_override=selected_model, cli_pin=True)
             from localsmartz.agent import create_agent
             agent, _profile, _checkpointer, _mcp_clients = create_agent(
                 profile_name=profile_name,
                 model_override=selected_model,
+                cli_pin=True,
             )
             result = agent.invoke(
                 {"messages": [{"role": "user", "content": "What is artificial intelligence? Answer in one sentence."}]}
@@ -559,9 +611,15 @@ def _interactive(args, cwd: Path):
 
     from localsmartz.config import resolve_model
 
-    # Resolve model via CLI flag / config / picker
+    # Resolve model via CLI flag / config / picker. cli_pin reflects whether
+    # the user genuinely passed --model THIS run (top precedence, above the
+    # global active_model pin) vs. resolve_model falling back to persisted
+    # project config (which sits below active_model in the frozen
+    # precedence: CLI --model > active_model > serve select/project
+    # planning_model > profile defaults).
+    cli_pin = bool(args.model)
     model_override = resolve_model(cwd, args.model, args.profile)
-    profile = get_profile(args.profile, model_override=model_override)
+    profile = get_profile(args.profile, model_override=model_override, cli_pin=cli_pin)
 
     # First-run auto-trigger: if no model configured, run setup wizard
     from localsmartz.config import load_config as _load_cfg
@@ -572,7 +630,7 @@ def _interactive(args, cwd: Path):
         # Reload profile after setup
         from localsmartz.config import resolve_model
         model_override = resolve_model(cwd, args.model, args.profile)
-        profile = get_profile(args.profile, model_override=model_override)
+        profile = get_profile(args.profile, model_override=model_override, cli_pin=cli_pin)
 
     if not _preflight(profile):
         sys.exit(1)
@@ -778,7 +836,13 @@ def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
     verbose = not args.quiet
     thread_id = args.thread
 
-    # Use explicit model_override (from REPL), or resolve via config/picker
+    # Use explicit model_override (from REPL), or resolve via config/picker.
+    # cli_pin: True whenever the user made an explicit, this-run model
+    # choice (--model flag or the REPL's /model command) — top precedence
+    # per the frozen contract, above the global active_model pin. False
+    # when effective_override merely came from persisted project config,
+    # so active_model still wins over that tier.
+    cli_pin = bool(getattr(args, "model", None)) or model_override is not None
     if model_override is not None:
         effective_override = model_override
     else:
@@ -786,7 +850,7 @@ def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
         effective_override = resolve_model(cwd, args.model, args.profile)
 
     # Preflight check
-    profile = get_profile(args.profile, model_override=effective_override)
+    profile = get_profile(args.profile, model_override=effective_override, cli_pin=cli_pin)
     route = select_research_runtime(prompt)
     if route in ("coding_harness", "coding_loop"):
         from localsmartz.coding_harness import resolve_coding_model
@@ -853,6 +917,7 @@ def _run(prompt: str, args, cwd: Path, model_override: str | None = None):
             cwd=cwd,
             verbose=verbose,
             model_override=effective_override,
+            cli_pin=cli_pin,
         )
         response = extract_final_response(result)
 

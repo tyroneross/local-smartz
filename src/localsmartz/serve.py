@@ -125,6 +125,26 @@ def _saved_model_override(cwd: Path) -> str | None:
     return None
 
 
+_CLOUD_PROVIDERS = frozenset({"anthropic", "openai", "groq"})
+
+
+def _local_only_enabled() -> bool:
+    """Read ``global_config.local_only`` defensively — fails open (False)
+    so a config read error never silently locks the server into a state
+    where cloud requests get a confusing 500 instead of proceeding."""
+    try:
+        from localsmartz import global_config
+
+        return bool(global_config.get("local_only"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _local_only_blocked_response(detail: str = "cloud providers disabled by Local-Only setting") -> dict:
+    """The frozen 403 error shape for every local_only-gated endpoint."""
+    return {"error": "local_only", "detail": detail}
+
+
 # Process-level warmup state. Keyed by model name. Values:
 #   {"stage": "idle"|"loading"|"ready"|"error",
 #    "started_at": float, "finished_at": float,
@@ -1176,6 +1196,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             self._handle_agents()
         elif path == "/api/agents/models":
             self._handle_agents_models()
+        elif path == "/api/settings":
+            self._handle_settings_get()
         elif path == "/api/patterns":
             self._handle_patterns()
         elif path.startswith("/api/patterns/") and path.endswith("/preflight"):
@@ -1190,7 +1212,7 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         elif path == "/api/observability/info":
             self._handle_observability_info()
         elif path == "/api/evals/agent-scorecard":
-            self._handle_agent_scorecard()
+            self._handle_agent_scorecard(parsed)
         elif path == "/api/folders":
             self._handle_folders()
         elif path == "/api/secrets":
@@ -1251,6 +1273,12 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
             # POST /api/agents/<name>/model — persist per-agent model override.
             agent_name = path[len("/api/agents/"):-len("/model")]
             self._handle_agent_model_set(agent_name)
+        elif path.startswith("/api/agents/") and path.endswith("/enabled"):
+            # POST /api/agents/<name>/enabled {"enabled": bool}.
+            agent_name = path[len("/api/agents/"):-len("/enabled")]
+            self._handle_agent_enabled_set(agent_name)
+        elif path == "/api/settings":
+            self._handle_settings_post()
         else:
             self._json_response({"error": "Not found"}, 404)
 
@@ -1357,7 +1385,8 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         self._json_response({"ok": True, "profile": profile["name"]})
 
     def _handle_status(self):
-        from localsmartz.profiles import get_profile
+        from localsmartz import global_config
+        from localsmartz.profiles import get_profile, global_pinned_model
         from localsmartz.ollama import (
             check_server, get_version, list_models, model_available,
             resolve_available_model,
@@ -1391,12 +1420,23 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
                 fallback_warning = warning
                 missing_models = [m for m in missing_models if m != profile["planning_model"]]
 
+        # Single-model-mode pin (C1 work item 2): when active_model is set,
+        # it's the effective model for every role — reflect that here so
+        # the UI's status view agrees with what agent.py/pipeline.py will
+        # actually use.
+        active_model = global_pinned_model()
+        if active_model:
+            effective_model = active_model
+            fallback_warning = None
+
         self._json_response({
             "profile": profile["name"],
             "planning_model": profile["planning_model"],
             "execution_model": profile["execution_model"],
             "effective_model": effective_model,
             "fallback_warning": fallback_warning,
+            "active_model": active_model or "",
+            "local_only": bool(global_config.get("local_only")),
             "ready": ollama_ok and not missing_models,
             "missing_models": missing_models,
             "ollama": {
@@ -2542,15 +2582,32 @@ class LocalSmartzHandler(BaseHTTPRequestHandler):
         # remain Ollama-only — `provider in (None, "ollama")` keeps them.
         provider_norm = (provider or "").strip().lower() if isinstance(provider, str) else ""
         if provider_norm and provider_norm != "ollama":
-            self._run_pattern_cloud(
-                prompt=prompt,
-                profile_name=profile_name,
-                thread_id=thread_id,
-                cwd_override=cwd_override,
-                provider=provider_norm,
-                pattern=pattern,
-            )
-            return
+            if _local_only_enabled():
+                # local_only work item (T2 in the threat model): a
+                # persisted/pinned cloud provider must not silently re-open
+                # cloud egress. Unlike the discrete REST endpoints (403),
+                # a research stream is a long-running SSE session — coerce
+                # to ollama and keep going with a warning event so the run
+                # doesn't just die.
+                self._send_event({
+                    "type": "warn",
+                    "message": (
+                        f"Local-Only is on — cloud provider '{provider_norm}' "
+                        "was blocked; continuing with ollama instead."
+                    ),
+                })
+                provider_norm = "ollama"
+                provider = "ollama"
+            else:
+                self._run_pattern_cloud(
+                    prompt=prompt,
+                    profile_name=profile_name,
+                    thread_id=thread_id,
+                    cwd_override=cwd_override,
+                    provider=provider_norm,
+                    pattern=pattern,
+                )
+                return
 
         model_override = LocalSmartzHandler._model_override or _saved_model_override(Path.cwd())
 
@@ -3112,6 +3169,120 @@ Return ONLY the JSON, no prose, no code fences."""
             "plugin_dir": str(plugin_dir),
         })
 
+    def _handle_settings_get(self):
+        """GET /api/settings → {"local_only": bool, "active_model": str,
+        "disabled_agents": [str], "profile": str}. Frozen contract shape —
+        C3 (Swift) codes against this."""
+        from localsmartz import global_config
+        from localsmartz.profiles import get_profile
+
+        profile = get_profile(self._default_profile)
+        disabled = global_config.get("disabled_agents")
+        if not isinstance(disabled, list):
+            disabled = []
+        self._json_response({
+            "local_only": bool(global_config.get("local_only")),
+            "active_model": global_config.get("active_model") or "",
+            "disabled_agents": [str(d) for d in disabled],
+            "profile": profile["name"],
+        })
+
+    @_json_body
+    def _handle_settings_post(self, *, body):
+        """POST /api/settings — validate + persist any subset of
+        {local_only, active_model, disabled_agents}, returning the full
+        settings object on success. Any validation failure returns
+        {"error": "<msg>"} HTTP 400 and persists nothing (all-or-nothing —
+        we validate every provided key before writing any of them).
+        """
+        from localsmartz import global_config
+        from localsmartz.profiles import validate_active_model, validate_disabled_agents
+
+        if not isinstance(body, dict):
+            self._json_response({"error": "request body must be a JSON object"}, 400)
+            return
+
+        updates: dict = {}
+
+        if "local_only" in body:
+            local_only = body.get("local_only")
+            if not isinstance(local_only, bool):
+                self._json_response({"error": "local_only must be a boolean"}, 400)
+                return
+            updates["local_only"] = local_only
+
+        if "active_model" in body:
+            active_model = body.get("active_model")
+            if not isinstance(active_model, str):
+                self._json_response({"error": "active_model must be a string"}, 400)
+                return
+            err = validate_active_model(active_model)
+            if err:
+                self._json_response({"error": err}, 400)
+                return
+            updates["active_model"] = active_model
+
+        if "disabled_agents" in body:
+            disabled_agents = body.get("disabled_agents")
+            err = validate_disabled_agents(disabled_agents)
+            if err:
+                self._json_response({"error": err}, 400)
+                return
+            updates["disabled_agents"] = [str(d) for d in disabled_agents]
+
+        if not updates:
+            self._json_response(
+                {"error": "body must include at least one of: local_only, active_model, disabled_agents"},
+                400,
+            )
+            return
+
+        try:
+            global_config.save_global(updates)
+        except ValueError as exc:  # defensive — validate_* above should catch first
+            self._json_response({"error": f"Invalid value: {exc}"}, 400)
+            return
+
+        self._handle_settings_get()
+
+    @_json_body
+    def _handle_agent_enabled_set(self, agent_name: str, *, body):
+        """POST /api/agents/<name>/enabled {"enabled": bool}.
+
+        Same validation + 400 error shape as ``/api/settings``'s
+        ``disabled_agents`` key (unknown role, orchestrator, would-disable-all).
+        """
+        from localsmartz import global_config
+        from localsmartz.profiles import AGENT_ROLES, validate_disabled_agents
+
+        agent_name = (agent_name or "").strip()
+        if agent_name not in AGENT_ROLES:
+            self._json_response({"error": f"Unknown agent '{agent_name}'"}, 400)
+            return
+
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            self._json_response({"error": "enabled must be a boolean"}, 400)
+            return
+
+        current = global_config.get("disabled_agents") or []
+        if not isinstance(current, list):
+            current = []
+        current = [str(d) for d in current]
+
+        if enabled:
+            proposed = [r for r in current if r != agent_name]
+        else:
+            proposed = sorted(set(current) | {agent_name})
+
+        err = validate_disabled_agents(proposed)
+        if err:
+            self._json_response({"error": err}, 400)
+            return
+
+        global_config.set("disabled_agents", proposed)
+        self._json_response({"ok": True, "agent": agent_name, "enabled": enabled})
+
     def _handle_agents(self):
         """Surface the conceptual agents in the active profile.
 
@@ -3280,6 +3451,9 @@ Return ONLY the JSON, no prose, no code fences."""
                 {"error": f"unknown provider: {provider!r}"}, 400
             )
             return
+        if provider in _CLOUD_PROVIDERS and _local_only_enabled():
+            self._json_response(_local_only_blocked_response(), 403)
+            return
         try:
             save_config(Path.cwd(), {"pattern": pattern, "provider": provider})
         except Exception as exc:  # noqa: BLE001
@@ -3302,8 +3476,16 @@ Return ONLY the JSON, no prose, no code fences."""
 
     @_json_body
     def _handle_cloud_estimate(self, *, body):
-        """POST /api/cloud/estimate {model, prompt, pattern?, max_iterations?}."""
+        """POST /api/cloud/estimate {model, prompt, pattern?, max_iterations?}.
+
+        Always cloud-provider by definition (there's no local-cost concept
+        to estimate) — blocked outright under local_only.
+        """
         from localsmartz.cost import estimate_cost_usd
+
+        if _local_only_enabled():
+            self._json_response(_local_only_blocked_response(), 403)
+            return
 
         model = body.get("model", "")
         prompt = body.get("prompt", "")
@@ -3356,6 +3538,9 @@ Return ONLY the JSON, no prose, no code fences."""
         if model is not None and not isinstance(model, str):
             self._json_response({"error": "model must be a string"}, 400)
             return
+        if provider.strip().lower() in _CLOUD_PROVIDERS and _local_only_enabled():
+            self._json_response(_local_only_blocked_response(), 403)
+            return
 
         tracer = get_tracer("localsmartz.serve.evals")
         with tracer.start_as_current_span("ls.eval.run") as span:
@@ -3375,17 +3560,38 @@ Return ONLY the JSON, no prose, no code fences."""
             span.set_attribute("ls.eval.fail", result.fail_count)
         self._json_response(benchmark_to_dict(result))
 
-    def _handle_agent_scorecard(self):
+    def _handle_agent_scorecard(self, parsed=None):
         """GET/POST /api/evals/agent-scorecard — score the agent harness.
 
-        This is deterministic and does not call a model. It verifies routing,
-        specialist-role selection, pattern availability, local tier gates, and
-        the audit/eval surfaces required before deeper multi-agent work.
+        This is deterministic and does not itself call a model. An optional
+        ``provider`` (GET query param or POST JSON body) is still checked
+        against the local_only boundary for parity with ``/api/evals/run``
+        — a caller naming a cloud provider here is reaching toward the
+        runner layer for a follow-on eval, so the same 403 applies.
         """
         from localsmartz.agent_scorecard import (
             run_agent_scorecard,
             scorecard_to_dict,
         )
+
+        provider = None
+        if self.command == "GET" and parsed is not None:
+            provider = parse_qs(parsed.query).get("provider", [None])[0]
+        elif self.command == "POST":
+            try:
+                body = self._read_json_body()
+            except ValueError:
+                body = {}
+            if isinstance(body, dict):
+                provider = body.get("provider")
+
+        if (
+            isinstance(provider, str)
+            and provider.strip().lower() in _CLOUD_PROVIDERS
+            and _local_only_enabled()
+        ):
+            self._json_response(_local_only_blocked_response(), 403)
+            return
 
         try:
             result = run_agent_scorecard()

@@ -88,6 +88,55 @@ def test_models_missing_reports_fail_with_install_hint():
     assert status["backend_up"][0] == "skip"
 
 
+def test_models_present_exact_tag_absent_never_reported_ready():
+    """DEFECT FIX (item 7c): a tag absent from live /api/tags must never
+    be reported ready, even when the base family/a fuzzy-matching variant
+    IS installed. Regression guard for the old prefix-scan bug that
+    reported the uninstalled 'qwen2.5-coder:32b-instruct-q5_K_M' as ready
+    because *some* tag started with 'qwen2.5-coder:32b'."""
+    # Only the base tag is "installed" — the exact requested tag isn't.
+    tags_body = json.dumps({"models": [{"name": "qwen2.5-coder:32b"}]}).encode()
+    opener = _url_opener({
+        "http://localhost:11434/api/tags": _FakeResp(200, tags_body),
+        "http://localhost:11435": ConnectionRefusedError("down"),
+        "http://localhost:11436": ConnectionRefusedError("down"),
+    })
+    mock_profile = {
+        "name": "full",
+        "planning_model": "gpt-oss:20b",
+        "execution_model": "qwen2.5-coder:32b-instruct-q5_K_M",  # NOT installed
+    }
+    with patch("urllib.request.urlopen", side_effect=opener), \
+         patch("localsmartz.profiles.get_profile", return_value=mock_profile):
+        results = doctor.run_doctor()
+
+    status = {name: (s, h) for (name, s, h) in results}
+    assert status["models_present"][0] == "fail"
+    assert "qwen2.5-coder:32b-instruct-q5_K_M" in status["models_present"][1]
+
+
+def test_models_present_exact_tags_installed_reports_ready():
+    tags_body = json.dumps({
+        "models": [{"name": "gpt-oss:20b"}, {"name": "qwen2.5-coder:32b"}],
+    }).encode()
+    opener = _url_opener({
+        "http://localhost:11434/api/tags": _FakeResp(200, tags_body),
+        "http://localhost:11435": ConnectionRefusedError("down"),
+        "http://localhost:11436": ConnectionRefusedError("down"),
+    })
+    mock_profile = {
+        "name": "full",
+        "planning_model": "gpt-oss:20b",
+        "execution_model": "qwen2.5-coder:32b",
+    }
+    with patch("urllib.request.urlopen", side_effect=opener), \
+         patch("localsmartz.profiles.get_profile", return_value=mock_profile):
+        results = doctor.run_doctor()
+
+    status = {name: (s, h) for (name, s, h) in results}
+    assert status["models_present"][0] == "ok"
+
+
 def test_fast_path_classifier_check_matches_profiles():
     # This check is pure code: positive case is fast-path, negative is not.
     name, status, _hint = doctor._check_fast_path_classifier()

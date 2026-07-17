@@ -188,7 +188,11 @@ PROFILES = {
         # the heavy 32B execution model. Explicit here so get_model("fast")
         # can return it without scanning the agents dict.
         "fast_model": "qwen3:8b-q4_K_M",
-        "execution_model": "qwen2.5-coder:32b-instruct-q5_K_M",
+        # DEFECT FIX (2026-07): was "qwen2.5-coder:32b-instruct-q5_K_M" — that
+        # exact tag was never pulled (only the base "qwen2.5-coder:32b" is
+        # installed), which 404'd ~94s into a run. "qwen2.5-coder:32b" is
+        # confirmed installed (GET /api/tags, 19.9 GB) — see plan Evidence.
+        "execution_model": "qwen2.5-coder:32b",
         "agents": {
             "planner": {
                 "model": "gpt-oss:20b",
@@ -199,7 +203,7 @@ PROFILES = {
                 "summary": AGENT_ROLES["researcher"]["summary"],
             },
             "analyzer": {
-                "model": "qwen2.5-coder:32b-instruct-q5_K_M",
+                "model": "qwen2.5-coder:32b",
                 "summary": AGENT_ROLES["analyzer"]["summary"],
             },
             "writer": {
@@ -249,6 +253,110 @@ PROFILES = {
         "subagent_delegation": False,
     },
 }
+
+
+# Roles a user can individually toggle off. Orchestrator is the router —
+# it's structurally required (the main agent IS the orchestrator when no
+# focus is pinned) so it's excluded here and rejected by
+# ``validate_disabled_agents`` if ever named.
+RUNNABLE_ROLES: tuple[str, ...] = tuple(r for r in AGENT_ROLES if r != "orchestrator")
+
+
+def global_pinned_model() -> str | None:
+    """Return the global "single model mode" pin (``global_config.active_model``).
+
+    Single source of truth for the active_model feature — every call site
+    that needs to know "is a global model pin active, and what is it"
+    (``get_model``, ``get_agent_model``, ``effective_agent_models``,
+    ``list_agents``, ``agent._create_model``, ``pipeline._role_llm``)
+    consults this function (directly or via ``_effective_pinned_model``)
+    instead of reading ``global_config`` itself. Returns None when unset,
+    blank, or on any read error — never crashes profile resolution.
+    """
+    try:
+        from localsmartz import global_config
+
+        val = global_config.get("active_model")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _effective_pinned_model(profile: dict) -> str | None:
+    """Return the model that should override every role for this profile.
+
+    Precedence (frozen contract): CLI ``--model`` for this run (stashed on
+    the profile dict by ``get_profile(..., cli_pin=True)``) beats the
+    global ``active_model`` pin, which beats per-agent/per-role defaults.
+    """
+    run_pin = profile.get("_cli_pinned_model") if isinstance(profile, dict) else None
+    if isinstance(run_pin, str) and run_pin.strip():
+        return run_pin.strip()
+    return global_pinned_model()
+
+
+def _disabled_agents() -> set[str]:
+    """Read ``global_config.disabled_agents`` defensively. Never raises."""
+    try:
+        from localsmartz import global_config
+
+        disabled = global_config.get("disabled_agents")
+        if isinstance(disabled, list):
+            return {str(d) for d in disabled}
+    except Exception:  # noqa: BLE001
+        pass
+    return set()
+
+
+def is_agent_disabled(role: str) -> bool:
+    """True when ``role`` is in the user's disabled-agents set.
+
+    The orchestrator can never be disabled regardless of what's persisted —
+    it's the router, not a specialist.
+    """
+    if role == "orchestrator":
+        return False
+    return role in _disabled_agents()
+
+
+def validate_disabled_agents(disabled: list) -> str | None:
+    """Validate a proposed ``disabled_agents`` list. Returns an error message,
+    or None if valid.
+
+    Rules: must be a list of known role names; orchestrator can't be named;
+    at least one RUNNABLE_ROLES entry must remain enabled.
+    """
+    if not isinstance(disabled, list):
+        return "disabled_agents must be a list"
+    names = [str(d) for d in disabled]
+    unknown = [n for n in names if n not in AGENT_ROLES]
+    if unknown:
+        return f"Unknown role(s): {', '.join(sorted(set(unknown)))}"
+    if "orchestrator" in names:
+        return "orchestrator cannot be disabled"
+    remaining = [r for r in RUNNABLE_ROLES if r not in names]
+    if not remaining:
+        return "cannot disable every agent — at least one must stay enabled"
+    return None
+
+
+def validate_active_model(model: str) -> str | None:
+    """Validate a proposed ``active_model`` pin. Returns an error message,
+    or None if valid. Empty string clears the pin and is always valid.
+    """
+    if not isinstance(model, str):
+        return "active_model must be a string"
+    if model == "":
+        return None
+    try:
+        from localsmartz.ollama import model_available
+    except Exception:  # noqa: BLE001
+        return None  # Can't validate without ollama.py — don't block on it.
+    if not model_available(model):
+        return f"model {model!r} is not installed"
+    return None
 
 
 def _get_agent_overrides() -> dict[str, str]:
@@ -314,6 +422,8 @@ def list_agents(profile: dict) -> list[dict]:
     _MAIN_AGENT_ONLY = {"orchestrator"}
 
     overrides = _get_agent_overrides()
+    pinned = _effective_pinned_model(profile)
+    disabled = _disabled_agents()
     out: list[dict] = []
     for name, spec in _agents_dict(profile).items():
         if name in _MAIN_AGENT_ONLY:
@@ -330,9 +440,13 @@ def list_agents(profile: dict) -> list[dict]:
             "name": name,
             "title": meta.get("title", name.title()),
             "summary": summary,
-            "model": override or default_model,
+            "model": pinned or override or default_model,
             "default_model": default_model,
             "model_override": override or "",
+            # Whether this agent participates in the current run. The
+            # orchestrator is filtered out of this list entirely (above),
+            # so every entry that reaches here is a RUNNABLE_ROLES member.
+            "enabled": name not in disabled,
             # Tool allow-list from AGENT_ROLES — surfaced to the UI so a
             # sidebar can render "Planner uses: write_todos" without the
             # Swift app having to know about profile internals.
@@ -355,16 +469,17 @@ def effective_agent_models(profile: dict) -> dict[str, str]:
     Keys are agent names; values are the model string that would actually be
     used if that agent is focused.
     """
+    pinned = _effective_pinned_model(profile)
     overrides = _get_agent_overrides()
     agents = _agents_dict(profile)
     return {
-        name: overrides.get(name, spec.get("model", "") if isinstance(spec, dict) else "")
+        name: pinned or overrides.get(name, spec.get("model", "") if isinstance(spec, dict) else "")
         for name, spec in agents.items()
     }
 
 
 def get_agent_model(profile: dict, agent_name: str) -> str | None:
-    """Return the effective model for one agent (profile default + user override).
+    """Return the effective model for one agent (pin > user override > profile default).
 
     Returns None if the agent isn't defined in this profile.
     """
@@ -373,6 +488,9 @@ def get_agent_model(profile: dict, agent_name: str) -> str | None:
     agents = _agents_dict(profile)
     if agent_name not in agents:
         return None
+    pinned = _effective_pinned_model(profile)
+    if pinned:
+        return pinned
     overrides = _get_agent_overrides()
     if agent_name in overrides:
         return overrides[agent_name]
@@ -470,12 +588,26 @@ def detect_tier() -> dict:
     }
 
 
-def get_profile(name: str | None = None, model_override: str | None = None) -> dict:
+def get_profile(
+    name: str | None = None,
+    model_override: str | None = None,
+    *,
+    cli_pin: bool = False,
+) -> dict:
     """Get profile configuration by name or auto-detect.
 
     Args:
         name: Profile name ("full" or "lite"), or None to auto-detect
         model_override: If set, replaces planning_model (user-selected model)
+        cli_pin: When True AND ``model_override`` is set, treat it as a
+            genuine per-run CLI ``--model`` pin — the top precedence tier
+            per the frozen contract (CLI --model > active_model > serve
+            select/project planning_model > profile defaults). Callers
+            that resolve a model from persisted project config (serve.py's
+            ``_saved_model_override``, ``.localsmartz/config.json``) must
+            leave this False so the global ``active_model`` pin still wins
+            over them. Only __main__.py's genuine ``args.model`` / REPL
+            ``/model`` paths should pass True.
 
     Returns:
         Profile configuration dict with "name" key added
@@ -499,6 +631,11 @@ def get_profile(name: str | None = None, model_override: str | None = None) -> d
 
     if model_override:
         profile["planning_model"] = model_override
+
+    # Internal marker consulted by _effective_pinned_model — see cli_pin arg
+    # docstring above. Not part of the public profile schema; only read by
+    # profiles.py itself.
+    profile["_cli_pinned_model"] = model_override.strip() if (model_override and cli_pin and model_override.strip()) else None
 
     return profile
 
@@ -592,6 +729,11 @@ def get_model(profile: dict, role: str) -> str | None:
         Model string for the requested role, or None if the role key is absent
         and there is no sensible fallback (callers should handle None).
     """
+    # Single-model-mode pin (CLI --model this-run, else global active_model)
+    # wins over every profile-level default — frozen contract precedence.
+    pinned = _effective_pinned_model(profile)
+    if pinned:
+        return pinned
     if role == "planning":
         return profile["planning_model"]
     elif role == "execution":

@@ -50,6 +50,18 @@ class RunnerUnknown(RunnerError):
     should treat as fatal unless explicit handling exists."""
 
 
+class LocalOnlyError(RuntimeError):
+    """Raised when a cloud provider (anthropic/openai/groq) is requested
+    while ``global_config.local_only`` is True.
+
+    Deliberately NOT a ``RunnerError`` subclass — it's a policy/privacy
+    boundary rejection (deny-by-default), not a normalized provider-SDK
+    failure a retry policy should ever touch. Raised at every model-
+    construction choke point: ``runners.get_runner``,
+    ``runners.factory.create_langchain_model``, ``agent._create_model``.
+    """
+
+
 class ModelRef(TypedDict, total=False):
     """Tagged reference to a model on some provider.
 

@@ -51,6 +51,8 @@ from localsmartz.profiles import (
     agent_tool_names,
     get_agent_model,
     get_profile,
+    get_role_prompt,
+    is_agent_disabled,
 )
 
 
@@ -130,10 +132,13 @@ def _role_llm(role: str, profile: dict):
 
 
 def _role_system_prompt(role: str) -> str:
-    meta = AGENT_ROLES.get(role)
-    if not isinstance(meta, dict):
-        return ""
-    return meta.get("system_focus", "")
+    """Prefer the editable ``agents/prompts/<role>.md`` (what the UI's
+    prompt editor + ``list_agents`` display) over the AGENT_ROLES dict
+    string, so a PUT /api/agents/<role>/prompt edit actually changes what
+    the graph pipeline executes. ``get_role_prompt`` falls back to the
+    dict string (then "") when no .md file exists — same net behavior for
+    roles that were never given a file."""
+    return get_role_prompt(role)
 
 
 # ── Tool registry + per-role ReAct executors ────────────────────────────
@@ -421,24 +426,49 @@ def _make_writer_node(
 # ── Routing ─────────────────────────────────────────────────────────────
 
 def _fanout_from_entry(state: PipelineState) -> list[Send]:
-    """After entry, fire researcher + analyzer in parallel via Send."""
+    """After entry, fire researcher + analyzer in parallel via Send.
+
+    Default (both roles enabled) shape — kept as a standalone function so
+    it stays directly testable/patchable. ``build_graph`` builds a
+    disabled-agents-aware closure via ``_make_fanout`` when either role is
+    disabled; this function is what that closure degenerates to when
+    nothing is disabled.
+    """
     return [
         Send("researcher", state),
         Send("analyzer", state),
     ]
 
 
-def _after_fact_check(state: PipelineState) -> str:
+def _make_fanout(fanout_roles: tuple[str, ...]) -> Callable[[PipelineState], list[Send]]:
+    """Build the entry fan-out edge for whichever of (researcher, analyzer)
+    are enabled. ``disabled_agents`` work item: if analyzer is disabled,
+    only researcher fires (and vice versa) — the graph never Sends to a
+    node that wasn't built."""
+    def _fanout(state: PipelineState) -> list[Send]:
+        return [Send(role, state) for role in fanout_roles]
+    return _fanout
+
+
+def _after_fact_check(state: PipelineState, researcher_enabled: bool = True) -> str:
     """Decide the next node after fact-check.
 
     - verdict=ok → writer (happy path)
-    - verdict=needs_more + budget left → researcher (re-dispatch with gaps)
-    - verdict=needs_more + budget exhausted → writer (cut loss with best
-      available research; better to ship an imperfect answer than spin)
+    - verdict=needs_more + budget left + researcher enabled → researcher
+      (re-dispatch with gaps)
+    - verdict=needs_more + budget exhausted, or researcher disabled →
+      writer (cut loss with best available research; better to ship an
+      imperfect answer than spin, and there's no re-dispatch target if
+      researcher was disabled)
+
+    ``researcher_enabled`` defaults True so direct unit tests (and
+    LangGraph's default no-kwarg invocation) keep the original two-role
+    behavior; ``build_graph`` binds it via a closure when researcher is
+    disabled.
     """
     verdict = state.get("fact_verdict", "ok")
     iters = state.get("fact_check_iterations", 0)
-    if verdict == "needs_more" and iters <= MAX_FACT_CHECK_ITERATIONS:
+    if verdict == "needs_more" and iters <= MAX_FACT_CHECK_ITERATIONS and researcher_enabled:
         return "researcher"
     return "writer"
 
@@ -528,31 +558,67 @@ def build_graph(
     profile = profile or get_profile()
     _ = cwd  # reserved
 
+    # disabled_agents work item: skip building nodes for disabled roles and
+    # route around them. writer is always built — it's the terminal
+    # synthesis node and there's no described rerouting for a
+    # writer-disabled run in the frozen contract, so disabling it via
+    # /api/settings is schema-valid (subject to the "not all disabled"
+    # guard) but has no pipeline effect today.
+    researcher_enabled = not is_agent_disabled("researcher")
+    analyzer_enabled = not is_agent_disabled("analyzer")
+    fact_checker_enabled = not is_agent_disabled("fact_checker")
+
     builder: StateGraph = StateGraph(PipelineState)
 
     builder.add_node("entry", _orchestrator_entry)
-    builder.add_node("researcher", _make_researcher_node(profile, agents, sink))
-    builder.add_node("analyzer", _make_analyzer_node(profile, agents, sink))
-    builder.add_node("fact_checker", _make_fact_checker_node(profile, agents, sink))
+    if researcher_enabled:
+        builder.add_node("researcher", _make_researcher_node(profile, agents, sink))
+    if analyzer_enabled:
+        builder.add_node("analyzer", _make_analyzer_node(profile, agents, sink))
+    if fact_checker_enabled:
+        builder.add_node("fact_checker", _make_fact_checker_node(profile, agents, sink))
     builder.add_node("writer", _make_writer_node(profile, agents, sink))
 
     builder.add_edge(START, "entry")
-    # Parallel fan-out from entry.
-    builder.add_conditional_edges(
-        "entry",
-        _fanout_from_entry,
-        ["researcher", "analyzer"],
+
+    fanout_roles = tuple(
+        role for role, enabled in (("researcher", researcher_enabled), ("analyzer", analyzer_enabled))
+        if enabled
     )
-    # Both specialists converge on fact_checker — LangGraph waits for all
-    # inbound Send edges to settle before activating a downstream node.
-    builder.add_edge("researcher", "fact_checker")
-    builder.add_edge("analyzer", "fact_checker")
-    # Fact-check verdict routes to writer or re-dispatches to researcher.
-    builder.add_conditional_edges(
-        "fact_checker",
-        _after_fact_check,
-        ["researcher", "writer"],
-    )
+    # Both enabled specialists converge on fact_checker (if enabled) or
+    # straight to writer (if fact_checker is disabled — skips the
+    # verdict/re-dispatch loop entirely). LangGraph waits for all inbound
+    # Send edges to settle before activating a downstream node.
+    post_specialist_target = "fact_checker" if fact_checker_enabled else "writer"
+
+    if fanout_roles:
+        builder.add_conditional_edges(
+            "entry",
+            _make_fanout(fanout_roles),
+            list(fanout_roles),
+        )
+        for role in fanout_roles:
+            builder.add_edge(role, post_specialist_target)
+    else:
+        # Both researcher and analyzer disabled — entry routes straight to
+        # fact_checker (if enabled, it'll have nothing concrete to check
+        # but can still run) or writer.
+        builder.add_edge("entry", post_specialist_target)
+
+    if fact_checker_enabled:
+        # Re-dispatch only makes sense if researcher is enabled; otherwise
+        # a "needs_more" verdict has no specialist to send back to.
+        after_fact_check = (
+            _after_fact_check
+            if researcher_enabled
+            else (lambda state: _after_fact_check(state, researcher_enabled=False))
+        )
+        targets = ["writer"] + (["researcher"] if researcher_enabled else [])
+        builder.add_conditional_edges(
+            "fact_checker",
+            after_fact_check,
+            targets,
+        )
     builder.add_edge("writer", END)
 
     return builder.compile()

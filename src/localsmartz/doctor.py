@@ -51,6 +51,20 @@ def _check_ollama_reachable() -> tuple[str, str, str]:
 
 
 def _check_models_present() -> tuple[str, str, str]:
+    """Validate that the CURRENTLY CONFIGURED profile's model tags are
+    actually pulled — EXACT string match against ``/api/tags``, never a
+    prefix/fuzzy match.
+
+    ROOT CAUSE this replaces: the previous version scanned live tags
+    against a hardcoded ``_MODEL_PREFIXES`` allow-list disconnected from
+    whatever model the profile actually resolves to — "checking the wrong
+    list". A profile pinned to an uninstalled exact tag (e.g. the old
+    ``qwen2.5-coder:32b-instruct-q5_K_M`` full-profile default when only
+    the base ``qwen2.5-coder:32b`` was pulled) would still report "ready"
+    as long as SOME model matched one of the hardcoded prefixes — check
+    and runtime disagreed. Falls back to the old prefix scan only when
+    profile detection itself fails (defensive — never silently skip).
+    """
     code, body = _http_get("http://localhost:11434/api/tags", timeout=_CONNECT_TIMEOUT)
     if code != 200:
         return ("models_present", _SKIP, "ollama not reachable")
@@ -59,6 +73,33 @@ def _check_models_present() -> tuple[str, str, str]:
         names = [m.get("name", "") for m in data.get("models", [])]
     except Exception:
         return ("models_present", _FAIL, "could not parse /api/tags response")
+
+    try:
+        from localsmartz.profiles import get_profile
+
+        profile = get_profile()
+    except Exception:
+        profile = None
+
+    if isinstance(profile, dict) and profile.get("planning_model"):
+        installed = set(names)
+        required = [profile["planning_model"]]
+        execution_model = profile.get("execution_model")
+        if execution_model and execution_model not in required:
+            required.append(execution_model)
+        missing = [m for m in required if m not in installed]  # EXACT match only
+        if not missing:
+            return (
+                "models_present",
+                _OK,
+                f"exact tag(s) present: {', '.join(required)}",
+            )
+        return (
+            "models_present",
+            _FAIL,
+            "missing exact tag(s): " + ", ".join(f"`ollama pull {m}`" for m in missing),
+        )
+
     for n in names:
         if any(n.startswith(p) for p in _MODEL_PREFIXES):
             return ("models_present", _OK, f"found {n}")

@@ -63,3 +63,19 @@ def test_lite_includes_core_tools():
     assert "python_exec" in lite_names
     assert "create_report" in lite_names
     assert "read_text_file" in lite_names
+
+
+# ── Full-profile execution model defect fix (item 7a) ────────────────────
+
+def test_full_profile_execution_model_is_installed_tag():
+    """The old default 'qwen2.5-coder:32b-instruct-q5_K_M' was never
+    pulled (only the base 'qwen2.5-coder:32b' was) and 404'd ~94s into a
+    run. Both the profile-level execution_model and the analyzer agent's
+    per-role model must use the corrected, confirmed-installed tag."""
+    from localsmartz.profiles import PROFILES
+
+    full = PROFILES["full"]
+    assert full["execution_model"] == "qwen2.5-coder:32b"
+    assert full["agents"]["analyzer"]["model"] == "qwen2.5-coder:32b"
+    # Regression guard: the old broken tag must not silently creep back in.
+    assert full["execution_model"] != "qwen2.5-coder:32b-instruct-q5_K_M"

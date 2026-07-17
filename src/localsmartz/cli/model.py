@@ -160,6 +160,73 @@ def _assign_role(role: str, name: str) -> None:
     print(f"Assigned role={role} → {name}")
 
 
+def _cmd_local_only(args: argparse.Namespace) -> int:
+    """``localsmartz model local-only on|off|status`` — the runtime privacy
+    boundary. ``on``/``off`` persist to global_config; every model
+    construction choke point (runners.get_runner, runners.factory, agent.
+    _create_model) reads this live and raises ``LocalOnlyError`` for a
+    cloud provider when it's on."""
+    from localsmartz import global_config
+
+    action = args.action
+    if action == "status":
+        current = bool(global_config.get("local_only"))
+        print(f"local_only: {'on' if current else 'off'}")
+        return 0
+    global_config.set("local_only", action == "on")
+    print(f"local_only: {action}")
+    return 0
+
+
+def _cmd_global(args: argparse.Namespace) -> int:
+    """``localsmartz model global <model>`` — pin a single model for every
+    role this run onward (until cleared). ``clear`` resets to "" so
+    per-agent/profile defaults apply again."""
+    from localsmartz import global_config
+    from localsmartz.profiles import validate_active_model
+
+    value = "" if args.model == "clear" else args.model
+    err = validate_active_model(value)
+    if err:
+        print(f"Error: {err}", file=sys.stderr)
+        return 1
+    global_config.set("active_model", value)
+    if value:
+        print(f"active_model: {value} (pinned for every role)")
+    else:
+        print("active_model: cleared")
+    return 0
+
+
+def _cmd_agents_toggle(args: argparse.Namespace) -> int:
+    """``localsmartz model agents enable|disable <role>``."""
+    from localsmartz import global_config
+    from localsmartz.profiles import AGENT_ROLES, validate_disabled_agents
+
+    role = args.role
+    if role not in AGENT_ROLES:
+        print(f"Error: unknown role {role!r}. Known: {sorted(AGENT_ROLES)}", file=sys.stderr)
+        return 1
+
+    current = global_config.get("disabled_agents") or []
+    if not isinstance(current, list):
+        current = []
+    current = [str(r) for r in current]
+
+    if args.action == "disable":
+        proposed = sorted(set(current) | {role})
+    else:
+        proposed = [r for r in current if r != role]
+
+    err = validate_disabled_agents(proposed)
+    if err:
+        print(f"Error: {err}", file=sys.stderr)
+        return 1
+    global_config.set("disabled_agents", proposed)
+    print(f"{role}: {'disabled' if args.action == 'disable' else 'enabled'}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="localsmartz model",
@@ -188,6 +255,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_as.set_defaults(func=_cmd_assign)
 
     sub.add_parser("doctor", help="Check Ollama + tier + Phoenix").set_defaults(func=_cmd_doctor)
+
+    p_local = sub.add_parser(
+        "local-only", help="Toggle the local-only privacy boundary (blocks cloud providers)"
+    )
+    p_local.add_argument("action", choices=["on", "off", "status"])
+    p_local.set_defaults(func=_cmd_local_only)
+
+    p_global = sub.add_parser(
+        "global", help="Pin one model for every agent role (or 'clear' to unpin)"
+    )
+    p_global.add_argument("model", help="Model tag, or 'clear' to remove the pin")
+    p_global.set_defaults(func=_cmd_global)
+
+    p_agents = sub.add_parser("agents", help="Enable or disable an agent role")
+    p_agents.add_argument("action", choices=["enable", "disable"])
+    p_agents.add_argument("role")
+    p_agents.set_defaults(func=_cmd_agents_toggle)
 
     return parser
 

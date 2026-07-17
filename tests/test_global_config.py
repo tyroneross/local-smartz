@@ -193,3 +193,62 @@ def test_empty_dict_save_is_noop_but_creates_dir(isolate_home):
     assert path.exists()
     raw = json.loads(path.read_text())
     assert raw == {}
+
+
+# ── local_only / disabled_agents schema (C1 settings work) ──────────────
+
+def test_local_only_defaults_false(isolate_home):
+    assert global_config.get("local_only") is False
+
+
+def test_disabled_agents_defaults_empty_list(isolate_home):
+    assert global_config.get("disabled_agents") == []
+
+
+def test_local_only_accepts_bool(isolate_home):
+    global_config.set("local_only", True)
+    assert global_config.get("local_only") is True
+    global_config.set("local_only", False)
+    assert global_config.get("local_only") is False
+
+
+def test_local_only_rejects_non_bool(isolate_home):
+    with pytest.raises(ValueError):
+        global_config.set("local_only", "true")
+    with pytest.raises(ValueError):
+        global_config.set("local_only", 1)
+
+
+def test_disabled_agents_accepts_list_of_strings(isolate_home):
+    global_config.set("disabled_agents", ["analyzer", "planner"])
+    assert global_config.get("disabled_agents") == ["analyzer", "planner"]
+
+
+def test_disabled_agents_rejects_non_list(isolate_home):
+    with pytest.raises(ValueError):
+        global_config.set("disabled_agents", "analyzer")
+    with pytest.raises(ValueError):
+        global_config.set("disabled_agents", {"analyzer": True})
+
+
+def test_bool_still_rejected_for_str_and_list_keys(isolate_home):
+    """The generic _validate bool-handling note: bool must be accepted for
+    local_only (a bool key) but still rejected for str/list-typed keys —
+    bool is a subclass of int, not of str/list, so this already holds, but
+    pin it down for local_only/disabled_agents specifically."""
+    with pytest.raises(ValueError):
+        global_config.set("active_model", True)
+    with pytest.raises(ValueError):
+        global_config.set("plugin_paths", True)
+    with pytest.raises(ValueError):
+        global_config.set("agent_models", True)
+
+
+def test_local_only_and_disabled_agents_round_trip_and_persist(isolate_home):
+    global_config.save_global({"local_only": True, "disabled_agents": ["writer"]})
+    loaded = global_config.load_global()
+    assert loaded["local_only"] is True
+    assert loaded["disabled_agents"] == ["writer"]
+    raw = json.loads((isolate_home / ".localsmartz" / "global.json").read_text())
+    assert raw["local_only"] is True
+    assert raw["disabled_agents"] == ["writer"]

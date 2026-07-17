@@ -150,13 +150,22 @@ def test_create_agent_focus_agent_picks_configured_model(fake_home, tmp_path, mo
     # so downstream code (logging, status) agrees.
     assert profile["planning_model"] == analyzer_model
 
-    # Focus mode now *replaces* the system prompt with the role's system_focus
+    # Focus mode now *replaces* the system prompt with the role's prompt
     # (previously it was an appended "## Single-Agent Mode" section). Since
     # DeepAgents' subagents list is passed empty in focus mode, the main
     # agent *is* the role and speaks in that voice directly.
+    #
+    # The prompt is sourced via profiles.get_role_prompt, which prefers
+    # agents/prompts/analyzer.md over the AGENT_ROLES dict string — reading
+    # the dict directly here made a UI prompt edit (PUT
+    # /api/agents/analyzer/prompt) invisible at runtime. Compare against
+    # the live file rather than a hardcoded literal so this test doesn't
+    # fight prompt-wording edits made elsewhere (e.g. prompt-builder tuning).
+    from localsmartz.agents.definitions import load_prompt
+
     call_kwargs = mock_create.call_args.kwargs
     sys_prompt = call_kwargs.get("system_prompt", "")
-    assert "ANALYZER agent" in sys_prompt
+    assert sys_prompt.strip() == load_prompt("analyzer").strip()
     # subagents=[] in focus mode — the role runs as the main agent, no
     # ``task`` delegation to avoid small-model tool-call hallucinations.
     assert call_kwargs.get("subagents") == []
@@ -230,12 +239,21 @@ def test_multi_agent_mode_passes_scoped_subagents(fake_home, tmp_path):
 
 
 def test_create_agent_focus_agent_respects_override(fake_home, tmp_path):
-    """A per-user override via global_config must beat the profile default."""
+    """A per-user override via global_config must beat the profile default.
+
+    Model name is synthetic ("override:7b") so it will never actually be
+    pulled in a real Ollama — pass resolve_available_model through
+    unchanged so the (correctly working, see
+    test_execution_model_fallback.py) availability-fallback added in C1
+    work item 7b doesn't mask the precedence assertion this test exists
+    for.
+    """
     global_config.set("agent_models", {"analyzer": "override:7b"})
 
     fake_deep_agent = MagicMock(name="fake_deep_agent")
     with patch("localsmartz.agent.ChatOllama") as mock_chat, \
-         patch("localsmartz.agent.create_deep_agent", return_value=fake_deep_agent):
+         patch("localsmartz.agent.create_deep_agent", return_value=fake_deep_agent), \
+         patch("localsmartz.ollama.resolve_available_model", side_effect=lambda name, min_gb=1.0: (name, None)):
         mock_chat.return_value = MagicMock(name="chat_ollama_instance")
 
         from localsmartz.agent import create_agent
@@ -253,10 +271,14 @@ def test_create_agent_focus_agent_respects_override(fake_home, tmp_path):
 
 
 def test_create_agent_explicit_model_override_wins(fake_home, tmp_path):
-    """CLI --model (passed through as model_override) still wins over per-agent."""
+    """CLI --model (passed through as model_override) still wins over per-agent.
+
+    See the fake_home docstring above re: resolve_available_model passthrough.
+    """
     fake_deep_agent = MagicMock(name="fake_deep_agent")
     with patch("localsmartz.agent.ChatOllama") as mock_chat, \
-         patch("localsmartz.agent.create_deep_agent", return_value=fake_deep_agent):
+         patch("localsmartz.agent.create_deep_agent", return_value=fake_deep_agent), \
+         patch("localsmartz.ollama.resolve_available_model", side_effect=lambda name, min_gb=1.0: (name, None)):
         mock_chat.return_value = MagicMock(name="chat_ollama_instance")
 
         from localsmartz.agent import create_agent

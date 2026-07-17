@@ -40,6 +40,18 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from localsmartz.runners.base import LocalOnlyError
+
+
+def _local_only_enabled() -> bool:
+    """Read ``global_config.local_only`` defensively — fails open (False)."""
+    try:
+        from localsmartz import global_config
+
+        return bool(global_config.get("local_only"))
+    except Exception:  # noqa: BLE001
+        return False
+
 
 def create_langchain_model(provider: str, model_ref: dict) -> Any:
     """Build a bare LangChain chat model for ``provider`` + ``model_ref``.
@@ -56,6 +68,10 @@ def create_langchain_model(provider: str, model_ref: dict) -> Any:
         An unwrapped LangChain chat model. The caller is responsible for
         ``.bind_tools()`` / ``.ainvoke()`` etc. Never wrapped in
         ``with_retry``.
+
+    Raises:
+        LocalOnlyError: ``global_config.local_only`` is True and
+            ``provider`` isn't ``"ollama"``.
     """
     name = (model_ref or {}).get("name", "")
     if not isinstance(name, str) or not name.strip():
@@ -64,6 +80,11 @@ def create_langchain_model(provider: str, model_ref: dict) -> Any:
         )
     name = name.strip()
     provider_norm = (provider or "ollama").strip().lower()
+
+    if provider_norm != "ollama" and _local_only_enabled():
+        raise LocalOnlyError(
+            f"Local-Only is on — cloud provider {provider_norm!r} is blocked."
+        )
 
     if provider_norm == "ollama":
         return _create_ollama(name)

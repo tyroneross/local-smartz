@@ -28,6 +28,18 @@ SCHEMA_KEYS: dict[str, type] = {
     # Values are Ollama model strings that take precedence over the
     # profile default when focusing an agent.
     "agent_models": dict,
+    # Privacy/security boundary: when True, every model-construction choke
+    # point (runners.get_runner, runners.factory.create_langchain_model,
+    # agent._create_model) raises LocalOnlyError for provider != "ollama",
+    # and serve.py's cloud-facing endpoints return HTTP 403. bool is a
+    # subclass of int but NOT of str/list, so _validate's generic
+    # isinstance check already accepts bool here and rejects it for the
+    # str/list keys above — no special-casing needed.
+    "local_only": bool,
+    # Role names (from profiles.AGENT_ROLES minus "orchestrator" — the
+    # orchestrator is never disableable) that should be skipped when
+    # building subagent specs / pipeline nodes / the agents list.
+    "disabled_agents": list,
 }
 
 
@@ -43,6 +55,8 @@ def _defaults() -> dict[str, Any]:
         ],
         "active_skills": [],
         "agent_models": {},
+        "local_only": False,
+        "disabled_agents": [],
     }
 
 
