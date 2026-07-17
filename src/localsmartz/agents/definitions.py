@@ -16,7 +16,8 @@ _PROMPTS_DIR = Path(__file__).parent / "prompts"
 def load_prompt(name: str) -> str:
     """Load a subagent prompt template by name.
 
-    Available: planner, researcher, analyzer, writer, reviewer
+    Available: analyzer, fact_checker, orchestrator, planner, reflector,
+    researcher, reviewer, worker, writer
     """
     path = _PROMPTS_DIR / f"{name}.md"
     if not path.exists():
