@@ -8,7 +8,9 @@ from __future__ import annotations
 from typing import Literal, TypedDict
 
 Tier = Literal["mini", "standard", "full"]
-Role = Literal["fast", "strong", "critic", "router", "vision", "coder", "embed"]
+# No "embed" role: nothing in local-smartz embeds/retrieves yet, and the
+# catalog carries no embedding models (see catalog.py). Add both together.
+Role = Literal["fast", "strong", "critic", "router", "vision", "coder"]
 ToolReliability = Literal["strong", "usable", "constrained", "experimental"]
 ReasoningMode = Literal["native", "optional", "off-by-default"]
 

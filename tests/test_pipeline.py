@@ -105,6 +105,39 @@ def test_after_fact_check_hard_caps_at_max_iterations():
     assert _after_fact_check(state) == "writer"
 
 
+# ── Tool registry: plugin + MCP exposure contract ────────────────────────
+
+def test_build_tool_registry_excludes_plugin_and_mcp():
+    """Pin the documented limitation (pipeline.py §"Known limitation"): the
+    graph path builds its registry with plugin tools and MCP OFF. If this
+    ever flips, it must be a deliberate change that also decides which
+    roles may see dynamic ``plugin_*``/``mcp_*`` names and how MCP clients
+    get closed — not an accidental flag flip."""
+    profile = get_profile("lite")
+    with patch("localsmartz.agent._build_tool_set", return_value=(["t"], [])) as bts:
+        tools = pipeline._build_tool_registry(profile)
+    assert tools == ["t"]
+    bts.assert_called_once()
+    kwargs = bts.call_args.kwargs
+    assert kwargs == {"include_plugin_tools": False, "include_mcp": False}
+
+
+def test_role_allow_lists_name_no_dynamic_tools():
+    """Second half of the same contract: no role allow-list names a
+    ``plugin_*`` or ``mcp_*`` tool, so ``_scope_tools_for_role`` would drop
+    dynamic tools even if the registry included them. When a role is
+    intentionally granted dynamic tools, update this test AND the module
+    docstring together."""
+    from localsmartz.profiles import AGENT_ROLES, agent_tool_names
+    for role in AGENT_ROLES:
+        for name in agent_tool_names(role):
+            assert not name.startswith(("plugin_", "mcp_")), (
+                f"{role} allow-list names dynamic tool {name!r}; the graph "
+                "registry excludes plugin/MCP tools, so this would silently "
+                "never bind — see pipeline.py §Known limitation"
+            )
+
+
 # ── Graph compile ───────────────────────────────────────────────────────
 
 def test_build_graph_has_expected_nodes():

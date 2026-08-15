@@ -33,6 +33,20 @@ def test_recommended_sets_match_research_doc() -> None:
     assert {"qwen3.5:9b", "qwen3.5:122b", "qwen3-next:80b"} <= set(full)
 
 
+def test_catalog_has_no_consumerless_embedding_models() -> None:
+    """Every catalog entry must be a chat/tool model some code path can pick.
+    Embedding models were removed 2026-08-15 (no retrieval consumer; and
+    ``benchmarking.py`` selects "first installed model in the registry" as
+    a chat model, so a cataloged embedder was a latent mis-selection).
+    Re-add them together with the first embed/retrieval consumer."""
+    for rec in CATALOG:
+        assert "embedding" not in rec.get("capabilities", []), rec["name"]
+        assert "embed" not in rec.get("roles", []), rec["name"]
+        assert "tools" in rec.get("capabilities", []), (
+            f"{rec['name']} advertises no tool capability — is it a chat model?"
+        )
+
+
 def test_recommended_set_standard_includes_gemma4() -> None:
     names = [r["name"] for r in recommended_for_tier("standard")]
     assert "gemma4:26b" in names

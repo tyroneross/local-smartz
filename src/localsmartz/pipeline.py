@@ -31,6 +31,32 @@ tool subset. Researcher actually calls ``web_search``; analyzer actually runs
 ``python_exec``; fact_checker spot-verifies via ``web_search``. Tool registry
 and scoping reuse ``agent._build_tool_set`` and ``agent._scope_tools`` — no
 duplication with the DeepAgents path.
+
+## Known limitation: plugin skills/tools + MCP tools are NOT exposed here
+
+The graph builds its tool registry with ``include_plugin_tools=False,
+include_mcp=False`` (see ``_build_tool_registry``), and role prompts come
+from ``get_role_prompt`` (``agents/prompts/<role>.md``) rather than
+``agent._build_system_prompt`` — so plugin *skills* are not injected either.
+Two reasons the tools stay off, in order:
+
+1. **Every graph node is a scoped role.** ``_scope_tools_for_role`` keeps
+   only the names in ``AGENT_ROLES[role]["tools"]`` — a static allow-list of
+   built-in tool names (``web_search``, ``python_exec``, ...). Plugin tools
+   are named ``plugin_<plugin>_<cmd>`` and MCP tools ``mcp_<plugin>_<server>_
+   <tool>``, so even if the registry included them, scoping would drop them
+   from every role. Flipping the two flags is a no-op without also deciding
+   which role(s) may see dynamic tools — a product decision, not a wiring bug.
+2. **MCP client lifetime.** ``build_mcp_tools`` spawns stdio subprocesses that
+   need ``close_mcp_clients`` at session end. Specialists are cached across
+   requests (``_build_agents_for_roles`` LRU), so there is no per-request
+   close point yet.
+
+For comparison, the legacy DeepAgents path (``LOCALSMARTZ_PIPELINE=
+orchestrator``) exposes plugin tools only to the *top-level* orchestrator
+agent (its subagents are scoped by the same allow-lists), and MCP only when
+the caller passes ``include_mcp=True`` — today that is the CLI
+``run_research`` path; ``serve.py`` never enables MCP on either backend.
 """
 from __future__ import annotations
 
@@ -148,9 +174,15 @@ def _build_tool_registry(profile: dict) -> list:
 
     Delegates to ``agent._build_tool_set`` to avoid duplicating the
     profile-aware tool selection logic (lite vs full, plugin tools, MCP).
-    Plugin tools and MCP are OFF here — the graph is a tighter surface by
-    design, and MCP lifecycle (close_mcp_clients) doesn't mesh with
-    LangGraph's lifetime model yet.
+
+    Plugin tools and MCP are OFF here — deliberately, and pinned by
+    ``tests/test_pipeline.py::test_build_tool_registry_excludes_plugin_and_mcp``.
+    See the module docstring §"Known limitation" for the full rationale:
+    role allow-lists in ``AGENT_ROLES`` name only built-in tools, so scoping
+    would drop ``plugin_*``/``mcp_*`` tools anyway, and cached specialists
+    have no per-request point at which to ``close_mcp_clients``. Turning
+    these on requires (a) a role-level policy for dynamic tool names and
+    (b) an MCP client lifetime tied to the graph cache — not a flag flip.
     """
     from localsmartz.agent import _build_tool_set
     tools, _mcp_clients = _build_tool_set(

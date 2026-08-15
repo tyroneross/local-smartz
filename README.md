@@ -95,9 +95,9 @@ Local-smartz can load plugins, skills, and MCP servers from external directories
 localsmartz plugins install <path>
 ```
 
-See `localsmartz plugins --help` for the full CLI.
+See `localsmartz plugins --help` for the full CLI (install, list, remove, validate).
 
-> This feature is being wired up in the current build — the exact command surface (list, remove, validate) lands with this release. If `localsmartz plugins` is not yet available on your install, pull latest and re-run the installer.
+> **Runtime exposure (current limitation).** Installed plugins are discoverable and validated via the CLI, but on the **default LangGraph pipeline** none of them reach the model: plugin *skills* are not injected into the role prompts (specialists use `agents/prompts/<role>.md`), and plugin *command tools* and *MCP server tools* are excluded from the registry — every specialist runs with a fixed, role-scoped tool allow-list (see `pipeline.py` §"Known limitation"). They reach the model only on the legacy DeepAgents backend (`LOCALSMARTZ_PIPELINE=orchestrator`), and there only the top-level orchestrator sees plugin skills/tools (full profile); MCP tools additionally require a caller that opts in with `include_mcp=True` (today: the CLI single-query path, not the web UI). Wiring them into the graph is tracked as a design decision, not a flag flip.
 
 ## Quick Start
 
@@ -282,8 +282,7 @@ src/localsmartz/
 ├── artifacts.py          # Output tracking
 ├── validation.py         # Tool call validation + loop detection
 ├── tools/                # 8 custom tools
-├── agents/prompts/       # Subagent prompt templates
-└── domains/core/         # Core domain pack
+└── agents/prompts/       # Subagent prompt templates
 
 app/                      # macOS SwiftUI desktop app
 ```

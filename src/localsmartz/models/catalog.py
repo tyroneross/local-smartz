@@ -6,7 +6,8 @@ Exact mapping from research doc §Tier-matched recommendations (2026-04-23):
 - standard (64):  qwen3.5:9b (fast), qwen3.5:27b (strong), critic shares 9B
                   plus qwen3-coder-next:30b (coder), gemma4:26b (vision alt)
 - full (128+):    qwen3.5:9b (fast), qwen3.5:122b (strong), qwen3-next:80b (reasoning critic)
-- cross-tier:     qwen3-coder-next:30b, lfm2.5-thinking:1.2b, bge-base-en-v1.5
+- cross-tier:     qwen3-coder-next:30b, lfm2.5-thinking:1.2b
+- embeddings:     none — no retrieval consumer exists (see note at end of CATALOG)
 
 CRITICAL: qwen3.5 family ships ``reasoning_mode: "off-by-default"`` — the
 local runner auto-injects ``reasoning: false`` to prevent F22 (tool-call
@@ -197,79 +198,13 @@ CATALOG: list[ModelRec] = [
         "notes": "Ultra-fast router / classifier at any tier.",
         "default_for": [],
     },
-    # ── Embeddings (modernized 2026-04-23) ────────────────────────────────
-    # qwen3-embedding supersedes bge for retrieval in new projects; nomic
-    # kept as battle-tested fallback (66M pulls, widest ecosystem).
-    {
-        "name": "qwen3-embedding:0.6b",
-        "family": "qwen3-embedding",
-        "params_b": 0.6,
-        "size_gb_q4": 0.5,
-        "tier": "mini",
-        "roles": ["embed"],
-        "tool_reliability": "experimental",
-        "reasoning_mode": "optional",
-        "capabilities": ["embedding"],
-        "context_window": 8192,
-        "notes": "Compact embedding for retrieval at any tier.",
-        "default_for": ["embed.mini"],
-    },
-    {
-        "name": "qwen3-embedding:8b",
-        "family": "qwen3-embedding",
-        "params_b": 8.0,
-        "size_gb_q4": 5.0,
-        "tier": "standard",
-        "roles": ["embed"],
-        "tool_reliability": "experimental",
-        "reasoning_mode": "optional",
-        "capabilities": ["embedding"],
-        "context_window": 8192,
-        "notes": "Strong retrieval quality; pairs with qwen-family primary models.",
-        "default_for": ["embed.standard", "embed.full"],
-    },
-    {
-        "name": "embeddinggemma:300m",
-        "family": "embeddinggemma",
-        "params_b": 0.3,
-        "size_gb_q4": 0.3,
-        "tier": "mini",
-        "roles": ["embed"],
-        "tool_reliability": "experimental",
-        "reasoning_mode": "optional",
-        "capabilities": ["embedding"],
-        "context_window": 8192,
-        "notes": "Minimum-footprint embedding option for mini-tier retrieval.",
-        "default_for": [],
-    },
-    {
-        "name": "nomic-embed-text",
-        "family": "nomic-embed-text",
-        "params_b": 0.1,
-        "size_gb_q4": 0.3,
-        "tier": "mini",
-        "roles": ["embed"],
-        "tool_reliability": "experimental",
-        "reasoning_mode": "optional",
-        "capabilities": ["embedding"],
-        "context_window": 8192,
-        "notes": "Battle-tested embedding fallback; 66M pulls, widest ecosystem support.",
-        "default_for": [],
-    },
-    {
-        "name": "bge-base-en-v1.5",
-        "family": "bge-base-en-v1.5",
-        "params_b": 0.1,
-        "size_gb_q4": 0.5,
-        "tier": "mini",
-        "roles": ["embed"],
-        "tool_reliability": "experimental",
-        "reasoning_mode": "optional",
-        "capabilities": ["embedding"],
-        "context_window": 512,
-        "notes": "Legacy embedding — kept for backward compatibility; new projects should use qwen3-embedding.",
-        "default_for": [],
-    },
+    # ── Embeddings: intentionally NOT cataloged ───────────────────────────
+    # local-smartz has no retrieval/vector-store consumer today, so embedding
+    # models (qwen3-embedding, embeddinggemma, nomic-embed-text, bge) were
+    # removed 2026-08-15 after the data-intel audit found the entries dead.
+    # ``benchmarking.py`` also picks "first installed model whose name is in
+    # the registry" as its chat model, so cataloging a non-chat embedding
+    # model was a latent mis-selection. Re-add alongside the first consumer.
 ]
 
 
