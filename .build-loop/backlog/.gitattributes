@@ -1,0 +1,8 @@
+# Managed by build-loop backlog (scripts/backlog.py).
+# INDEX.md is a DERIVED view — on a merge conflict, keep one side and run
+# `python3 scripts/backlog.py sync --repo .` to regenerate it from items/.
+# `merge=ours` avoids conflict markers in a fully-regenerable file.
+# (Enable the driver once per clone if desired:
+#   git config merge.ours.driver true
+#  git treats `merge=ours` as keep-current even without it on most versions.)
+INDEX.md merge=ours
