@@ -38,3 +38,6 @@ build/
 
 # Build-loop runtime artifact (auto-capture log)
 .episodic/
+
+# build-loop runtime state (local only)
+.build-loop/
