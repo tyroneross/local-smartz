@@ -39,7 +39,7 @@ $ localsmartz --check
 Ready to go.
 
 $ localsmartz plugins install ~/Desktop/git-folder/RossLabs-AI-Toolkit/plugins/bookmark
-✓ Installed bookmark at /Users/tyroneross/.localsmartz/plugins/bookmark
+✓ Installed bookmark at ~/.localsmartz/plugins/bookmark
 
 $ localsmartz plugins list
 NAME      VERSION  SKILLS  COMMANDS  DESCRIPTION
@@ -47,9 +47,9 @@ bookmark  0.3.2    1       6         Session context continuity ...
 
 $ localsmartz config get
 KEY            VALUE                                                            SOURCE
-workspace      /Users/tyroneross/Documents/LocalSmartz                          default
-python_path    /Users/tyroneross/.local/share/uv/tools/localsmartz/bin/python3  default
-plugin_paths   /Users/tyroneross/Desktop/git-folder/RossLabs-AI-Toolkit         default
+workspace      ~/Documents/LocalSmartz                          default
+python_path    ~/.local/share/uv/tools/localsmartz/bin/python3  default
+plugin_paths   <repos-root>/RossLabs-AI-Toolkit         default
 ...
 
 $ localsmartz --serve --port 11436 &

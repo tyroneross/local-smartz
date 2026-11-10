@@ -162,8 +162,8 @@ Returns configured research folders.
 
 ```json
 {
-  "workspace": "/Users/tyroneross/Desktop/git-folder/local-smartz",
-  "folders": ["/Users/tyroneross/Documents/research-data"]
+  "workspace": "/Users/example/git-folder/local-smartz",
+  "folders": ["/Users/example/Documents/research-data"]
 }
 ```
 
@@ -173,10 +173,10 @@ Adds a research folder.
 
 ```json
 // Request
-{"path": "~/Documents/research-data"}
+{"path": "/Users/example/Documents/research-data"}
 
 // Response
-{"ok": true, "folders": ["/Users/tyroneross/Documents/research-data"]}
+{"ok": true, "folders": ["/Users/example/Documents/research-data"]}
 ```
 
 Validates path exists and is a directory. Expands `~`. Saves to config via read-modify-write.
@@ -189,7 +189,7 @@ Removes a research folder.
 
 ```json
 // Request
-{"path": "~/Documents/research-data"}
+{"path": "/Users/example/Documents/research-data"}
 
 // Response
 {"ok": true, "folders": []}
@@ -210,7 +210,7 @@ The `done` SSE event already triggers `fetchThreads()`. The issue is a race cond
 {
   "planning_model": "gpt-oss:120b",
   "profile": "full",
-  "folders": ["~/Documents/research-data"]
+  "folders": ["/Users/example/Documents/research-data"]
 }
 ```
 

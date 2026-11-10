@@ -1,7 +1,7 @@
 # Research packet — UI audit + plugin/skill compliance + gemma4 + CLI fix queue
 
 Date: 2026-04-26
-Repo: `/Users/tyroneross/dev/git-folder/local-smartz`
+Repo: `<repo-root>`
 Last commit: `61b2736` (Phase 3 patterns + CLI nouns, just pushed)
 Trigger: User asked for `/build-loop:research` then `/ibr:ibr` iteration covering four linked workstreams.
 
@@ -89,7 +89,7 @@ All four workstreams are **shippable in one ibr-led loop** because they share on
 - `pyproject.toml:52` has `localsmartz = "localsmartz.__main__:main"`. Add `local-smartz = "localsmartz.__main__:main"` on line 53. One-line change.
 
 **Stale `uv tool` install:**
-- User's installed binary still imports `duckduckgo_search`; repo source uses `ddgs`. After `pyproject.toml` bump or version revision, instruct `uv tool upgrade localsmartz` (or reinstall from local path with `uv tool install --from /Users/tyroneross/dev/git-folder/local-smartz localsmartz`).
+- User's installed binary still imports `duckduckgo_search`; repo source uses `ddgs`. After `pyproject.toml` bump or version revision, instruct `uv tool upgrade localsmartz` (or reinstall from local path with `uv tool install --from <repo-root> localsmartz`).
 
 **Tool-call dedup + intent retention:**
 - Both live in the agent loop, not the CLI. Likely in `src/localsmartz/agent.py` or `pipeline.py`. Dedup: cache `(tool_name, sorted(args.items()))` hash within a turn. Intent retention: keep `original_user_prompt` in `ThreadState` and re-inject as system message after `(tool_name not valid)` events instead of falling through to fallback.

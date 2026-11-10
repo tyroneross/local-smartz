@@ -150,7 +150,7 @@ Open on `langchain-ai/deepagents`: request optional provider extras
 ## Reproducing
 
 ```bash
-cd /Users/tyroneross/Desktop/git-folder/local-smartz
+cd <repo-root>
 uv tree --no-dev | grep -E "anthropic|google" | head
 du -sh .venv/lib/python3.*/site-packages/{langchain_anthropic,anthropic,langchain_google_genai,google}
 ```

@@ -1,7 +1,7 @@
 # Handoff for Codex — local-smartz session 2026-04-26
 
 **Branch:** `main` · **HEAD:** `35be23a` · **Origin:** synced.
-**Repo:** `/Users/tyroneross/dev/git-folder/local-smartz`
+**Repo:** `<repo-root>`
 **Predecessor:** Claude Opus 4.7 (10 commits, `61b2736 → dda4027`) + Codex continuation (`50701ec`, `89ebaad`, `35be23a`).
 
 ---
@@ -32,7 +32,7 @@ Reflection / Orchestrator-Workers / Parallelization patterns + S1 runner factory
 - **Trace hint:** `→ next: <model>` above input when prompt non-empty + not streaming.
 - **Fonts:** global bump (10→12, 11→13, 12→14, 13→15, 14→16, 16→18) across 11 view files.
 - **Toolbar model name:** `BackendStatusResponse` decodes `effective_model`; `refreshStatus` populates `currentModel` on launch from /api/status (the 30s poll runs immediately).
-- **CRITICAL perf unblock — backend reinstall:** macOS `BackendManager` spawns from `~/.local/bin/localsmartz` (priority 2 in `resolveBackendSpawn` at `app/LocalSmartz/Services/BackendManager.swift:307`). That uv-tool install was stale all session — predating every Python fix above. Reinstalled with `uv tool install --reinstall --from /Users/tyroneross/dev/git-folder/local-smartz localsmartz`. Now serves repo source.
+- **CRITICAL perf unblock — backend reinstall:** macOS `BackendManager` spawns from `~/.local/bin/localsmartz` (priority 2 in `resolveBackendSpawn` at `app/LocalSmartz/Services/BackendManager.swift:307`). That uv-tool install was stale all session — predating every Python fix above. Reinstalled with `uv tool install --reinstall --from <repo-root> localsmartz`. Now serves repo source.
 
 ### Claude handoff test state before Codex continuation
 - Python: **648 passed**, 4 skipped, 0 failed.

@@ -61,7 +61,7 @@
 
 ## DMG
 
-- Latest: 92 MB at `/Users/tyroneross/Desktop/git-folder/local-smartz/app/LocalSmartz-Installer.dmg`
+- Latest: 92 MB at `<repo-root>/app/LocalSmartz-Installer.dmg`
 - Installed at `/Applications/Local Smartz.app` — verified IBR scan + screenshot
 
 ## Known remaining follow-ups

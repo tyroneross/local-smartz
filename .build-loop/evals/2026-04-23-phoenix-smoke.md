@@ -113,7 +113,7 @@ What this means practically:
 
 ## Provenance
 
-- Test process: `/Users/tyroneross/dev/git-folder/local-smartz/.venv/bin/python`
+- Test process: `<repo-root>/.venv/bin/python`
 - Pattern file: `src/localsmartz/patterns/critic_loop.py`
 - Runner: `src/localsmartz/runners/local_ollama.py::LocalOllamaRunner`
 - Observability helper: `src/localsmartz/observability.py::get_tracer`

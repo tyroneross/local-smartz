@@ -1,7 +1,7 @@
 # Goal — LLM Provider Optimizations
 
 ## Concrete Goal
-Land 10 commits in dependency-correct order in `/Users/tyroneross/dev/git-folder/local-smartz/`, each passing `uv run pytest`. End state: cloud providers (Anthropic, OpenAI, Groq) are first-class fallbacks with prompt caching, real usage metrics, retry/backoff, parallel workers, streaming, tier-aware routing, budget warnings, pricing freshness, and hygiene parity with Ollama.
+Land 10 commits in dependency-correct order in `<repo-root>/`, each passing `uv run pytest`. End state: cloud providers (Anthropic, OpenAI, Groq) are first-class fallbacks with prompt caching, real usage metrics, retry/backoff, parallel workers, streaming, tier-aware routing, budget warnings, pricing freshness, and hygiene parity with Ollama.
 
 ## Scoring Criteria
 1. **Tests pass at every commit** — code grader: `uv run pytest -x` exits 0 after each commit. Pass = green; Fail = any commit's test run fails.

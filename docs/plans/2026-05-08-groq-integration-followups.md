@@ -229,7 +229,7 @@ are non-API-contract changes).
 
 ## Plan-verify
 
-Run `python3 /Users/tyroneross/.claude/plugins/cache/rosslabs-ai-toolkit/build-loop/0.10.0/scripts/plan_verify.py docs/plans/2026-05-08-groq-integration-followups.md --repo "$PWD" --json`.
+Run `python3 <build-loop-plugin-root>/scripts/plan_verify.py docs/plans/2026-05-08-groq-integration-followups.md --repo "$PWD" --json`.
 
 ## Plan-critic
 

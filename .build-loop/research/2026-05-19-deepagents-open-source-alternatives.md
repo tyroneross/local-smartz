@@ -1,6 +1,6 @@
 # DeepAgents open-source alternatives for Local Smartz
 
-- **Project**: `/Users/tyroneross/dev/git-folder/local-smartz`
+- **Project**: `<repo-root>`
 - **Date**: 2026-05-19
 - **Mode**: build-loop research, balanced
 - **Question**: Are there better open-source alternatives to DeepAgents for Local Smartz, and what is the best path?
