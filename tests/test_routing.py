@@ -39,7 +39,7 @@ def test_select_research_runtime_respects_graph_disable(monkeypatch):
 def test_coding_intent_detects_airplane_harness_prompt():
     prompt = (
         "how can we use localsmartz as a coding harness, can we use some "
-        "of the on device plugins and /Users/tyroneross/dev/git-folder/build-loop"
+        "of the on device plugins and /Users/example/dev/git-folder/build-loop"
     )
     assert is_coding_intent(prompt) is True
     assert is_coding_loop_intent(prompt) is False

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -18,12 +19,8 @@ from localsmartz.plugins.validator import (
 )
 
 
-REAL_BOOKMARK = Path(
-    "/Users/tyroneross/Desktop/git-folder/RossLabs-AI-Toolkit/plugins/bookmark"
-)
-REAL_PLUGIN_SYNC = Path(
-    "/Users/tyroneross/Desktop/git-folder/RossLabs-AI-Toolkit/plugins/plugin-sync"
-)
+REAL_BOOKMARK = Path(os.environ.get("ROSSLABS_AI_TOOLKIT", str(Path.home() / "dev/git-folder/RossLabs-AI-Toolkit"))) / "plugins/bookmark"
+REAL_PLUGIN_SYNC = Path(os.environ.get("ROSSLABS_AI_TOOLKIT", str(Path.home() / "dev/git-folder/RossLabs-AI-Toolkit"))) / "plugins/plugin-sync"
 
 
 # ---------------------------------------------------------------------------

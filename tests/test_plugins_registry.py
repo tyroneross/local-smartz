@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -153,9 +154,7 @@ def test_standalone_skill_discovered(tmp_path):
 
 
 def test_validate_on_real_bookmark():
-    real = Path(
-        "/Users/tyroneross/Desktop/git-folder/RossLabs-AI-Toolkit/plugins/bookmark"
-    )
+    real = Path(os.environ.get("ROSSLABS_AI_TOOLKIT", str(Path.home() / "dev/git-folder/RossLabs-AI-Toolkit"))) / "plugins/bookmark"
     if not real.is_dir():
         pytest.skip("real plugin not available")
     reg = Registry(Path("/tmp/lsz-registry-smoke"))

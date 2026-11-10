@@ -33,7 +33,7 @@ def test_redact_pii_attributes_redacts_payloads_and_patterns() -> None:
     attrs = observability.redact_pii_attributes({
         "llm.input_messages": "email me at person@example.com",
         "http.url": "https://example.test/users/person@example.com",
-        "file.path": "/Users/tyroneross/dev/git-folder/local-smartz/private.csv",
+        "file.path": "/Users/example/dev/git-folder/local-smartz/private.csv",
         "auth.header": "Bearer abcdefghijklmnopqrstuvwxyz123456",
         "api_key": "sk_test_12345678901234567890",
         "model.name": "gpt-oss:20b",
