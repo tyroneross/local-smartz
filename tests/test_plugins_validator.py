@@ -19,8 +19,8 @@ from localsmartz.plugins.validator import (
 )
 
 
-REAL_BOOKMARK = Path(os.environ.get("ROSSLABS_AI_TOOLKIT", str(Path.home() / "dev/git-folder/RossLabs-AI-Toolkit"))) / "plugins/bookmark"
-REAL_PLUGIN_SYNC = Path(os.environ.get("ROSSLABS_AI_TOOLKIT", str(Path.home() / "dev/git-folder/RossLabs-AI-Toolkit"))) / "plugins/plugin-sync"
+REAL_BOOKMARK = Path(os.environ.get("ROSSLABS_AI_TOOLKIT", "/nonexistent-rosslabs-ai-toolkit")) / "plugins/bookmark"
+REAL_PLUGIN_SYNC = Path(os.environ.get("ROSSLABS_AI_TOOLKIT", "/nonexistent-rosslabs-ai-toolkit")) / "plugins/plugin-sync"
 
 
 # ---------------------------------------------------------------------------

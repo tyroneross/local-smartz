@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 
-REAL_BOOKMARK_PATH = Path(os.environ.get("ROSSLABS_AI_TOOLKIT", str(Path.home() / "dev/git-folder/RossLabs-AI-Toolkit"))) / "plugins/bookmark"
+REAL_BOOKMARK_PATH = Path(os.environ.get("ROSSLABS_AI_TOOLKIT", "/nonexistent-rosslabs-ai-toolkit")) / "plugins/bookmark"
 
 
 @pytest.fixture
